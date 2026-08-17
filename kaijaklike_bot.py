@@ -1012,8 +1012,15 @@ def _round_price_01(x):
     ទសភាគទី 2 ≥ 5 ត្រូវបង្គត់ឡើង, < 5 បង្គត់ចុះ។ ឧ. $1.23 → $1.2, $1.25 → $1.3,
     $1.27 → $1.3 ។ ប្រើ Decimal ដើម្បីជៀសវាង floating-point rounding ខុសឆ្គង
     (round() ធម្មតារបស់ Python ប្រើ banker's rounding ដែលអាចបង្គត់ខុសពីអ្វី
-    ដែលមនុស្សរំពឹងទុក)។"""
-    return float(_Decimal(str(x)).quantize(_Decimal("0.1"), rounding=_ROUND_HALF_UP))
+    ដែលមនុស្សរំពឹងទុក)។
+    ⚠️ Guard (កែ 2026-08-17): បើតម្លៃដើមធំជាង 0 ប៉ុន្តែតូចជាង $0.05, ការបង្គត់
+    ធម្មតានឹងបង្គត់ចុះទៅ <b>$0.00</b> — ធ្វើឲ្យសេវាមួយចំនួន (qty តូច × rate
+    ទាប) បង្ហាញតម្លៃ $0.0000 ខណៈវាមិនមែនឥតគិតថ្លៃទេ។ ក្នុងករណីនេះ បង្គត់ឡើង
+    ទៅ $0.10 ជំនួសវិញ ដើម្បីកុំឲ្យលក់ក្នុងតម្លៃ $0 ។"""
+    r = float(_Decimal(str(x)).quantize(_Decimal("0.1"), rounding=_ROUND_HALF_UP))
+    if r == 0.0 and float(x) > 0:
+        return 0.1
+    return r
 
 def _smm_price_for_order(slug, qty):
     """Get actual price for an order (handles flat_price services)"""
