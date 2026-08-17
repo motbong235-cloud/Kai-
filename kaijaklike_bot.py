@@ -1320,7 +1320,7 @@ def handle_document(message):
         logger.error(f"[restore] {e}")
         bot.send_message(uid, f"❌ Restore បរាជ័យ: {e}", reply_markup=admin_kb())
 
-
+def _smm_api_post(params, timeout=25):
     url = smm_api.get("url", "")
     if not url: return None
     try:
