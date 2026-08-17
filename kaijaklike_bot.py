@@ -236,7 +236,7 @@ if not _CONTROL_KEY_ENV:
         "→ សូមកំណត់ CONTROL_KEY ជា env var នៅ Render ដើម្បីឲ្យ key ថេរ។", CONTROL_KEY)
 else:
     CONTROL_KEY = _CONTROL_KEY_ENV
-CONTROL_PORT       = int(os.getenv("PORT") or os.getenv("CONTROL_PORT", "5056"))   # 👈 Render ចាត់ចែង PORT ស្វ័យប្រវត្តិ — ត្រូវ bind ទៅ PORT នោះទើប Web Service ដឹងថា App ដើរ (Local/Termux ប្រើ CONTROL_PORT ធម្មតា)
+CONTROL_PORT       = int(os.getenv("CONTROL_PORT", "5056"))   # 👈 ប្តូរ port នេះបើដំណើរការ bot ច្រើនច្បាប់ក្នុងម៉ាស៊ីនតែមួយ (5056, 5057, 5058...)
 
 # ── Startup guard — ការពារកុំឲ្យ deploy ដោយគ្មាន credential សំខាន់ៗ ──────────
 if __name__ == "__main__" and not INSTANCE_NAME:
@@ -1295,10 +1295,17 @@ def handle_document(message):
         bot.send_message(uid,
             f"✅ <b>Restore ជោគជ័យ!</b> ({len(names)} files)\n"
             f"🛡️ Data ចាស់បានចម្លងទុកនៅ <code>{os.path.basename(safety_dir)}</code> ជាមុនសិន (ការពារបញ្ហា)\n\n"
-            f"⚠️ <b>ត្រូវ Restart Bot ដើម្បីអោយ Data ថ្មីដំណើរការ</b> "
-            f"(data ដែល load ចូល RAM រួចហើយ មិនប្តូរដោយស្វ័យប្រវត្តិទេ)។\n"
-            f"👉 ចូល Render Dashboard → Manual Restart, ឬប្រើ <code>/restart</code> endpoint។",
-            parse_mode="HTML", reply_markup=admin_kb())
+            f"🔄 <b>កំពុង Restart Bot ស្វ័យប្រវត្តិ...</b> (ត្រូវការ ដើម្បីអោយ Data ថ្មីចូល RAM — "
+            f"គ្រាន់តែសរសេរជាន់ file មិនគ្រប់គ្រាន់ទេ)។ រង់ចាំ ~5 វិនាទី រួចសាកល្បង /start វិញ។",
+            parse_mode="HTML")
+        def _auto_restart():
+            time.sleep(1.5)
+            try: bot.stop_polling()
+            except Exception: pass
+            time.sleep(1)
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        threading.Thread(target=_auto_restart, daemon=True).start()
+        return
     except zipfile.BadZipFile:
         bot.send_message(uid, "❌ File នេះមិនមែនជា zip ត្រឹមត្រូវទេ។ ផ្ញើម្តងទៀត ឬ ✕ Cancel។",
                           reply_markup=cancel_kb())
@@ -1746,7 +1753,7 @@ def _camrapid_create(uid, amount, reference):
                       json=payload,
                       headers={"Content-Type": "application/json",
                                "Accept": "application/json"},
-                      timeout=25)
+                      timeout=15)
         logger.info(f"[camrapid_create] HTTP {r.status_code}")
         data = r.json()
         logger.info(f"[camrapid_create] resp={data}")
@@ -1756,15 +1763,6 @@ def _camrapid_create(uid, amount, reference):
         return None
     except Exception as e:
         logger.error(f"[camrapid_create] exception: {e}")
-        try:
-            bot.send_message(ADMIN_ID,
-                f"🚨 <b>CamRapidPay Create QR Error</b>\n"
-                f"👤 uid=<code>{uid}</code> ref=<code>{reference}</code>\n"
-                f"💰 ${amount}\n"
-                f"⚠️ <code>{e}</code>",
-                parse_mode="HTML")
-        except Exception as _e:
-            logger.debug(f"[silent] {_e}")
         return None
 
 def _camrapid_check(reference) -> bool:
