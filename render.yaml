@@ -2,11 +2,15 @@ services:
   - type: web
     name: kaijaklike-bot
     runtime: python
-    plan: free
+    plan: starter
     region: singapore
     buildCommand: pip install -r requirements.txt
     startCommand: python kaijaklike_bot.py
     healthCheckPath: /health
+    disk:
+      name: kaijaklike-data
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: BOT_TOKEN
         sync: false
@@ -19,7 +23,7 @@ services:
       - key: CONTROL_KEY
         sync: false
       - key: DATA_DIR
-        value: .
+        value: /var/data
       - key: BOT_DISPLAY_NAME
         value: KaiJakLike
       - key: BOT_WELCOME_MSG
