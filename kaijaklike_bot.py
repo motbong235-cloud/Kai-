@@ -3625,25 +3625,11 @@ def handle_photo(message):
             found = _extract_custom_emoji(message)
             if not found:
                 bot.send_message(uid,
-                    f"❌ រកមិនឃើញ premium emoji ក្នុងសារនោះទេ។ ផ្ញើ Premium version របស់ {ch} ម្តងទៀត ឬ ✕ Cancel។",
+                    f"❌ រកមិនឃើញ premium emoji ក្នុងសារនោះទេ។ ផ្ញើ Emoji ថ្មី ឬ ✕ Cancel។",
                     parse_mode="HTML", reply_markup=cancel_kb())
                 return
-            exact = [eid for c, eid in found if _norm_vs(c) == _norm_vs(ch)]  # ✅ tolerant of VS16 diffs
-            if not exact:
-                # ⚠️ គ្មាន underlying char ណាដូច ch ដែលកំពុងកំណត់ទេ — កុំទាយ/ចាប់ខុស
-                # (មុននេះ code ចាប់យក found[0] ដោយស្វ័យប្រវត្តិ ធ្វើឲ្យ emoji ខុសទំនង
-                # ត្រូវបានផ្គូផ្គងទៅ ch ខុស — បង្ករ icon ស្ទួន/ខុសទីតាំងលើ button)
-                detected = ", ".join(f"{c}" for c, _ in found)
-                bot.send_message(uid,
-                    f"⚠️ <b>Emoji មិនត្រូវគ្នា!</b>\n"
-                    f"កំពុងកំណត់: {ch}\n"
-                    f"ប៉ុន្តែសារនេះមាន: {detected}\n\n"
-                    f"សូមប្រាកដថា premium emoji ដែលអ្នកផ្ញើ គឺជា <b>version premium របស់ {ch}</b> ពិតប្រាកដ "
-                    f"(តាមធម្មតា ត្រូវជ្រើសរើសពី emoji picker ដោយវាយ {ch} រួចចុច premium skin — "
-                    f"កុំចម្លង/forward emoji ផ្សេង)។ ផ្ញើម្តងទៀត ឬ ✕ Cancel។",
-                    parse_mode="HTML", reply_markup=cancel_kb())
-                return
-            match_eid = exact[0]
+            # ✅ ទទួល emoji ណាក៏បាន (មិនតម្រូវឲ្យដូច ch ដើមទេ — តាមសំណើអ្នកប្រើ)
+            match_eid = found[0][1]
             EMOJI_MAP[ch] = match_eid
             _save(EMOJI_FILE, EMOJI_MAP)
             waiting.pop(uid, None)
@@ -3720,22 +3706,11 @@ def handle_sticker(message):
         found = _extract_custom_emoji(message)
         if not found:
             bot.send_message(uid,
-                f"❌ រកមិនឃើញ premium emoji ក្នុងសារនោះទេ។ ផ្ញើ Premium version របស់ {ch} ម្តងទៀត ឬ ✕ Cancel។",
+                f"❌ រកមិនឃើញ premium emoji ក្នុងសារនោះទេ។ ផ្ញើ Emoji ថ្មី ឬ ✕ Cancel។",
                 parse_mode="HTML", reply_markup=cancel_kb())
             return
-        exact = [eid for c, eid in found if _norm_vs(c) == _norm_vs(ch)]
-        if not exact:
-            detected = ", ".join(f"{c}" for c, _ in found)
-            bot.send_message(uid,
-                f"⚠️ <b>Emoji មិនត្រូវគ្នា!</b>\n"
-                f"កំពុងកំណត់: {ch}\n"
-                f"ប៉ុន្តែសារនេះមាន: {detected}\n\n"
-                f"សូមប្រាកដថា premium emoji ដែលអ្នកផ្ញើ គឺជា <b>version premium របស់ {ch}</b> ពិតប្រាកដ "
-                f"(តាមធម្មតា ត្រូវជ្រើសរើសពី emoji picker ដោយវាយ {ch} រួចចុច premium skin — "
-                f"កុំចម្លង/forward emoji ផ្សេង)។ ផ្ញើម្តងទៀត ឬ ✕ Cancel។",
-                parse_mode="HTML", reply_markup=cancel_kb())
-            return
-        match_eid = exact[0]
+        # ✅ ទទួល emoji ណាក៏បាន (មិនតម្រូវឲ្យដូច ch ដើមទេ — តាមសំណើអ្នកប្រើ)
+        match_eid = found[0][1]
         EMOJI_MAP[ch] = match_eid
         _save(EMOJI_FILE, EMOJI_MAP)
         waiting.pop(uid, None)
@@ -3827,24 +3802,11 @@ def handle_msg(message):
             found = _extract_custom_emoji(message)
             if not found:
                 bot.send_message(uid,
-                    f"❌ រកមិនឃើញ premium emoji ក្នុងសារនោះទេ។ ផ្ញើ Premium version របស់ {ch} ម្តងទៀត ឬ ✕ Cancel។",
+                    f"❌ រកមិនឃើញ premium emoji ក្នុងសារនោះទេ។ ផ្ញើ Emoji ថ្មី ឬ ✕ Cancel។",
                     parse_mode="HTML", reply_markup=cancel_kb())
                 return  # stay in loop, waiting untouched
-            # ត្រូវការ exact match ទៅនឹង underlying char របស់ ch ដែលកំពុងកំណត់ —
-            # កុំចាប់យក emoji ដំបូងគេប្រសិនបើមិនត្រូវគ្នា (ធ្លាប់បង្កើត mismatch)
-            exact = [eid for c, eid in found if _norm_vs(c) == _norm_vs(ch)]  # ✅ tolerant of VS16 diffs
-            if not exact:
-                detected = ", ".join(f"{c}" for c, _ in found)
-                bot.send_message(uid,
-                    f"⚠️ <b>Emoji មិនត្រូវគ្នា!</b>\n"
-                    f"កំពុងកំណត់: {ch}\n"
-                    f"ប៉ុន្តែសារនេះមាន: {detected}\n\n"
-                    f"សូមប្រាកដថា premium emoji ដែលអ្នកផ្ញើ គឺជា <b>version premium របស់ {ch}</b> ពិតប្រាកដ "
-                    f"(តាមធម្មតា ត្រូវជ្រើសរើសពី emoji picker ដោយវាយ {ch} រួចចុច premium skin — "
-                    f"កុំចម្លង/forward emoji ផ្សេង)។ ផ្ញើម្តងទៀត ឬ ✕ Cancel។",
-                    parse_mode="HTML", reply_markup=cancel_kb())
-                return
-            match_eid = exact[0]
+            # ✅ ទទួល emoji ណាក៏បាន (មិនតម្រូវឲ្យដូច ch ដើមទេ — តាមសំណើអ្នកប្រើ)
+            match_eid = found[0][1]
             EMOJI_MAP[ch] = match_eid
             _save(EMOJI_FILE, EMOJI_MAP)
             waiting.pop(uid, None)
