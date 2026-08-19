@@ -69,6 +69,11 @@ _EMOJI_CHAR_LIST = [
     '★', '🎁', '🧵', '👀', '😍', '🛡️', '📏', '📎', '🔓', '⬅️',
     '✨', '➡️', '🔌', '🔵', '🟡', '📤', '🔕', '📁', '🚀', '←',
     '⏱', '🆔', '▶️', '🏦',
+    # ⚠️ បន្ថែម 2026-08-17 — Emoji ថ្មីៗពី feature ថ្មីៗ (Daily Report, Preview,
+    # Top Services, Backup, Profit Report, Manual Deposit) ដែលមុននេះមិនស្ថិត
+    # ក្នុងបញ្ជីនេះទេ ធ្វើឲ្យមិនអាចប្តូរជា Premium Emoji បាន — រកឃើញដោយស្កេន
+    # ប៊ូតុងទាំងអស់ក្នុងកូដ ធៀបនឹងបញ្ជីនេះ។
+    '⏰', '🎨', '🏆', '💾', '📈', '📷', '🧾',
 ]
 EMOJI_MAP = {ch: None for ch in _EMOJI_CHAR_LIST}
 # ធ្វើ regex pattern មួយសម្រាប់ចាប់ emoji នៅដើម string (រួមទាំង variation
@@ -2046,6 +2051,7 @@ def admin_kb():
            KeyboardButton("🏆 Top Services/Clients", color="active"))
     kb.row(KeyboardButton("⏰ Daily Report Auto", color="active"))
     kb.row(KeyboardButton("💾 Backup Data", color="active"))
+    kb.row(KeyboardButton("🧾 QR ដាក់លុយដោយដៃ", color="active"))
     kb.row("━━━ 💰 ហិរញ្ញវត្ថុ ━━━")
     kb.row(KeyboardButton("💰 កាបូបលុយ",   color="active"),
            KeyboardButton("💳 ប្រាក់បញ្ញើ", color="active"))
@@ -2168,6 +2174,10 @@ def deposit_amt_kb(uid=None, promo_code=None):
     btns.append([InlineKeyboardButton(
         "✏️ ចំនួនផ្សេង" if lang=="kh" else "✏️ Custom Amount",
         callback_data="dep:custom", color="progress")])
+    if manual_qr_cfg.get("enabled") and manual_qr_cfg.get("photo_id"):
+        btns.append([InlineKeyboardButton(
+            "🧾 ដាក់លុយដោយដៃ (Manual)" if lang=="kh" else "🧾 Manual Deposit",
+            callback_data="dep:manual", color="active")])
     return InlineKeyboardMarkup(btns)
 
 def smm_cat_kb():
@@ -2502,6 +2512,69 @@ WELCOME_SETTINGS_FILE = _dpath("smm_welcome.json")
 welcome_cfg = _load(WELCOME_SETTINGS_FILE, {"photo_id": ""})
 
 # ═══════════════════════════════════════════════════════════
+#  MANUAL DEPOSIT (ដាក់លុយដោយដៃ) — User ស្កេន QR ថេរដែល Admin កំណត់ផ្ទាល់
+#  ផ្ញើភស្តុតាង (Screenshot) មក Admin ត្រួតពិនិត្យ + អនុម័តដោយដៃ
+# ═══════════════════════════════════════════════════════════
+MANUAL_QR_FILE = _dpath("manual_qr.json")
+manual_qr_cfg  = _load(MANUAL_QR_FILE, {"enabled": False, "photo_id": "", "info": ""})
+
+MANUAL_DEP_FILE = _dpath("manual_deposits.json")
+manual_deps     = _load(MANUAL_DEP_FILE, {})
+
+def _gen_manual_dep_id():
+    return "MD" + str(int(time.time()))[-8:] + str(len(manual_deps) % 100).zfill(2)
+
+def manual_qr_admin_kb():
+    on = manual_qr_cfg.get("enabled", False)
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("📷 ប្តូររូប QR", callback_data="mqr:photo", color="active"))
+    kb.add(InlineKeyboardButton("✏️ ប្តូរព័ត៌មាន (ឈ្មោះ/លេខគណនី)", callback_data="mqr:info", color="active"))
+    kb.add(InlineKeyboardButton(("🔴 បិទ" if on else "🟢 បើក") + " Manual Deposit",
+                                 callback_data="mqr:toggle", color=("danger" if on else "success")))
+    return kb
+
+def _manual_qr_status_text():
+    on = manual_qr_cfg.get("enabled", False)
+    has_photo = bool(manual_qr_cfg.get("photo_id"))
+    return (f"🧾 <b>QR ដាក់លុយដោយដៃ (Manual Deposit)</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"ស្ថានភាព: {'🟢 បើក' if on else '🔴 បិទ'}\n"
+            f"រូប QR: {'✅ បានកំណត់' if has_photo else '❌ មិនទាន់មាន'}\n"
+            f"ព័ត៌មាន: {manual_qr_cfg.get('info') or '<i>មិនទាន់មាន</i>'}\n\n"
+            f"👇 គ្រប់គ្រង:")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("mqr:"))
+def cb_mqr_admin(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID:
+        bot.answer_callback_query(call.id); return
+    action = call.data.split(":", 1)[1]
+    if action == "photo":
+        bot.answer_callback_query(call.id)
+        waiting[uid] = "await_manual_qr_photo"
+        bot.send_message(uid, "📷 សូមផ្ញើរូប QR (Bakong/ធនាគារ) ដែលចង់ឲ្យ User ស្កេន:",
+                          reply_markup=cancel_kb())
+    elif action == "info":
+        bot.answer_callback_query(call.id)
+        waiting[uid] = "await_manual_qr_info"
+        bot.send_message(uid,
+            "✏️ សូមផ្ញើព័ត៌មានបង្ហាញអោយ User (ឧ. ឈ្មោះម្ចាស់គណនី, លេខទូរស័ព្ទ/Bakong ID):",
+            reply_markup=cancel_kb())
+    elif action == "toggle":
+        manual_qr_cfg["enabled"] = not manual_qr_cfg.get("enabled", False)
+        if manual_qr_cfg["enabled"] and not manual_qr_cfg.get("photo_id"):
+            manual_qr_cfg["enabled"] = False
+            bot.answer_callback_query(call.id, "❌ សូមកំណត់រូប QR ជាមុនសិន!", show_alert=True)
+        else:
+            _save(MANUAL_QR_FILE, manual_qr_cfg)
+            bot.answer_callback_query(call.id, "✅ រួចរាល់")
+        try:
+            bot.edit_message_text(_manual_qr_status_text(), chat_id=uid,
+                message_id=call.message.message_id, parse_mode="HTML", reply_markup=manual_qr_admin_kb())
+        except Exception as _e:
+            logger.debug(f"[silent] {_e}")
+
+# ═══════════════════════════════════════════════════════════
 #  FORCE-SUBSCRIBE (ការពារ User ក្លែងក្លាយ) — តម្រូវឲ្យ User ចូល Channel
 #  មុននឹងប្រើប្រាស់ Bot បាន។ Admin/Sub-admin មិនប៉ះពាល់ទេ។
 # ═══════════════════════════════════════════════════════════
@@ -2669,6 +2742,73 @@ def cb_dep(call):
             "✏️ <b>Enter amount (USD):</b>\ne.g. <code>3</code> or <code>7.50</code>",
             parse_mode="HTML", reply_markup=cancel_kb())
         return
+
+    # ── Manual Deposit (QR ថេរ + ភស្តុតាង) ──
+    if val == "manual":
+        if not (manual_qr_cfg.get("enabled") and manual_qr_cfg.get("photo_id")):
+            bot.send_message(uid, "❌ Manual Deposit មិនទាន់មានទេ។", reply_markup=main_kb(uid))
+            return
+        waiting[uid] = "await_manual_dep_amount"
+        info = manual_qr_cfg.get("info") or ""
+        caption = (f"🧾 <b>ដាក់លុយដោយដៃ (Manual Deposit)</b>\n"
+                   f"━━━━━━━━━━━━━━━━━━\n"
+                   f"{info}\n\n"
+                   f"👇 ស្កេន QR ខាងលើ ផ្ទេរប្រាក់ រួចវាយចំនួនប្រាក់ដែលបានផ្ទេរ:")
+        try:
+            bot.send_photo(uid, manual_qr_cfg["photo_id"], caption=caption,
+                            parse_mode="HTML", reply_markup=cancel_kb())
+        except Exception as _e:
+            logger.debug(f"[silent] {_e}")
+            bot.send_message(uid, caption, parse_mode="HTML", reply_markup=cancel_kb())
+        return
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("mdep:"))
+def cb_mdep_admin(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID:
+        bot.answer_callback_query(call.id); return
+    _, action, dep_id = call.data.split(":", 2)
+    dep = manual_deps.get(dep_id)
+    if not dep:
+        bot.answer_callback_query(call.id, "❌ រកមិនឃើញសំណើនេះទេ (ប្រហែលត្រូវបានធ្វើរួច)។", show_alert=True)
+        return
+    if dep.get("status") != "pending":
+        bot.answer_callback_query(call.id, f"⚠️ សំណើនេះត្រូវបានធ្វើរួច ({dep.get('status')})", show_alert=True)
+        return
+    target_uid = int(dep["uid"])
+    amount = float(dep["amount"])
+    if action == "ok":
+        bonus = _auto_dep_bonus(amount)
+        total = round(amount + bonus, 2)
+        add_bal(target_uid, total)
+        dep["status"] = "approved"; dep["approved_amount"] = total
+        _save(MANUAL_DEP_FILE, manual_deps)
+        bot.answer_callback_query(call.id, "✅ អនុម័តរួច")
+        new_b = bal(target_uid)
+        msg = (f"✅ <b>ដាក់លុយបានជោគជ័យ!</b> 🎉\n━━━━━━━━━━━━━━━━━━\n"
+               f"💰 បានទទួល: <b>${amount:.2f}</b>")
+        if bonus > 0:
+            msg += f"\n🎁 Bonus: <b>+${bonus:.2f}</b>"
+        msg += f"\n💳 Balance: <b>${new_b:.2f}</b>"
+        try: bot.send_message(target_uid, msg, parse_mode="HTML", reply_markup=main_kb(target_uid))
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        try:
+            bot.edit_message_caption(f"✅ <b>អនុម័តរួច</b> — ${amount:.2f} (+${bonus:.2f} bonus)\n👤 <code>{dep['uid']}</code>",
+                chat_id=uid, message_id=call.message.message_id, parse_mode="HTML")
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+    else:
+        dep["status"] = "rejected"
+        _save(MANUAL_DEP_FILE, manual_deps)
+        bot.answer_callback_query(call.id, "❌ បដិសេធរួច")
+        try:
+            bot.send_message(target_uid,
+                f"❌ <b>សំណើដាក់លុយត្រូវបានបដិសេធ</b>\n💰 ${amount:.2f}\n\nសូមទាក់ទង Admin បើមានចម្ងល់។",
+                parse_mode="HTML", reply_markup=main_kb(target_uid))
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        try:
+            bot.edit_message_caption(f"❌ <b>បដិសេធរួច</b> — ${amount:.2f}\n👤 <code>{dep['uid']}</code>",
+                chat_id=uid, message_id=call.message.message_id, parse_mode="HTML")
+        except Exception as _e: logger.debug(f"[silent] {_e}")
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("back:"))
 def cb_back(call):
@@ -3618,6 +3758,51 @@ def _do_broadcast(admin_uid, message):
 def handle_photo(message):
     uid = message.chat.id
     step = waiting.get(uid)
+
+    # ── User (រួមទាំង Admin បើសាកល្បង) ផ្ញើភស្តុតាង ដាក់លុយដោយដៃ ──────
+    if isinstance(step, dict) and step.get("step") == "await_manual_dep_proof":
+        amount   = float(step.get("amount", 0))
+        uid_str  = str(uid)
+        dep_id   = _gen_manual_dep_id()
+        proof_id = message.photo[-1].file_id
+        manual_deps[dep_id] = {
+            "uid": uid_str, "amount": amount, "proof_photo_id": proof_id,
+            "status": "pending", "ts": int(time.time()),
+        }
+        _save(MANUAL_DEP_FILE, manual_deps)
+        waiting.pop(uid, None)
+        bot.send_message(uid,
+            f"⏳ <b>សំណើដាក់លុយរបស់អ្នកកំពុងត្រូវបានពិនិត្យ!</b>\n"
+            f"💰 ចំនួន: <b>${amount:.2f}</b>\n"
+            f"📌 Ref: <code>{dep_id}</code>\n\n"
+            f"Admin នឹងអនុម័តក្នុងពេលឆាប់ៗនេះ 🙏",
+            parse_mode="HTML", reply_markup=main_kb(uid))
+        try:
+            u = users_db.get(uid_str, {})
+            name = u.get("name") or u.get("username") or "?"
+            kb = InlineKeyboardMarkup()
+            kb.row(
+                InlineKeyboardButton("✅ អនុម័ត", callback_data=f"mdep:ok:{dep_id}", color="success"),
+                InlineKeyboardButton("❌ បដិសេធ", callback_data=f"mdep:no:{dep_id}", color="danger"),
+            )
+            bot.send_photo(ADMIN_ID, proof_id,
+                caption=f"🧾 <b>សំណើដាក់លុយដោយដៃ ថ្មី!</b>\n"
+                        f"👤 {name} (<code>{uid_str}</code>)\n"
+                        f"💰 ចំនួន: <b>${amount:.2f}</b>\n"
+                        f"📌 Ref: <code>{dep_id}</code>",
+                parse_mode="HTML", reply_markup=kb)
+        except Exception as _e:
+            logger.debug(f"[silent] {_e}")
+        return
+
+    if uid == ADMIN_ID and step == "await_manual_qr_photo":
+        manual_qr_cfg["photo_id"] = message.photo[-1].file_id
+        _save(MANUAL_QR_FILE, manual_qr_cfg)
+        waiting.pop(uid, None)
+        bot.send_message(uid, "✅ រូប QR បានកំណត់ជោគជ័យ!", parse_mode="HTML",
+                          reply_markup=manual_qr_admin_kb())
+        return
+
     if uid == ADMIN_ID:
         # ── Premium Emoji flows also accept forwarded photos (caption emoji) ──
         if isinstance(step, dict) and step.get("step") == "await_setemoji_single":
@@ -3686,10 +3871,11 @@ def handle_photo(message):
                 "✅ <b>Welcome Photo បានរក្សា!</b>\n"
                 "រូបនេះនឹងបង្ហាញពេល User ចុច /start",
                 parse_mode="HTML", reply_markup=admin_kb())
-
+        return
 
 # ═══════════════════════════════════════════════════════════
 #  STICKER HANDLER — ចាំបាច់សម្រាប់ Premium Emoji ដែលផ្ញើមកជា
+#  content_type="sticker" (sticker.type == "custom_emoji") ។ ដោយគ្មាន
 #  content_type="sticker" (sticker.type == "custom_emoji") ។ ដោយគ្មាន
 #  handler នេះ សារបែបនេះនឹងមិនចូល photo handler ក៏មិនចូល handle_msg
 #  (ដែល default content_types=['text'] តែប៉ុណ្ណោះ ព្រោះមិនបានបញ្ជាក់
@@ -4206,6 +4392,14 @@ def handle_msg(message):
                 bot.send_message(uid, "❌ ត្រូវជាលេខ 0-23", reply_markup=cancel_kb())
             return
 
+        if step == "await_manual_qr_info":
+            manual_qr_cfg["info"] = text.strip()
+            _save(MANUAL_QR_FILE, manual_qr_cfg)
+            waiting.pop(uid, None)
+            bot.send_message(uid, "✅ ព័ត៌មានបានកំណត់ជោគជ័យ!", parse_mode="HTML",
+                              reply_markup=manual_qr_admin_kb())
+            return
+
         # ── Manual service: step 1 label ──
         if isinstance(step, dict) and step.get("step") == "manual_svc_label":
             label = text.strip()
@@ -4586,6 +4780,10 @@ def handle_msg(message):
 
         if text == "💾 Backup Data":
             cmd_backup(message); return
+
+        if text == "🧾 QR ដាក់លុយដោយដៃ":
+            bot.send_message(uid, _manual_qr_status_text(), parse_mode="HTML", reply_markup=manual_qr_admin_kb())
+            return
 
         if text == "🎁 Bonus ដាក់លុយ":
             btns = InlineKeyboardMarkup()
@@ -5056,6 +5254,22 @@ def handle_msg(message):
         bot.send_message(uid,
             f"✅ <b>Confirmed!</b>\n👤 <code>{dep['uid']}</code>\n💰 <b>${paid:.2f}</b>",
             parse_mode="HTML", reply_markup=admin_kb())
+        return
+
+    # ── Manual Deposit: User វាយចំនួនលុយ ──────────────────────────
+    if step == "await_manual_dep_amount":
+        try:
+            amt = float(text.strip().replace("$", ""))
+            if amt <= 0:
+                raise ValueError
+        except ValueError:
+            bot.send_message(uid, "❌ សូមវាយចំនួនលុយជាលេខ (ឧ. 5 ឬ 5.50)", reply_markup=cancel_kb())
+            return
+        waiting[uid] = {"step": "await_manual_dep_proof", "amount": amt}
+        bot.send_message(uid,
+            f"💰 ចំនួន: <b>${amt:.2f}</b>\n\n"
+            f"📷 សូមផ្ញើ <b>Screenshot ភស្តុតាងផ្ទេរប្រាក់</b> (Bakong/App ធនាគារ):",
+            parse_mode="HTML", reply_markup=cancel_kb())
         return
 
     # SMM link step
