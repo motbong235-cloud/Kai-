@@ -1374,6 +1374,16 @@ def _smm_order_watcher():
                             f"🙏 អរគុណដែលប្រើ Kaijaklike!",
                             parse_mode="HTML")
                     except Exception as _e: logger.debug(f"[silent] {_e}")
+                    try:
+                        bot.send_message(ADMIN_ID,
+                            f"✅ <b>Order បានគ្រប់ចំនួន 100%!</b>\n"
+                            f"🆔 <code>{oid}</code>\n"
+                            f"👤 {_user_display(o.get('uid',''))}\n"
+                            f"📦 {o.get('label','?')}\n"
+                            f"🔢 {o.get('qty',0):,} | 💰 ${float(o.get('price',0)):.4f}\n"
+                            f"🔗 <code>{o.get('link','')}</code>",
+                            parse_mode="HTML")
+                    except Exception as _e: logger.debug(f"[silent] {_e}")
                 elif st in ("canceled", "cancelled"):
                     smm_orders[oid]["status"] = "canceled"
                     _save(SMM_ORD_FILE, smm_orders)
@@ -1475,6 +1485,22 @@ def _get_notify_cfg():
 
 def _make_order_id():
     return f"KZ{int(time.time())%100000:05d}"
+
+def _user_display(uid_str):
+    """បង្កើតឈ្មោះ + username បង្ហាញឲ្យ Admin មើលងាយ (ជំនួសមើលតែលេខ UID
+    ដែលមិនអាចដឹងថាជានរណា)។ ត្រឡប់ ឧ. "Sokha (@sokha123)" ឬ fallback ត្រឹមតែ
+    UID បើគ្មានទិន្នន័យ User។"""
+    u = users_db.get(str(uid_str), {})
+    name = (u.get("name") or "").strip()
+    uname = u.get("username") or ""
+    parts = []
+    if name:
+        parts.append(name)
+    if uname:
+        parts.append(f"@{uname}")
+    if parts:
+        return " ".join(parts) + f" (<code>{uid_str}</code>)"
+    return f"<code>{uid_str}</code>"
 
 # ═══════════════════════════════════════════════════════════
 #  KHQR CARD GENERATOR  (Bakong-style branded card)
@@ -5291,7 +5317,18 @@ def handle_msg(message):
         if bal(uid) < price:
             bot.send_message(uid,
                 f"❌ Balance មិនគ្រប់!\n💳 ${bal(uid):.2f} | Need: ${price:.2f}",
-                parse_mode="HTML", reply_markup=main_kb(uid)); return
+                parse_mode="HTML", reply_markup=main_kb(uid))
+            # ជូនដំណឹង Admin ថា User ចង់ Order ប៉ុន្តែលុយមិនគ្រប់ — ជា lead ល្អ
+            # សម្រាប់ Admin ទាក់ទងទៅ User ដើម្បីលើកទឹកចិត្តឲ្យបញ្ចូលលុយ
+            try: bot.send_message(ADMIN_ID,
+                f"💸 <b>User ចង់ Order ប៉ុន្តែ Balance មិនគ្រប់!</b>\n"
+                f"👤 {_user_display(uid_str)}\n"
+                f"📦 {s.get('label',slug)}\n"
+                f"🔢 {qty:,} | 💰 ត្រូវការ: ${price:.4f}\n"
+                f"💳 Balance បច្ចុប្បន្ន: ${bal(uid):.2f}",
+                parse_mode="HTML")
+            except Exception as _e: logger.debug(f"[silent] {_e}")
+            return
         ded_bal(uid, price)
         key = smm_api.get("key",""); api_url = smm_api.get("url","")
         res = None
@@ -5317,8 +5354,9 @@ def handle_msg(message):
                 parse_mode="HTML", reply_markup=main_kb(uid))
             try: bot.send_message(ADMIN_ID,
                 f"⚠️ <b>SMM Order បរាជ័យ (Auto-Refunded)</b>\n"
-                f"👤 <code>{uid_str}</code>\n"
+                f"👤 {_user_display(uid_str)}\n"
                 f"📊 {s.get('label',slug)} | {qty:,} | ${price:.4f}\n"
+                f"🔗 <code>{link}</code>\n"
                 f"⚠️ {api_err_msg}",
                 parse_mode="HTML")
             except Exception as _e: logger.debug(f"[silent] {_e}")
@@ -5365,12 +5403,13 @@ def handle_msg(message):
                 parse_mode="HTML", reply_markup=main_kb(uid))
 
         # ── Notify Admin ──
+        udisp = _user_display(uid_str)
         if is_tiktok_promote:
             admin_msg = (
                 f"🎵 <b>TikTok Promote Order!</b>\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"🆔 <code>{oid}</code>\n"
-                f"👤 <code>{uid_str}</code>\n"
+                f"👤 {udisp}\n"
                 f"💰 <b>${price:.2f}</b>\n"
                 f"🔗 <code>{link}</code>\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
@@ -5390,7 +5429,7 @@ def handle_msg(message):
                 f"✍️ <b>Manual SMM Order</b>\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"🆔 <code>{oid}</code>\n"
-                f"👤 <code>{uid_str}</code>\n"
+                f"👤 {udisp}\n"
                 f"📊 {s.get('label',slug)}\n"
                 f"🔢 {qty:,} | 💰 ${price:.4f}\n"
                 f"🔗 <code>{link}</code>"
@@ -5403,7 +5442,12 @@ def handle_msg(message):
             except Exception as _e: logger.debug(f"[silent] {_e}")
         else:
             try: bot.send_message(ADMIN_ID,
-                f"📊 <b>SMM Order</b>\n👤 <code>{uid_str}</code> | {s.get('label',slug)} | {qty:,} | ${price:.4f}",
+                f"📊 <b>SMM Order</b>\n"
+                f"🆔 <code>{oid}</code>\n"
+                f"👤 {udisp}\n"
+                f"📦 {s.get('label',slug)}\n"
+                f"🔢 {qty:,} | 💰 ${price:.4f}\n"
+                f"🔗 <code>{link}</code>",
                 parse_mode="HTML")
             except Exception as _e: logger.debug(f"[silent] {_e}")
         return
