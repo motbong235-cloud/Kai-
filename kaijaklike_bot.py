@@ -3476,9 +3476,99 @@ def cb_cln_view(call):
                InlineKeyboardButton("🔄 Restart", callback_data=f"cln_restart|{name}", color="progress"))
     else:
         kb.add(InlineKeyboardButton("▶️ ដំណើរការ", callback_data=f"cln_start|{name}", color="active"))
+    kb.add(InlineKeyboardButton("🔁 ប្តូរ Step ទូទាត់", callback_data=f"cln_pay|{name}", color="progress"))
+    kb.add(InlineKeyboardButton("👤 ប្តូរ Admin", callback_data=f"cln_admin|{name}", color="progress"))
     kb.add(InlineKeyboardButton("🗑️ លុប", callback_data=f"cln_delete|{name}", color="inactive"))
     kb.add(InlineKeyboardButton("⬅️ ត្រឡប់", callback_data="cln_list", color="inactive"))
     bot.send_message(uid, text, parse_mode="HTML", reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cln_pay|"))
+def cb_cln_pay(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID or not IS_MASTER:
+        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
+    name = call.data.split("|", 1)[1]
+    if name not in clone_registry:
+        bot.answer_callback_query(call.id, "រកមិនឃើញ"); return
+    bot.answer_callback_query(call.id)
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(InlineKeyboardButton("1️⃣ Step 1 — CamRapidPay QR ស្វ័យប្រវត្តិ", callback_data=f"cln_paysel|auto|{name}", color="active"))
+    kb.add(InlineKeyboardButton("2️⃣ Step 2 — QR ដាក់ដោយដៃ (Manual)", callback_data=f"cln_paysel|manual|{name}", color="progress"))
+    kb.add(InlineKeyboardButton("⬅️ ត្រឡប់", callback_data=f"cln_view|{name}", color="inactive"))
+    bot.send_message(uid,
+        f"🔁 <b>ប្តូរ Step ទូទាត់ — {name}</b>\n\n"
+        "1️⃣ <b>Step 1</b> — CamRapidPay API Key → QR ស្វ័យប្រវត្តិ\n"
+        "2️⃣ <b>Step 2</b> — Upload រូប QR ដាក់ដោយដៃ",
+        parse_mode="HTML", reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cln_paysel|"))
+def cb_cln_paysel(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID or not IS_MASTER:
+        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
+    _, method, name = call.data.split("|", 2)
+    if name not in clone_registry:
+        bot.answer_callback_query(call.id, "រកមិនឃើញ"); return
+    bot.answer_callback_query(call.id)
+    if method == "auto":
+        waiting[uid] = {"step": "cln_pay_key", "clone": name}
+        bot.send_message(uid, f"វាយ <b>CamRapidPay API Key</b> ថ្មីសម្រាប់ '{name}':",
+                          parse_mode="HTML", reply_markup=cancel_kb())
+    else:
+        waiting[uid] = {"step": "cln_pay_qr_photo", "clone": name}
+        bot.send_message(uid, f"ផ្ញើ <b>រូបភាព QR</b> (Bakong KHQR) ថ្មីសម្រាប់ '{name}':",
+                          parse_mode="HTML", reply_markup=cancel_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cln_admin|"))
+def cb_cln_admin(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID or not IS_MASTER:
+        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
+    name = call.data.split("|", 1)[1]
+    cfg = clone_registry.get(name)
+    if not cfg:
+        bot.answer_callback_query(call.id, "រកមិនឃើញ"); return
+    bot.answer_callback_query(call.id)
+    waiting[uid] = {"step": "cln_change_admin", "clone": name}
+    bot.send_message(uid,
+        f"👤 <b>ប្តូរ Admin — {name}</b>\n"
+        f"Admin ID បច្ចុប្បន្ន: <code>{cfg['admin_id']}</code>\n\n"
+        f"វាយ <b>Telegram ID</b> ថ្មីរបស់ admin (លេខ):",
+        parse_mode="HTML", reply_markup=cancel_kb())
+
+def _apply_clone_pay_update(uid, name, pay_method, camrapid_key="", manual_photo_id="", manual_info=""):
+    """កែប្រែ payment method របស់ clone ដែលមានស្រាប់ ហើយ restart វា"""
+    cfg = clone_registry.get(name)
+    if not cfg:
+        bot.send_message(uid, "❌ រកមិនឃើញ bot នេះទេ (ប្រហែលត្រូវបានលុប)។", reply_markup=admin_kb())
+        return
+    cfg["pay_method"] = pay_method
+    if pay_method == "auto":
+        cfg["camrapid_key"] = camrapid_key
+        cfg["manual_qr_photo_id"] = ""
+        cfg["manual_qr_info"] = ""
+    else:
+        cfg["manual_qr_photo_id"] = manual_photo_id
+        cfg["manual_qr_info"] = manual_info
+    clone_registry[name] = cfg
+    _save(CLONES_REGISTRY, clone_registry)
+    try:
+        wdir = _clone_dir(name)
+        _save(os.path.join(wdir, "manual_qr.json"), {
+            "enabled": pay_method == "manual",
+            "photo_id": cfg.get("manual_qr_photo_id", ""),
+            "info": cfg.get("manual_qr_info", ""),
+        })
+    except Exception as _e:
+        logger.error(f"Update manual_qr.json failed for clone '{name}': {_e}")
+    was_running = _clone_is_running(name)
+    if was_running:
+        _stop_clone(name); time.sleep(1); _spawn_clone(name, cfg)
+    pay_txt = "🖼 Manual QR (Step 2)" if pay_method == "manual" else "🔄 CamRapidPay Auto (Step 1)"
+    bot.send_message(uid,
+        f"✅ បានប្តូរការទូទាត់សម្រាប់ '<b>{name}</b>' ទៅជា {pay_txt}"
+        + (" ហើយ restart រួច។" if was_running else " (bot នេះកំពុងបិទ — ចាប់ផ្តើមវាដើម្បីអនុវត្ត)។"),
+        parse_mode="HTML", reply_markup=admin_kb())
 
 @bot.callback_query_handler(func=lambda c: c.data == "cln_list")
 def cb_cln_list(call):
@@ -3875,6 +3965,15 @@ def handle_photo(message):
             parse_mode="HTML", reply_markup=cancel_kb())
         return
 
+    if uid == ADMIN_ID and isinstance(step, dict) and step.get("step") == "cln_pay_qr_photo":
+        photo_id = message.photo[-1].file_id
+        waiting[uid] = {**step, "step": "cln_pay_qr_info", "manual_qr_photo_id": photo_id}
+        bot.send_message(uid,
+            "វាយ <b>ព័ត៌មានបន្ថែម</b> ខាងក្រោម QR (ឧ. ឈ្មោះគណនី/លេខទូរស័ព្ទ)\n"
+            "ឬផ្ញើ <code>-</code> បើគ្មាន:",
+            parse_mode="HTML", reply_markup=cancel_kb())
+        return
+
     if uid == ADMIN_ID:
         # ── Premium Emoji flows also accept forwarded photos (caption emoji) ──
         if isinstance(step, dict) and step.get("step") == "await_setemoji_single":
@@ -4238,6 +4337,50 @@ def handle_msg(message):
                 "ឬផ្ញើ <code>-</code> ដើម្បីប្រើឈ្មោះ internal (<code>"
                 + step["name"] + "</code>) ជំនួស:",
                 parse_mode="HTML", reply_markup=cancel_kb())
+            return
+
+        # ── ប្តូរ Step ទូទាត់ របស់ clone ដែលមានស្រាប់ (ពី /mybots) ──
+        if isinstance(step, dict) and step.get("step") == "cln_pay_key":
+            key = text.strip()
+            if len(key) < 10:
+                bot.send_message(uid, "⚠️ API Key ខ្លីពេក សូមផ្ញើម្តងទៀត:", reply_markup=cancel_kb()); return
+            name = step["clone"]
+            waiting.pop(uid, None)
+            _apply_clone_pay_update(uid, name, "auto", camrapid_key=key)
+            return
+
+        if isinstance(step, dict) and step.get("step") == "cln_pay_qr_info":
+            raw = text.strip()
+            info = "" if raw == "-" else raw
+            name = step["clone"]
+            waiting.pop(uid, None)
+            _apply_clone_pay_update(uid, name, "manual",
+                                     manual_photo_id=step.get("manual_qr_photo_id", ""),
+                                     manual_info=info)
+            return
+
+        if isinstance(step, dict) and step.get("step") == "cln_change_admin":
+            if not text.strip().isdigit():
+                bot.send_message(uid, "⚠️ សូមផ្ញើជាលេខតែប៉ុណ្ណោះ:", reply_markup=cancel_kb()); return
+            name = step["clone"]
+            new_admin_id = int(text.strip())
+            cfg = clone_registry.get(name)
+            waiting.pop(uid, None)
+            if not cfg:
+                bot.send_message(uid, "❌ រកមិនឃើញ bot នេះទេ (ប្រហែលត្រូវបានលុប)។", reply_markup=admin_kb())
+                return
+            old_admin_id = cfg["admin_id"]
+            cfg["admin_id"] = new_admin_id
+            clone_registry[name] = cfg
+            _save(CLONES_REGISTRY, clone_registry)
+            was_running = _clone_is_running(name)
+            if was_running:
+                _stop_clone(name); time.sleep(1); _spawn_clone(name, cfg)
+            bot.send_message(uid,
+                f"✅ បានប្តូរ Admin សម្រាប់ '<b>{name}</b>'\n"
+                f"ចាស់: <code>{old_admin_id}</code> → ថ្មី: <code>{new_admin_id}</code>"
+                + (" ហើយ restart រួច។" if was_running else " (bot នេះកំពុងបិទ — ចាប់ផ្តើមវាដើម្បីអនុវត្ត)។"),
+                parse_mode="HTML", reply_markup=admin_kb())
             return
 
         if isinstance(step, dict) and step.get("step") == "newbot_display":
