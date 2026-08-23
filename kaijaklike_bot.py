@@ -650,7 +650,8 @@ def _spawn_clone(name, cfg):
     env = os.environ.copy()
     env["BOT_TOKEN"]        = cfg["token"]
     env["ADMIN_ID"]         = str(cfg["admin_id"])
-    env["CAMRAPID_API_KEY"] = cfg["camrapid_key"]
+    env["CAMRAPID_API_KEY"] = cfg.get("camrapid_key", "")
+    env["PAY_METHOD"]       = cfg.get("pay_method", "auto")
     env["CONTROL_PORT"]     = str(cfg["port"])
     env["CONTROL_KEY"]      = f"ctrl_{name}"
     env["INSTANCE_NAME"]    = name
@@ -3389,16 +3390,30 @@ def cb_newbot_confirm_yes(call):
     if not isinstance(step, dict) or step.get("step") != "newbot_confirm":
         bot.answer_callback_query(call.id, "Session ផុតកំណត់"); return
     name = step["name"]
+    pay_method = step.get("pay_method", "auto")
     cfg = {
         "token": step["token"],
         "admin_id": step["new_admin_id"],
-        "camrapid_key": step["camrapid_key"],
+        "camrapid_key": step.get("camrapid_key", ""),
         "port": step["port"],
         "display_name": step.get("display_name", step["name"]),
         "welcome_msg":  step.get("welcome_msg", ""),
+        "pay_method": pay_method,
+        "manual_qr_photo_id": step.get("manual_qr_photo_id", ""),
+        "manual_qr_info": step.get("manual_qr_info", ""),
     }
     clone_registry[name] = cfg
     _save(CLONES_REGISTRY, clone_registry)
+    if pay_method == "manual" and cfg["manual_qr_photo_id"]:
+        try:
+            wdir = _clone_dir(name)
+            _save(os.path.join(wdir, "manual_qr.json"), {
+                "enabled": True,
+                "photo_id": cfg["manual_qr_photo_id"],
+                "info": cfg["manual_qr_info"],
+            })
+        except Exception as _e:
+            logger.error(f"Pre-seed manual_qr.json failed for clone '{name}': {_e}")
     waiting.pop(uid, None)
     bot.answer_callback_query(call.id, "កំពុងបង្កើត...")
     try:
@@ -3418,6 +3433,26 @@ def cb_newbot_confirm_no(call):
     bot.answer_callback_query(call.id, "បានបោះបង់")
     bot.send_message(uid, "❌ បានបោះបង់ការបង្កើត bot ថ្មី។", reply_markup=admin_kb())
 
+@bot.callback_query_handler(func=lambda c: c.data.startswith("newbot_pay|"))
+def cb_newbot_paymethod(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID or not IS_MASTER:
+        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
+    step = waiting.get(uid)
+    if not isinstance(step, dict) or step.get("step") != "newbot_paymethod":
+        bot.answer_callback_query(call.id, "Session ផុតកំណត់"); return
+    method = call.data.split("|", 1)[1]
+    bot.answer_callback_query(call.id)
+    if method == "auto":
+        waiting[uid] = {**step, "step": "newbot_key", "pay_method": "auto"}
+        bot.send_message(uid, "4️⃣ វាយ <b>CamRapidPay API Key</b> សម្រាប់ bot នេះ:",
+                          parse_mode="HTML", reply_markup=cancel_kb())
+    else:
+        waiting[uid] = {**step, "step": "newbot_manual_qr_photo", "pay_method": "manual", "camrapid_key": ""}
+        bot.send_message(uid,
+            "4️⃣ ផ្ញើ <b>រូបភាព QR</b> (Bakong KHQR) សម្រាប់ bot នេះ (ផ្ញើជារូបភាព):",
+            parse_mode="HTML", reply_markup=cancel_kb())
+
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cln_view|"))
 def cb_cln_view(call):
     uid = call.message.chat.id
@@ -3430,8 +3465,10 @@ def cb_cln_view(call):
     bot.answer_callback_query(call.id)
     status = "🟢 កំពុងដំណើរការ" if _clone_is_running(name) else "🔴 បិទ"
     masked = cfg["token"][:10] + "..." + cfg["token"][-4:]
+    pay_txt = "🖼 Manual QR (Step 2)" if cfg.get("pay_method") == "manual" else "🔄 CamRapidPay Auto (Step 1)"
     text = (f"🤖 <b>{name}</b>\nស្ថានភាព: {status}\n"
             f"Admin ID: <code>{cfg['admin_id']}</code>\nToken: <code>{masked}</code>\n"
+            f"ការទូទាត់: {pay_txt}\n"
             f"Port: <code>{cfg['port']}</code>")
     kb = InlineKeyboardMarkup(row_width=2)
     if _clone_is_running(name):
@@ -3829,6 +3866,15 @@ def handle_photo(message):
                           reply_markup=manual_qr_admin_kb())
         return
 
+    if uid == ADMIN_ID and isinstance(step, dict) and step.get("step") == "newbot_manual_qr_photo":
+        photo_id = message.photo[-1].file_id
+        waiting[uid] = {**step, "step": "newbot_manual_qr_info", "manual_qr_photo_id": photo_id}
+        bot.send_message(uid,
+            "4️⃣ វាយ <b>ព័ត៌មានបន្ថែម</b> ខាងក្រោម QR (ឧ. ឈ្មោះគណនី/លេខទូរស័ព្ទ)\n"
+            "ឬផ្ញើ <code>-</code> បើគ្មាន:",
+            parse_mode="HTML", reply_markup=cancel_kb())
+        return
+
     if uid == ADMIN_ID:
         # ── Premium Emoji flows also accept forwarded photos (caption emoji) ──
         if isinstance(step, dict) and step.get("step") == "await_setemoji_single":
@@ -4155,9 +4201,15 @@ def handle_msg(message):
         if isinstance(step, dict) and step.get("step") == "newbot_admin":
             if not text.strip().isdigit():
                 bot.send_message(uid, "⚠️ សូមផ្ញើជាលេខតែប៉ុណ្ណោះ:", reply_markup=cancel_kb()); return
-            waiting[uid] = {**step, "step": "newbot_key", "new_admin_id": int(text.strip())}
-            bot.send_message(uid, "4️⃣ វាយ <b>CamRapidPay API Key</b> សម្រាប់ bot នេះ:",
-                              parse_mode="HTML", reply_markup=cancel_kb())
+            waiting[uid] = {**step, "step": "newbot_paymethod", "new_admin_id": int(text.strip())}
+            kb = InlineKeyboardMarkup(row_width=1)
+            kb.add(InlineKeyboardButton("1️⃣ Step 1 — CamRapidPay QR ស្វ័យប្រវត្តិ", callback_data="newbot_pay|auto", color="active"))
+            kb.add(InlineKeyboardButton("2️⃣ Step 2 — QR ដាក់ដោយដៃ (Manual)", callback_data="newbot_pay|manual", color="progress"))
+            bot.send_message(uid,
+                "4️⃣ ជ្រើសរើស <b>របៀបទទួលទឹក</b> សម្រាប់ bot នេះ:\n\n"
+                "1️⃣ <b>Step 1</b> — ប្រើ CamRapidPay API Key បង្កើត QR ស្វ័យប្រវត្តិ (ត្រូវការ API Key)\n"
+                "2️⃣ <b>Step 2</b> — Upload រូប QR (Bakong KHQR) ដាក់ដោយដៃ គ្មានត្រូវការ API Key",
+                parse_mode="HTML", reply_markup=kb)
             return
 
         if isinstance(step, dict) and step.get("step") == "newbot_key":
@@ -4169,6 +4221,18 @@ def handle_msg(message):
             masked_tok = tok[:10] + "..." + tok[-4:]
             masked_key = key[:6] + "..." + key[-4:]
             waiting[uid] = {**step, "step": "newbot_display", "camrapid_key": key, "port": port}
+            bot.send_message(uid,
+                "5️⃣ វាយ <b>ឈ្មោះ bot</b> ដែលបង្ហាញដល់អ្នកប្រើ (ឧ. <code>Jak Like Shop</code>)\n"
+                "ឬផ្ញើ <code>-</code> ដើម្បីប្រើឈ្មោះ internal (<code>"
+                + step["name"] + "</code>) ជំនួស:",
+                parse_mode="HTML", reply_markup=cancel_kb())
+            return
+
+        if isinstance(step, dict) and step.get("step") == "newbot_manual_qr_info":
+            raw = text.strip()
+            info = "" if raw == "-" else raw
+            port = _next_clone_port()
+            waiting[uid] = {**step, "step": "newbot_display", "manual_qr_info": info, "port": port}
             bot.send_message(uid,
                 "5️⃣ វាយ <b>ឈ្មោះ bot</b> ដែលបង្ហាញដល់អ្នកប្រើ (ឧ. <code>Jak Like Shop</code>)\n"
                 "ឬផ្ញើ <code>-</code> ដើម្បីប្រើឈ្មោះ internal (<code>"
@@ -4192,8 +4256,13 @@ def handle_msg(message):
             welcome = "" if raw == "-" else raw
             name = step["name"]; tok = step["token"]; new_admin = step["new_admin_id"]
             port = step["port"]; display = step["display_name"]
+            pay_method = step.get("pay_method", "auto")
             masked_tok = tok[:10] + "..." + tok[-4:]
-            masked_key = step["camrapid_key"][:6] + "..." + step["camrapid_key"][-4:]
+            if pay_method == "manual":
+                pay_line = "🖼 QR ដាក់ដោយដៃ (Manual) — Step 2"
+            else:
+                masked_key = step["camrapid_key"][:6] + "..." + step["camrapid_key"][-4:]
+                pay_line = f"🔄 CamRapidPay Key — Step 1 (<code>{masked_key}</code>)"
             waiting[uid] = {**step, "step": "newbot_confirm", "welcome_msg": welcome}
             kb = InlineKeyboardMarkup()
             kb.add(InlineKeyboardButton("✅ បង្កើត ហើយ ដំណើរការ", callback_data="newbot_confirm_yes", color="active"))
@@ -4204,7 +4273,7 @@ def handle_msg(message):
                 f"ឈ្មោះ display: <code>{display}</code>\n"
                 f"Token: <code>{masked_tok}</code>\n"
                 f"Admin ID: <code>{new_admin}</code>\n"
-                f"CamRapidPay Key: <code>{masked_key}</code>\n"
+                f"ការទូទាត់: {pay_line}\n"
                 f"Welcome: <code>{'(default)' if not welcome else welcome[:80]}</code>\n\n"
                 f"ត្រឹមត្រូវទេ?",
                 parse_mode="HTML", reply_markup=kb)
