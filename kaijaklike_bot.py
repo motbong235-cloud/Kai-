@@ -263,8 +263,17 @@ try:
 except Exception:
     DATA_DIR = "."   # fallback ក្នុងករណី disk មិនមាន (local/Termux test)
 
+# MASTER_DATA_DIR = folder data "ដើម" (bot ដើម) — clone process នីមួយៗទទួល env
+# MASTER_DATA_DIR ពី _spawn_clone() ដូច្នេះទោះបី DATA_DIR ត្រូវបានប្តូរទៅ folder
+# ដាច់ដោយឡែករបស់ clone ក៏ដោយ ចំណុចនេះនៅតែចង្អុលទៅ data ដើមដដែល (សម្រាប់ file
+# ដែលចង់ឲ្យ share រួម ដូចជា smm_emoji.json)
+MASTER_DATA_DIR = os.environ.get("MASTER_DATA_DIR", DATA_DIR)
+
 def _dpath(name):
     return os.path.join(DATA_DIR, name)
+
+def _mdpath(name):
+    return os.path.join(MASTER_DATA_DIR, name)
 
 WALLETS_FILE    = _dpath("smm_wallets.json")
 USERS_FILE      = _dpath("smm_users.json")
@@ -285,7 +294,7 @@ SUPPORT_CFG_FILE= _dpath("smm_support.json")
 CAMRAPID_CFG_FILE= _dpath("smm_camrapid.json")
 BAKONG_CFG_FILE = _dpath("smm_bakong.json")
 WEBHOOK_CFG_FILE = _dpath("smm_webhook.json")
-EMOJI_FILE      = _dpath("smm_emoji.json")
+EMOJI_FILE      = _mdpath("smm_emoji.json")   # ចែក share រួមគ្នារវាង bot ដើម និង clone ទាំងអស់ (មិនញែកតាម DATA_DIR ទេ)
 
 def _load(path, default):
     try:
@@ -647,6 +656,7 @@ def _clone_is_running(name):
     return proc is not None and proc.poll() is None
 
 def _spawn_clone(name, cfg):
+    wdir = _clone_dir(name)
     env = os.environ.copy()
     env["BOT_TOKEN"]        = cfg["token"]
     env["ADMIN_ID"]         = str(cfg["admin_id"])
@@ -657,7 +667,8 @@ def _spawn_clone(name, cfg):
     env["INSTANCE_NAME"]    = name
     env["BOT_DISPLAY_NAME"] = cfg.get("display_name", name)
     env["BOT_WELCOME_MSG"]  = cfg.get("welcome_msg", "")
-    wdir = _clone_dir(name)
+    env["DATA_DIR"]         = wdir   # ★ ធ្វើឲ្យ clone នីមួយៗសរសេរ/អាន data (users/wallets/orders/…) ដាច់ដោយឡែកក្នុង bot_clones/<name>/ មិនប៉ះពាល់ bot ដើម ឬ clone ផ្សេងទៀត
+    env["MASTER_DATA_DIR"]  = MASTER_DATA_DIR   # ★ រក្សា smm_emoji.json ជាដើម ឲ្យចង្អុលទៅ data ដើមរួមគ្នា មិនប្រែប្រួលទៅតាម DATA_DIR របស់ clone
     logf = open(os.path.join(wdir, "bot.log"), "a", encoding="utf-8")
     proc = _subprocess.Popen(
         [sys.executable, os.path.abspath(__file__)],
@@ -3433,6 +3444,14 @@ def cb_newbot_confirm_no(call):
     bot.answer_callback_query(call.id, "បានបោះបង់")
     bot.send_message(uid, "❌ បានបោះបង់ការបង្កើត bot ថ្មី។", reply_markup=admin_kb())
 
+_STEP_EMOJI = ["0️⃣","1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣"]
+def _step_label(n, total=None):
+    """បង្កើត label ជំហានស្តង់ដារ ('3️⃣ ជំហានទី 3/7') សម្រាប់ wizard /newbot
+    — ធានាថាលេខមិនត្រូវគ្នា/ដដែលៗរវាងជំហាន ហើយ total (7=Auto, 8=Manual)
+    បង្ហាញភ្លាមៗពេលដឹងផ្លូវ (Auto/Manual) ។"""
+    e = _STEP_EMOJI[n] if 0 <= n < len(_STEP_EMOJI) else f"{n}."
+    return f"{e} ជំហានទី {n}/{total}" if total else f"{e} ជំហានទី {n}"
+
 @bot.callback_query_handler(func=lambda c: c.data.startswith("newbot_pay|"))
 def cb_newbot_paymethod(call):
     uid = call.message.chat.id
@@ -3445,12 +3464,12 @@ def cb_newbot_paymethod(call):
     bot.answer_callback_query(call.id)
     if method == "auto":
         waiting[uid] = {**step, "step": "newbot_key", "pay_method": "auto"}
-        bot.send_message(uid, "4️⃣ វាយ <b>CamRapidPay API Key</b> សម្រាប់ bot នេះ:",
+        bot.send_message(uid, f"{_step_label(5, 7)} — វាយ <b>CamRapidPay API Key</b> សម្រាប់ bot នេះ:",
                           parse_mode="HTML", reply_markup=cancel_kb())
     else:
         waiting[uid] = {**step, "step": "newbot_manual_qr_photo", "pay_method": "manual", "camrapid_key": ""}
         bot.send_message(uid,
-            "4️⃣ ផ្ញើ <b>រូបភាព QR</b> (Bakong KHQR) សម្រាប់ bot នេះ (ផ្ញើជារូបភាព):",
+            f"{_step_label(5, 8)} — ផ្ញើ <b>រូបភាព QR</b> (Bakong KHQR) សម្រាប់ bot នេះ (ផ្ញើជារូបភាព):",
             parse_mode="HTML", reply_markup=cancel_kb())
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cln_view|"))
@@ -3960,7 +3979,7 @@ def handle_photo(message):
         photo_id = message.photo[-1].file_id
         waiting[uid] = {**step, "step": "newbot_manual_qr_info", "manual_qr_photo_id": photo_id}
         bot.send_message(uid,
-            "4️⃣ វាយ <b>ព័ត៌មានបន្ថែម</b> ខាងក្រោម QR (ឧ. ឈ្មោះគណនី/លេខទូរស័ព្ទ)\n"
+            f"{_step_label(6, 8)} — វាយ <b>ព័ត៌មានបន្ថែម</b> ខាងក្រោម QR (ឧ. ឈ្មោះគណនី/លេខទូរស័ព្ទ)\n"
             "ឬផ្ញើ <code>-</code> បើគ្មាន:",
             parse_mode="HTML", reply_markup=cancel_kb())
         return
@@ -4255,7 +4274,7 @@ def handle_msg(message):
             waiting[uid] = {"step": "newbot_name"}
             bot.send_message(uid,
                 "🤖 <b>បង្កើត Bot ថ្មី</b>\n\n"
-                "1️⃣ វាយឈ្មោះសម្គាល់ bot នេះ (អក្សរ/លេខ/_ តែប៉ុណ្ណោះ គ្មានគម្លាត)\n"
+                f"{_step_label(1)} — វាយឈ្មោះសម្គាល់ bot នេះ (អក្សរ/លេខ/_ តែប៉ុណ្ណោះ គ្មានគម្លាត)\n"
                 "ឧ. <code>shop2</code>, <code>freefire_shop</code>\n\n✕ Cancel ដើម្បីបោះបង់",
                 parse_mode="HTML", reply_markup=cancel_kb())
             return
@@ -4284,7 +4303,7 @@ def handle_msg(message):
             if safe in clone_registry:
                 bot.send_message(uid, "⚠️ ឈ្មោះនេះមានរួចហើយ សូមប្រើឈ្មោះផ្សេង:", reply_markup=cancel_kb()); return
             waiting[uid] = {"step": "newbot_token", "name": safe}
-            bot.send_message(uid, "2️⃣ វាយ <b>Bot Token</b> (ពី @BotFather):",
+            bot.send_message(uid, f"{_step_label(2)} — វាយ <b>Bot Token</b> (ពី @BotFather):",
                               parse_mode="HTML", reply_markup=cancel_kb())
             return
 
@@ -4293,7 +4312,7 @@ def handle_msg(message):
             if ":" not in tok or len(tok) < 20:
                 bot.send_message(uid, "⚠️ Token មិនត្រឹមត្រូវ សូមផ្ញើម្តងទៀត:", reply_markup=cancel_kb()); return
             waiting[uid] = {**step, "step": "newbot_admin", "token": tok}
-            bot.send_message(uid, "3️⃣ វាយ <b>Admin Telegram ID</b> របស់អ្នកគ្រប់គ្រង bot នេះ (លេខ):",
+            bot.send_message(uid, f"{_step_label(3)} — វាយ <b>Admin Telegram ID</b> របស់អ្នកគ្រប់គ្រង bot នេះ (លេខ):",
                               parse_mode="HTML", reply_markup=cancel_kb())
             return
 
@@ -4302,12 +4321,12 @@ def handle_msg(message):
                 bot.send_message(uid, "⚠️ សូមផ្ញើជាលេខតែប៉ុណ្ណោះ:", reply_markup=cancel_kb()); return
             waiting[uid] = {**step, "step": "newbot_paymethod", "new_admin_id": int(text.strip())}
             kb = InlineKeyboardMarkup(row_width=1)
-            kb.add(InlineKeyboardButton("1️⃣ Step 1 — CamRapidPay QR ស្វ័យប្រវត្តិ", callback_data="newbot_pay|auto", color="active"))
-            kb.add(InlineKeyboardButton("2️⃣ Step 2 — QR ដាក់ដោយដៃ (Manual)", callback_data="newbot_pay|manual", color="progress"))
+            kb.add(InlineKeyboardButton("🔄 CamRapidPay QR ស្វ័យប្រវត្តិ (7 ជំហាន)", callback_data="newbot_pay|auto", color="active"))
+            kb.add(InlineKeyboardButton("🖼 QR ដាក់ដោយដៃ Manual (8 ជំហាន)", callback_data="newbot_pay|manual", color="progress"))
             bot.send_message(uid,
-                "4️⃣ ជ្រើសរើស <b>របៀបទទួលទឹក</b> សម្រាប់ bot នេះ:\n\n"
-                "1️⃣ <b>Step 1</b> — ប្រើ CamRapidPay API Key បង្កើត QR ស្វ័យប្រវត្តិ (ត្រូវការ API Key)\n"
-                "2️⃣ <b>Step 2</b> — Upload រូប QR (Bakong KHQR) ដាក់ដោយដៃ គ្មានត្រូវការ API Key",
+                f"{_step_label(4)} — ជ្រើសរើស <b>របៀបទទួលទឹក</b> សម្រាប់ bot នេះ:\n\n"
+                "🔄 <b>CamRapidPay Auto</b> — ប្រើ API Key បង្កើត QR ស្វ័យប្រវត្តិ (ត្រូវការ API Key) — សរុប 7 ជំហាន\n"
+                "🖼 <b>Manual QR</b> — Upload រូប QR (Bakong KHQR) ដាក់ដោយដៃ គ្មានត្រូវការ API Key — សរុប 8 ជំហាន",
                 parse_mode="HTML", reply_markup=kb)
             return
 
@@ -4321,7 +4340,7 @@ def handle_msg(message):
             masked_key = key[:6] + "..." + key[-4:]
             waiting[uid] = {**step, "step": "newbot_display", "camrapid_key": key, "port": port}
             bot.send_message(uid,
-                "5️⃣ វាយ <b>ឈ្មោះ bot</b> ដែលបង្ហាញដល់អ្នកប្រើ (ឧ. <code>Jak Like Shop</code>)\n"
+                f"{_step_label(6, 7)} — វាយ <b>ឈ្មោះ bot</b> ដែលបង្ហាញដល់អ្នកប្រើ (ឧ. <code>Jak Like Shop</code>)\n"
                 "ឬផ្ញើ <code>-</code> ដើម្បីប្រើឈ្មោះ internal (<code>"
                 + step["name"] + "</code>) ជំនួស:",
                 parse_mode="HTML", reply_markup=cancel_kb())
@@ -4333,7 +4352,7 @@ def handle_msg(message):
             port = _next_clone_port()
             waiting[uid] = {**step, "step": "newbot_display", "manual_qr_info": info, "port": port}
             bot.send_message(uid,
-                "5️⃣ វាយ <b>ឈ្មោះ bot</b> ដែលបង្ហាញដល់អ្នកប្រើ (ឧ. <code>Jak Like Shop</code>)\n"
+                f"{_step_label(7, 8)} — វាយ <b>ឈ្មោះ bot</b> ដែលបង្ហាញដល់អ្នកប្រើ (ឧ. <code>Jak Like Shop</code>)\n"
                 "ឬផ្ញើ <code>-</code> ដើម្បីប្រើឈ្មោះ internal (<code>"
                 + step["name"] + "</code>) ជំនួស:",
                 parse_mode="HTML", reply_markup=cancel_kb())
@@ -4387,8 +4406,9 @@ def handle_msg(message):
             raw = text.strip()
             display = step["name"] if raw == "-" else raw[:60]
             waiting[uid] = {**step, "step": "newbot_welcome", "display_name": display}
+            _total = 8 if step.get("pay_method") == "manual" else 7
             bot.send_message(uid,
-                "6️⃣ វាយ <b>Welcome Message</b> custom សម្រាប់ bot នេះ\n"
+                f"{_step_label(_total, _total)} — វាយ <b>Welcome Message</b> custom សម្រាប់ bot នេះ\n"
                 "ប្រើ <code>{}</code> ដើម្បីដាក់ balance ក្នុង text\n"
                 "ឬផ្ញើ <code>-</code> ដើម្បីប្រើ welcome message default:",
                 parse_mode="HTML", reply_markup=cancel_kb())
