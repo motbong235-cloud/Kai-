@@ -18,6 +18,15 @@ import requests as http_req
 from dotenv import load_dotenv
 load_dotenv()
 import telebot
+from telebot import apihelper as _apihelper
+# ── Retry លំនាំដើមរបស់ telebot គ្មាន retry លើ connection error ទេ (ខុសពី
+# `http` session ខាងក្រោមដែលមាន Retry+backoff រួចហើយ) — នេះជាមូលហេតុចម្បង
+# នៃ "Connection aborted / RemoteDisconnected" ពេល Render ខាត់ connection
+# ចោលភ្លាមៗពេលកំពុង bot.send_message/send_photo ។ បើក RETRY_ON_ERROR ដើម្បីឲ្យ
+# telebot ខ្លួនឯង retry ស្វ័យប្រវត្តិមុននឹង raise exception ចេញទៅ handler ។
+_apihelper.RETRY_ON_ERROR = True
+_apihelper.CONNECT_TIMEOUT = 15
+_apihelper.READ_TIMEOUT   = 20
 from telebot.types import (
     ReplyKeyboardMarkup, KeyboardButton as _KB_orig,
     InlineKeyboardMarkup, InlineKeyboardButton as _IKB_orig,
