@@ -314,6 +314,7 @@ CAMRAPID_CFG_FILE= _dpath("smm_camrapid.json")
 ABA_CFG_FILE    = _dpath("smm_aba.json")
 BAKONG_CFG_FILE = _dpath("smm_bakong.json")
 WEBHOOK_CFG_FILE = _dpath("smm_webhook.json")
+PAYTOGGLE_CFG_FILE = _dpath("smm_paytoggle.json")   # បិទ/បើក វិធីទូទាត់ម្តងៗ (v13)
 EMOJI_FILE      = _mdpath("smm_emoji.json")   # ចែក share រួមគ្នារវាង bot ដើម និង clone ទាំងអស់ (មិនញែកតាម DATA_DIR ទេ)
 
 def _load(path, default):
@@ -646,6 +647,7 @@ camrapid_cfg = _load(CAMRAPID_CFG_FILE, {"key": ""})            # live-editable 
 aba_cfg      = _load(ABA_CFG_FILE, {"key": "", "merchant_id": ""})  # live-editable ABA PayWay (KHMER SYSTEM) key/merchant
 bakong_cfg   = _load(BAKONG_CFG_FILE, {"token": ""})            # live-editable Bakong Developer Token
 webhook_cfg  = _load(WEBHOOK_CFG_FILE, {"url": ""})              # live-editable CamRapidPay webhook URL
+paytoggle_cfg= _load(PAYTOGGLE_CFG_FILE, {"camrapid_enabled": True, "aba_enabled": True})  # បិទ/បើក វិធីទូទាត់ (v13)
 
 def _effective_camrapid_key():
     """Return runtime key if set, else fall back to env/default"""
@@ -658,6 +660,37 @@ def _effective_aba_key():
 def _effective_aba_merchant():
     """Return runtime ABA PayWay (KHMER SYSTEM) Merchant ID if set, else fall back to env/default"""
     return aba_cfg.get("merchant_id") or ABA_MERCHANT_ID
+
+PAY_METHOD_LABELS = {"camrapid": "🔄 CamRapidPay KHQR", "aba": "💳 ABA PayWay"}
+
+def is_pay_method_enabled(method):
+    """True បើ admin មិនទាន់បិទវិធីទូទាត់នេះទេ (default = True បើមិនទាន់កំណត់អ្វីសោះ) — v13.
+    ចំណាំ: នេះជា Toggle ដាច់ដោយឡែកពី Key/Merchant ID — វិធីទូទាត់ណាមួយត្រូវការទាំង ២យ៉ាង
+    (Key/Merchant ID កំណត់រួច + Toggle នេះជា ON) ទើបប្រើបានជាក់ស្តែង។"""
+    return bool(paytoggle_cfg.get(f"{method}_enabled", True))
+
+def set_pay_method_enabled(method, enabled):
+    paytoggle_cfg[f"{method}_enabled"] = bool(enabled)
+    _save(PAYTOGGLE_CFG_FILE, paytoggle_cfg)
+
+def _paytoggle_status_lines():
+    lines = []
+    for method, label in PAY_METHOD_LABELS.items():
+        configured = _effective_camrapid_key() if method == "camrapid" else has_aba_payway()
+        on = is_pay_method_enabled(method)
+        status = "🟢 បើក" if on else "🔴 បិទ"
+        cfg_note = "" if configured else " ⚠️ (មិនទាន់កំណត់ Key)"
+        lines.append(f"{label}: <b>{status}</b>{cfg_note}")
+    return "\n".join(lines)
+
+def _paytoggle_kb():
+    kb = InlineKeyboardMarkup()
+    for method, label in PAY_METHOD_LABELS.items():
+        on = is_pay_method_enabled(method)
+        btn_txt = f"{'🔴 បិទ' if on else '🟢 បើក'} {label}"
+        kb.add(InlineKeyboardButton(btn_txt, callback_data=f"paytoggle:{method}",
+                                    color=("danger" if on else "active")))
+    return kb
 
 def _effective_bakong_token():
     """Return runtime Bakong token if set, else fall back to env/default"""
@@ -2217,11 +2250,19 @@ def _send_deposit_qr_aba(uid, amount, promo_code_name=None, bonus=0.0, promo_bon
            f"⏱ Expires in: <b>5 minutes</b>\n"
            f"✅ <i>ប្រព័ន្ធ auto-detect — Balance update ភ្លាមៗ!</i>")
 
+    # ⚠️ Telegram Bot API only accepts http(s):// or tg:// URLs on inline-button `url`
+    # fields — custom app schemes like abamobilebank:// are rejected outright with
+    # "Bad Request: ... Unsupported URL protocol", which crashes the whole send here.
+    # So _build_aba_app_deeplink()'s custom-scheme fallback is only usable for a button
+    # when khmer-system.com happens to return an http(s) wrapper link; otherwise we
+    # silently drop the button (the QR image/pay_url are still enough for the user).
+    aba_btn_link = aba_app_link if (aba_app_link and aba_app_link.lower().startswith(("http://", "https://", "tg://"))) else None
+
     kb_pay = None
-    if aba_app_link or pay_url:
+    if aba_btn_link or pay_url:
         kb_pay = InlineKeyboardMarkup()
-        if aba_app_link:
-            kb_pay.add(InlineKeyboardButton("🏦 បើក ABA App ស្កេនស្វ័យប្រវត្តិ", url=aba_app_link, color="active"))
+        if aba_btn_link:
+            kb_pay.add(InlineKeyboardButton("🏦 បើក ABA App ស្កេនស្វ័យប្រវត្តិ", url=aba_btn_link, color="active"))
         if pay_url:
             kb_pay.add(InlineKeyboardButton("🌐 បើកទំព័រទូទាត់", url=pay_url, color="progress"))
 
@@ -2276,11 +2317,11 @@ def _get_dep_promo(uid):
 _pending_dep_choice = {}   # uid -> {"amount":..., "promo_code":...} — រង់ចាំ user ជ្រើស Payment Method (v12)
 
 def _process_deposit(uid, uid_str, amount, promo_code=None, method=None):
-    """method=None → decide ស្វ័យប្រវត្តិ: បើមានទាំង CamRapidPay + ABA PayWay ព្រមគ្នា
-    ឲ្យ user ជ្រើសរើសមុន (picker) ； បើមានតែ ABA ប្រើ ABA ភ្លាម；  មិនដូច្នេះទេ ប្រើ CamRapidPay
-    (ដដែលពីមុន — backward compatible)។ (v12)"""
-    camrapid_ok = bool(_effective_camrapid_key())
-    aba_ok      = has_aba_payway()
+    """method=None → decide ស្វ័យប្រវត្តិ: បើមានទាំង CamRapidPay + ABA PayWay ព្រមគ្នា (Key
+    កំណត់រួច ព្រមទាំង admin មិនទាន់បិទតាម 🔀 វិធីទូទាត់) ឲ្យ user ជ្រើសរើសមុន (picker) ；
+    បើមានតែមួយ ប្រើវិធីនោះភ្លាម；  បើគ្មានវិធីណាមួយប្រើបាន ជូនដំណឹង user + admin ។ (v12/v13)"""
+    camrapid_ok = bool(_effective_camrapid_key()) and is_pay_method_enabled("camrapid")
+    aba_ok      = has_aba_payway() and is_pay_method_enabled("aba")
     if method is None:
         if camrapid_ok and aba_ok:
             _pending_dep_choice[uid] = {"amount": amount, "promo_code": promo_code}
@@ -2291,6 +2332,20 @@ def _process_deposit(uid, uid_str, amount, promo_code=None, method=None):
             bot.send_message(uid,
                 f"💳 <b>{'ជ្រើសរើសវិធីទូទាត់' if lang=='kh' else 'Choose payment method'}</b> — ${amount:.2f}",
                 parse_mode="HTML", reply_markup=kb)
+            return
+        if not camrapid_ok and not aba_ok:
+            lang = get_lang(uid)
+            bot.send_message(uid,
+                "⚠️ <b>មិនមានវិធីទូទាត់ស្វ័យប្រវត្តិណាមួយបើកនៅពេលនេះទេ។</b>\nសូមទំនាក់ Admin ដើម្បីជំនួយ"
+                if lang == "kh" else
+                "⚠️ <b>No automatic payment method is available right now.</b>\nPlease contact Admin for help",
+                parse_mode="HTML")
+            try:
+                bot.send_message(ADMIN_ID,
+                    f"🚨 <b>User ព្យាយាមដាក់លុយ ${amount:.2f} តែវិធីទូទាត់ទាំងអស់ត្រូវបានបិទ/មិនទាន់កំណត់!</b>\n"
+                    f"👤 <code>{uid_str}</code>\nសូមចុច 🔀 វិធីទូទាត់ ដើម្បីពិនិត្យ",
+                    parse_mode="HTML")
+            except Exception as _e: logger.debug(f"[silent] {_e}")
             return
         method = "aba" if aba_ok else "camrapid"
 
@@ -2326,6 +2381,28 @@ def cb_dep_method(call):
         bot.send_message(uid, "⚠️ Session ផុតកំណត់ — សូមចាប់ផ្ដើមដាក់លុយម្តងទៀត")
         return
     _process_deposit(uid, uid_str, pending["amount"], pending.get("promo_code"), method=method)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("paytoggle:"))
+def cb_paytoggle(call):
+    """បិទ/បើក វិធីទូទាត់ (CamRapidPay / ABA PayWay) ពី Admin Panel — v13"""
+    uid = call.message.chat.id
+    if uid != ADMIN_ID: bot.answer_callback_query(call.id, "🚫"); return
+    method = call.data.split(":", 1)[1]
+    if method not in PAY_METHOD_LABELS:
+        bot.answer_callback_query(call.id, "❌ Unknown method"); return
+    set_pay_method_enabled(method, not is_pay_method_enabled(method))
+    new_state = is_pay_method_enabled(method)
+    bot.answer_callback_query(call.id, f"{'🟢 បើក' if new_state else '🔴 បិទ'} {PAY_METHOD_LABELS[method]}")
+    try:
+        bot.edit_message_text(
+            f"🔀 <b>បិទ/បើក វិធីទូទាត់</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"{_paytoggle_status_lines()}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"👉 ចុចប៊ូតុងខាងក្រោមដើម្បីបិទ/បើក។ បើមានទាំង ២ (Key កំណត់រួច + Toggle ON) ព្រមគ្នា "
+            f"User នឹងឃើញ picker ជ្រើសរើសពេលដាក់លុយ។ បើមានតែមួយ Bot ប្រើវិធីនោះដោយស្វ័យប្រវត្តិ។",
+            chat_id=uid, message_id=call.message.message_id, parse_mode="HTML", reply_markup=_paytoggle_kb())
+    except Exception as _e: logger.debug(f"[silent] {_e}")
 
 # ═══════════════════════════════════════════════════════════
 #  KEYBOARDS
@@ -2388,7 +2465,8 @@ def admin_kb():
            KeyboardButton("👥 Sub Admins",      color="progress"))
     kb.row(KeyboardButton("🔑 CamRapidPay Key", color="progress"),
            KeyboardButton("💳 ABA PayWay Key", color="progress"))
-    kb.row(KeyboardButton("🏦 Bakong Deep Link", color="progress"))
+    kb.row(KeyboardButton("🔀 វិធីទូទាត់", color="progress"),
+           KeyboardButton("🏦 Bakong Deep Link", color="progress"))
     kb.row(KeyboardButton("📝 Welcome Msg",     color="progress"),
            KeyboardButton("😊 កំណត់ Emoji", color="progress"))
     return kb
@@ -5636,6 +5714,18 @@ def handle_msg(message):
                 f"យកពី: khmer-system.com/operator/profile\n"
                 f"💡 បើកំណត់ទាំង CamRapidPay + ABA ព្រមគ្នា Bot នឹងឲ្យ User ជ្រើសរើសពេលដាក់លុយ។",
                 parse_mode="HTML", reply_markup=kb2); return
+
+        if text == "🔀 វិធីទូទាត់":
+            if uid != ADMIN_ID:
+                bot.send_message(uid, "🚫 Master Admin only!", reply_markup=sub_admin_kb()); return
+            bot.send_message(uid,
+                f"🔀 <b>បិទ/បើក វិធីទូទាត់</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"{_paytoggle_status_lines()}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"👉 ចុចប៊ូតុងខាងក្រោមដើម្បីបិទ/បើក។ បើមានទាំង ២ (Key កំណត់រួច + Toggle ON) ព្រមគ្នា "
+                f"User នឹងឃើញ picker ជ្រើសរើសពេលដាក់លុយ។ បើមានតែមួយ Bot ប្រើវិធីនោះដោយស្វ័យប្រវត្តិ។",
+                parse_mode="HTML", reply_markup=_paytoggle_kb()); return
 
         if text == "🏦 Bakong Deep Link":
             if uid != ADMIN_ID:
