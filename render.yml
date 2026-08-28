@@ -1,0 +1,52 @@
+# render.yaml — Blueprint សម្រាប់ deploy Kaijaklike Bot (CamRapidPay + ABA PayWay) លើ Render
+# របៀបប្រើ: Push ជាមួយ bot.py (ប្តូរឈ្មោះជា bot.py ឬកែ startCommand ខាងក្រោមឲ្យត្រូវ)
+# ព្រមទាំង requirements.txt ទៅ Git repo ដូចគ្នា ➜ Render Dashboard → New → Blueprint → ជ្រើស repo នេះ។
+#
+# ⚠️ Persistent Disk (DATA_DIR=/var/data) ត្រូវការ Plan បង់ប្រាក់ (starter ឡើងទៅ) —
+#    Render Free Plan មិន support disk ទេ។ បើប្រើ Free Plan សូមដក "disk:" ខាងក្រោមចេញ
+#    (code នឹង fallback ទៅ DATA_DIR="." ស្វ័យប្រវត្តិ ប៉ុន្តែទិន្នន័យនឹងបាត់ពេល redeploy)។
+
+services:
+  - type: web
+    name: kaijaklike-bot
+    runtime: python
+    plan: starter          # 👈 ប្តូរជា "free" បាន ប៉ុន្តែត្រូវដក "disk:" ចេញ (មិន persist data)
+    region: singapore       # 👈 ប្តូរជា oregon / frankfurt / ohio / virginia តាមចង់បាន
+    branch: main
+    buildCommand: pip install -r requirements.txt --break-system-packages || pip install -r requirements.txt
+    startCommand: python3 bot.py
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: BOT_TOKEN            # 👈 Token ពី @BotFather — ចាំបាច់
+        sync: false
+      - key: ADMIN_ID              # 👈 Telegram ID របស់ Master Admin — ចាំបាច់
+        sync: false
+      - key: CONTROL_KEY           # 👈 សម្ងាត់ការពារ /shutdown /restart /broadcast_web
+        generateValue: true
+      - key: CONTROL_PORT          # ត្រូវតែស្មើ Port ដែល Render route ចូល (default 10000)
+        value: "10000"
+      - key: DATA_DIR
+        value: /var/data
+      # ── CamRapidPay (ជម្រើសទូទាត់ទី ១) ──
+      - key: CAMRAPID_API_KEY
+        sync: false
+      - key: WEBHOOK_URL           # ស្រេចចិត្ត — បើទទេ Bot auto-build ពី RENDER_EXTERNAL_URL
+        sync: false
+      # ── ABA PayWay តាម KHMER SYSTEM (ជម្រើសទូទាត់ទី ២) ──
+      - key: ABA_API_KEY
+        sync: false
+      - key: ABA_MERCHANT_ID
+        sync: false
+      # ── Bakong Deep Link (ស្រេចចិត្ត — បើក App ធនាគារស្វ័យប្រវត្តិក្រោម QR) ──
+      - key: BAKONG_API_TOKEN
+        sync: false
+      # ── ស្រេចចិត្តផ្សេងទៀត ──
+      - key: BOT_DISPLAY_NAME
+        sync: false
+      - key: BOT_WELCOME_MSG
+        sync: false
+    disk:
+      name: kaijaklike-data
+      mountPath: /var/data
+      sizeGB: 1
