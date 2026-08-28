@@ -223,6 +223,13 @@ IS_MASTER          = (INSTANCE_NAME == "")                    # bot ដើម (�
 BOT_DISPLAY_NAME   = os.getenv("BOT_DISPLAY_NAME", "")             # ឈ្មោះ bot ដែលបង្ហាញដល់អ្នកប្រើ (ប្តូរបានពី /newbot)
 BOT_WELCOME_MSG    = os.getenv("BOT_WELCOME_MSG", "")              # welcome message custom (ទទេ = ប្រើ default)
 
+# ── Anti-Spam — កំណត់ Cooldown រវាង QR generation ម្តងៗក្នុង User តែម្នាក់ (ការពារ Spam
+#    ចុច "💸 បញ្ចូលលុយ" ជាប់ៗគ្នា ដែលនាំឲ្យហៅ CamRapidPay/ABA API ច្រើនដងឥតប្រយោជន៍ + Flood )
+#    កំណត់តម្លៃដើមពី Environment Variable, ប៉ុន្តែ Admin អាចផ្លាស់ប្តូរផ្ទាល់ក្នុង Bot បាន
+#    (👉 ⚙️ Settings → ⏳ QR Cooldown) — តម្លៃថ្មីរក្សាទុកអចិន្ត្រៃយ៍ក្នុង dep_qr_cooldown.json ។
+DEP_QR_COOLDOWN_SEC = int(os.getenv("DEP_QR_COOLDOWN_SEC", "15"))
+_dep_qr_cooldown    = {}   # uid_str -> unix timestamp នៃ QR generation ចុងក្រោយ
+
 # ── CamRapidPay — Create KHQR + Check transaction ──
 CAMRAPID_API_KEY   = os.getenv("CAMRAPID_API_KEY", "")   # 👈 CamRapidPay API Key — កំណត់ជា Environment Variable ប៉ុណ្ណោះ
 CAMRAPID_CREATE    = "https://pay.camrapidpay.com/api/v1/khqr/create-payments"
@@ -356,6 +363,10 @@ smm_deps     = _load(SMM_DEP_FILE,   {})
 # enabled: បើក/បិទ Auto Bonus, min_amount: ចំនួនអប្បបរមាដែលទទួលបាន Bonus,
 # pct: ភាគរយ Bonus (គិតលើចំនួនប្រាក់ដែលដាក់)។ កែបានពី Admin Menu → 🎁 Bonus ដាក់លុយ
 dep_bonus_cfg = _load(DEP_BONUS_FILE, {"enabled": True, "min_amount": 1.0, "pct": 5.0})
+
+# ── QR Anti-Spam Cooldown — កែបានពី Admin Menu → ⏳ QR Cooldown (persist ថេរ) ──
+DEP_QR_COOLDOWN_FILE = _dpath("dep_qr_cooldown.json")
+dep_qr_cooldown_cfg  = _load(DEP_QR_COOLDOWN_FILE, {"seconds": DEP_QR_COOLDOWN_SEC})
 
 # ── Auto-seed TikTok Promote Khmer packages ──
 _TIKTOK_PACKAGES = [
@@ -1077,6 +1088,14 @@ def _dep_bonus_status_text():
         return "🎁 <b>Bonus ដាក់លុយ៖</b> <i>បិទ</i>"
     return (f"🎁 <b>Bonus ដាក់លុយ៖</b> <b>{float(c.get('pct',5.0)):.0f}%</b> "
             f"(ដាក់ចាប់ពី <b>${float(c.get('min_amount',1.0)):.2f}</b> ឡើងទៅ)")
+
+def _dep_qr_cooldown_status_text():
+    sec = int(dep_qr_cooldown_cfg.get("seconds", DEP_QR_COOLDOWN_SEC))
+    if sec <= 0:
+        return "⏳ <b>QR Cooldown៖</b> <i>បិទ (គ្មានកំណត់)</i>"
+    return (f"⏳ <b>QR Cooldown៖</b> <b>{sec} វិនាទី</b>\n"
+            f"👉 User ម្នាក់ៗត្រូវរង់ចាំ {sec} វិនាទី មុននឹងបង្កើត QR ថ្មីម្តងទៀត "
+            f"(ការពារ Spam ចុច 💸 បញ្ចូលលុយ ជាប់ៗគ្នា)។ Admin មិនកំណត់ទេ។")
 
 def _smm_profit_pct(): return float(smm_profit.get("pct", 20))
 
@@ -2099,6 +2118,23 @@ def _send_deposit_qr(uid, amount, promo_code=None, label="💸 ដាក់ល�
     """Create payment QR → send branded QR card to user.
     method="camrapid" (default — ដដែលពីមុន, backward-compatible) ឬ method="aba"
     (ABA PayWay តាម KHMER SYSTEM — v12, មិនប៉ះពាល់ code path CamRapidPay ខាងក្រោមទេ)"""
+    # ── Anti-Spam Cooldown — ការពារ User ចុចបង្កើត QR ជាប់ៗគ្នា (spam) ដែលនាំឲ្យ
+    #    ហៅ CamRapidPay/ABA API ច្រើនដងឥតប្រយោជន៍ ។ Admin (ADMIN_ID) មិនកំណត់ ដើម្បីងាយ Test ។
+    _cd_key = str(uid)
+    if _cd_key != str(ADMIN_ID):
+        _cd_sec  = int(dep_qr_cooldown_cfg.get("seconds", DEP_QR_COOLDOWN_SEC))
+        _now_ts  = time.time()
+        _last_ts = _dep_qr_cooldown.get(_cd_key, 0)
+        _elapsed = _now_ts - _last_ts
+        if _cd_sec > 0 and _elapsed < _cd_sec:
+            _remain = int(_cd_sec - _elapsed) + 1
+            bot.send_message(uid,
+                f"⏳ <b>សូមរង់ចាំ {_remain} វិនាទី</b> មុននឹងបង្កើត QR ថ្មីម្តងទៀត។\n"
+                f"បើ QR មុនទើបតែផ្ញើ សូមប្រើវានោះ ឬស្កេនវាដើម្បីទូទាត់។",
+                parse_mode="HTML")
+            return
+        _dep_qr_cooldown[_cd_key] = _now_ts
+
     if method == "aba":
         _send_deposit_qr_aba(uid, amount, promo_code_name=promo_code_name, bonus=bonus,
                               promo_bonus=promo_bonus, auto_bonus=auto_bonus)
@@ -2108,9 +2144,19 @@ def _send_deposit_qr(uid, amount, promo_code=None, label="💸 ដាក់ល�
     promo_applied = promo_code_name
     reference     = f"KZ{uid}_{int(time.time())}"[:50]
 
+    # ── ជូនដំណឹង User ថាកំពុងបង្កើត QR (CamRapidPay API អាចចំណាយពេលបន្តិច) ──
+    _gen_msg = None
+    try:
+        _gen_msg = bot.send_message(uid, "⏳ <b>កំពុងបង្កើត QR...</b>\nសូមរង់ចាំបន្តិច",
+                                    parse_mode="HTML")
+    except Exception as _e: logger.debug(f"[silent] {_e}")
+
     # Call CamRapidPay API to create KHQR
     resp = _camrapid_create(uid, amount, reference)
     if not resp:
+        if _gen_msg:
+            try: bot.delete_message(uid, _gen_msg.message_id)
+            except Exception as _e: logger.debug(f"[silent] {_e}")
         bot.send_message(uid, "⚠️ <b>មានបញ្ហា Generate QR!</b>\nសូមព្យាយាមម្តងទៀត ឬ ទំនាក់ Admin",
                          parse_mode="HTML")
         return
@@ -2162,6 +2208,9 @@ def _send_deposit_qr(uid, amount, promo_code=None, label="💸 ដាក់ល�
         )
 
     # ── ផ្ញើ QR ភ្លាមៗសិន (កុំឲ្យ deposit យឺត ដោយរង់ចាំ Bakong deeplink API) ──
+    if _gen_msg:
+        try: bot.delete_message(uid, _gen_msg.message_id)
+        except Exception as _e: logger.debug(f"[silent] {_e}")
     if img_buf:
         try:
             sent_msg = bot.send_photo(uid, img_buf, caption=cap, parse_mode="HTML")
@@ -2204,8 +2253,18 @@ def _send_deposit_qr_aba(uid, amount, promo_code_name=None, bonus=0.0, promo_bon
     promo_applied = promo_code_name
     username      = users_db.get(uid_str, {}).get("username") or f"tg{uid}"
 
+    # ── ជូនដំណឹង User ថាកំពុងបង្កើត QR (ABA PayWay / khmer-system.com អាចចំណាយពេលបន្តិច) ──
+    _gen_msg = None
+    try:
+        _gen_msg = bot.send_message(uid, "⏳ <b>កំពុងបង្កើត QR...</b>\nសូមរង់ចាំបន្តិច",
+                                    parse_mode="HTML")
+    except Exception as _e: logger.debug(f"[silent] {_e}")
+
     data = _aba_create(uid, amount, username)
     if not data:
+        if _gen_msg:
+            try: bot.delete_message(uid, _gen_msg.message_id)
+            except Exception as _e: logger.debug(f"[silent] {_e}")
         bot.send_message(uid, "⚠️ <b>មានបញ្ហា Generate QR (ABA PayWay)!</b>\nសូមព្យាយាមម្តងទៀត ឬ ទំនាក់ Admin",
                          parse_mode="HTML")
         try:
@@ -2282,6 +2341,10 @@ def _send_deposit_qr_aba(uid, amount, promo_code_name=None, bonus=0.0, promo_bon
             except Exception as e:
                 logger.warning(f"[deposit_qr_aba] base64 decode failed: {e}")
                 photo_payload = None
+
+    if _gen_msg:
+        try: bot.delete_message(uid, _gen_msg.message_id)
+        except Exception as _e: logger.debug(f"[silent] {_e}")
 
     sent_ok = False
     if photo_payload:
@@ -2467,6 +2530,7 @@ def admin_kb():
            KeyboardButton("💳 ABA PayWay Key", color="progress"))
     kb.row(KeyboardButton("🔀 វិធីទូទាត់", color="progress"),
            KeyboardButton("🏦 Bakong Deep Link", color="progress"))
+    kb.row(KeyboardButton("⏳ QR Cooldown", color="progress"))
     kb.row(KeyboardButton("📝 Welcome Msg",     color="progress"),
            KeyboardButton("😊 កំណត់ Emoji", color="progress"))
     return kb
@@ -3110,6 +3174,32 @@ def cb_depbonus(call):
             f"✏️ <b>កែ Bonus ដាក់លុយ</b>\n"
             f"បច្ចុប្បន្ន: ចាប់ពី ${float(dep_bonus_cfg.get('min_amount',1.0)):.2f} → {float(dep_bonus_cfg.get('pct',5.0)):.0f}%\n\n"
             f"ផ្ញើជា <code>ចំនួនអប្បបរមា,ភាគរយ</code>\nឧ: <code>1,5</code> (ដាក់ $1 ឡើងទៅ ទទួល 5%)",
+            parse_mode="HTML", reply_markup=cancel_kb())
+        return
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("qrcd:"))
+def cb_qrcooldown(call):
+    """⏳ QR Cooldown — ការពារ Spam បង្កើត QR ។ Admin/Sub-admin កែបានតែម្នាក់ (v14)"""
+    uid = call.message.chat.id
+    if uid != ADMIN_ID and uid not in sub_admins:
+        bot.answer_callback_query(call.id); return
+    action = call.data.split(":", 1)[1]
+    if action == "off":
+        dep_qr_cooldown_cfg["seconds"] = 0
+        _save(DEP_QR_COOLDOWN_FILE, dep_qr_cooldown_cfg)
+        bot.answer_callback_query(call.id, "✅ Cooldown បិទ")
+        try:
+            bot.edit_message_text(_dep_qr_cooldown_status_text(),
+                                  chat_id=uid, message_id=call.message.message_id, parse_mode="HTML")
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        return
+    if action == "edit":
+        bot.answer_callback_query(call.id)
+        waiting[uid] = {"step": "qrcooldown_edit"}
+        bot.send_message(uid,
+            f"✏️ <b>កែ QR Cooldown</b>\n"
+            f"បច្ចុប្បន្ន: <b>{int(dep_qr_cooldown_cfg.get('seconds', DEP_QR_COOLDOWN_SEC))} វិនាទី</b>\n\n"
+            f"ផ្ញើចំនួន<b>វិនាទី</b>ថ្មី (ឧ: <code>15</code>) — ផ្ញើ <code>0</code> ដើម្បីបិទ Cooldown:",
             parse_mode="HTML", reply_markup=cancel_kb())
         return
 
@@ -5015,6 +5105,22 @@ def handle_msg(message):
                     parse_mode="HTML", reply_markup=cancel_kb())
             return
 
+        if isinstance(step, dict) and step.get("step") == "qrcooldown_edit":
+            try:
+                sec = int(float(text.strip()))
+                if sec < 0:
+                    raise ValueError
+                dep_qr_cooldown_cfg["seconds"] = sec
+                _save(DEP_QR_COOLDOWN_FILE, dep_qr_cooldown_cfg)
+                waiting.pop(uid, None)
+                bot.send_message(uid, f"✅ បានកែ!\n{_dep_qr_cooldown_status_text()}",
+                                 parse_mode="HTML", reply_markup=admin_kb())
+            except Exception:
+                bot.send_message(uid,
+                    "❌ ទម្រង់ខុស! សូមផ្ញើជាលេខវិនាទី (ចំនួនគត់, ≥ 0)\nឧ: <code>15</code>",
+                    parse_mode="HTML", reply_markup=cancel_kb())
+            return
+
         if isinstance(step, dict) and step.get("step") == "smm_set_profit":
             try:
                 pct = float(text)
@@ -5442,6 +5548,14 @@ def handle_msg(message):
                 f"👉 អ្នកប្រើដាក់លុយចាប់ពី <b>${float(dep_bonus_cfg.get('min_amount',1.0)):.2f}</b> ឡើងទៅ "
                 f"នឹងទទួល Bonus <b>{float(dep_bonus_cfg.get('pct',5.0)):.0f}%</b> បញ្ចូល Balance ដោយស្វ័យប្រវត្តិ "
                 f"(បូកបន្ថែមលើ Promo Code ប្រសិនបើមាន)។",
+                parse_mode="HTML", reply_markup=btns); return
+
+        if text == "⏳ QR Cooldown":
+            btns = InlineKeyboardMarkup()
+            btns.add(InlineKeyboardButton("✏️ កែ Cooldown (វិនាទី)", callback_data="qrcd:edit", color="progress"))
+            btns.add(InlineKeyboardButton("🔴 បិទ Cooldown", callback_data="qrcd:off", color="danger"))
+            bot.send_message(uid,
+                f"{_dep_qr_cooldown_status_text()}",
                 parse_mode="HTML", reply_markup=btns); return
 
         if text == "💰 ឆែកលុយ API":
