@@ -1,7 +1,7 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
 ║     Kaijaklike Bot — カイロゼン SMM  [v11]                ║
-║     SMM Panel · ដាក់លុយ CamRapidPay KHQR                   ║
+║     SMM Panel · ដាក់លុយ CamRapidPay KHQR + ABA PayWay       ║
 ║     Panel Admin · បន្ថែម/កាត់ Balance                       ║
 ║     Compatible: Python 3.10+ · Termux / Render / VPS       ║
 ║     v10: /newbot — បង្កើត Bot ថ្មីដោយផ្ទាល់ខាងក្នុង Telegram  ║
@@ -11,7 +11,7 @@
   pip install pyTelegramBotAPI requests flask qrcode pillow --break-system-packages
 """
 
-import json, logging, time, re, threading, io, os, sys, subprocess, datetime
+import json, logging, time, re, threading, io, os, sys, subprocess, datetime, base64
 import zipfile
 from decimal import Decimal as _Decimal, ROUND_HALF_UP as _ROUND_HALF_UP
 import requests as http_req
@@ -229,6 +229,16 @@ CAMRAPID_CREATE    = "https://pay.camrapidpay.com/api/v1/khqr/create-payments"
 CAMRAPID_CHECK     = "https://pay.camrapidpay.com/check-transaction-api"
 WEBHOOK_URL        = os.getenv("WEBHOOK_URL", "")          # ដាក់ URL webhook (optional)
 
+# ── ABA PayWay (តាម KHMER SYSTEM — khmer-system.com) — ជម្រើសទូទាត់ស្វ័យប្រវត្តិទី ២ ──
+# (v12: បន្ថែម ABA PayWay ស្របជាមួយ CamRapidPay ដែលមានស្រាប់ — មិនលុប/មិនប៉ះពាល់ CamRapidPay ទេ។
+#  បើកំណត់ទាំង CAMRAPID_API_KEY និង ABA_API_KEY ព្រមគ្នា bot នឹងឲ្យ user ជ្រើសរើសវិធីទូទាត់ពេល
+#  ចុច "💸 បញ្ចូលលុយ"។ បើកំណត់តែ ABA bot ប្រើ ABA ដោយស្វ័យប្រវត្តិ។)
+ABA_API_KEY        = os.getenv("ABA_API_KEY", "")          # 👈 Profile Key របស់ KHMER SYSTEM (khmer-system.com/operator/profile)
+ABA_MERCHANT_ID    = os.getenv("ABA_MERCHANT_ID", "")      # 👈 Merchant ID របស់ KHMER SYSTEM (ឧ. r72mCt)
+ABA_BASE_URL       = os.getenv("ABA_BASE_URL", "https://khmer-system.com")
+ABA_CREATE_URL     = os.getenv("ABA_CREATE_URL", f"{ABA_BASE_URL}/aba-api/generate-qr")
+ABA_CHECK_URL      = os.getenv("ABA_CHECK_URL", f"{ABA_BASE_URL}/aba-api/check-payment")
+
 # ── Bakong Open API — Generate Deep Link (បើក App ធនាគារស្វ័យប្រវត្តិ៖ ABA / ACLEDA / Bakong / Wing ...) ──
 BAKONG_API_TOKEN    = os.getenv("BAKONG_API_TOKEN", "")   # 👈 Bakong Developer Token ពី https://api-bakong.nbc.gov.kh/register/ — កំណត់ជា Environment Variable
 BAKONG_DEEPLINK_API = "https://api-bakong.nbc.gov.kh/v1/generate_deeplink_by_qr"
@@ -301,6 +311,7 @@ DEP_BONUS_FILE  = _dpath("smm_deposit_bonus.json")
 SUB_ADMIN_FILE  = _dpath("smm_sub_admins.json")
 SUPPORT_CFG_FILE= _dpath("smm_support.json")
 CAMRAPID_CFG_FILE= _dpath("smm_camrapid.json")
+ABA_CFG_FILE    = _dpath("smm_aba.json")
 BAKONG_CFG_FILE = _dpath("smm_bakong.json")
 WEBHOOK_CFG_FILE = _dpath("smm_webhook.json")
 EMOJI_FILE      = _mdpath("smm_emoji.json")   # ចែក share រួមគ្នារវាង bot ដើម និង clone ទាំងអស់ (មិនញែកតាម DATA_DIR ទេ)
@@ -632,12 +643,21 @@ clone_registry = _load(CLONES_REGISTRY, {})   # name -> {token, admin_id, camrap
 sub_admins   = _load(SUB_ADMIN_FILE,   [])          # list of int UIDs
 support_cfg  = _load(SUPPORT_CFG_FILE, {"kh": "", "en": ""})   # custom support text per lang
 camrapid_cfg = _load(CAMRAPID_CFG_FILE, {"key": ""})            # live-editable API key
+aba_cfg      = _load(ABA_CFG_FILE, {"key": "", "merchant_id": ""})  # live-editable ABA PayWay (KHMER SYSTEM) key/merchant
 bakong_cfg   = _load(BAKONG_CFG_FILE, {"token": ""})            # live-editable Bakong Developer Token
 webhook_cfg  = _load(WEBHOOK_CFG_FILE, {"url": ""})              # live-editable CamRapidPay webhook URL
 
 def _effective_camrapid_key():
     """Return runtime key if set, else fall back to env/default"""
     return camrapid_cfg.get("key") or CAMRAPID_API_KEY
+
+def _effective_aba_key():
+    """Return runtime ABA PayWay (KHMER SYSTEM) Profile Key if set, else fall back to env/default"""
+    return aba_cfg.get("key") or ABA_API_KEY
+
+def _effective_aba_merchant():
+    """Return runtime ABA PayWay (KHMER SYSTEM) Merchant ID if set, else fall back to env/default"""
+    return aba_cfg.get("merchant_id") or ABA_MERCHANT_ID
 
 def _effective_bakong_token():
     """Return runtime Bakong token if set, else fall back to env/default"""
@@ -1840,6 +1860,107 @@ def _camrapid_check(reference) -> bool:
         logger.error(f"[camrapid_check] {e}")
         return False
 
+# ═══════════════════════════════════════════════════════════
+#  ABA PAYWAY (តាម KHMER SYSTEM — khmer-system.com) — ជម្រើសទូទាត់ស្វ័យប្រវត្តិទី ២
+#  (v12: ស្របជាមួយ CamRapidPay ដែលមានស្រាប់ខាងលើ — ២ Gateway ដំណើរការឯករាជ្យពីគ្នា)
+# ═══════════════════════════════════════════════════════════
+_last_aba_error = ""
+
+def has_aba_payway():
+    """True បើ Bot នេះមាន ABA PayWay auto-payment តាម KHMER SYSTEM (Key + Merchant ID ព្រមទាំង ២)"""
+    return bool(_effective_aba_key() and _effective_aba_merchant())
+
+def _aba_create(uid, amount, username, _attempt=1):
+    """Create ABA PayWay payment (KHMER SYSTEM) — returns response dict ពេលជោគជ័យ
+    (keys ប្រហែល: payment_id, qr_image/card_image, pay_url, qr_string...), ឬ None ពេលបរាជ័យ
+    (មើល _last_aba_error សម្រាប់មូលហេតុ)"""
+    global _last_aba_error
+    api_key      = _effective_aba_key()
+    merchant_id  = _effective_aba_merchant()
+    if not api_key or not merchant_id:
+        _last_aba_error = "ABA_API_KEY / ABA_MERCHANT_ID មិនបានកំណត់ (env var ឬ Settings → ABA PayWay Key)"
+        logger.error(f"[aba_create] {_last_aba_error}")
+        return None
+    try:
+        r = http.post(
+            ABA_CREATE_URL,
+            json={
+                "api_key":     api_key,
+                "merchant_id": merchant_id,
+                "username":    username,
+                "amount":      round(float(amount), 2),
+            },
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            timeout=20,
+        )
+        logger.info(f"[aba_create] uid={uid} HTTP {r.status_code}")
+        try:
+            data = r.json()
+        except Exception:
+            body = r.text.strip()
+            _last_aba_error = f"HTTP {r.status_code} (non-JSON): {body[:300]}"
+            logger.error(f"[aba_create] {_last_aba_error}")
+            if r.status_code >= 500 and _attempt < 2:
+                time.sleep(1.5)
+                return _aba_create(uid, amount, username, _attempt=2)
+            return None
+        logger.info(f"[aba_create] resp={data}")
+        if data.get("ok"):
+            return data
+        _last_aba_error = f"HTTP {r.status_code} [{data.get('code', '?')}]: {data.get('message') or data}"
+        logger.error(f"[aba_create] failed: {_last_aba_error}")
+        if r.status_code >= 500 and _attempt < 2:
+            time.sleep(1.5)
+            return _aba_create(uid, amount, username, _attempt=2)
+        return None
+    except Exception as e:
+        _last_aba_error = f"{type(e).__name__}: {e}"
+        logger.error(f"[aba_create] exception: {e}")
+        if _attempt < 2:
+            time.sleep(1.5)
+            return _aba_create(uid, amount, username, _attempt=2)
+        return None
+
+def _aba_check(payment_id) -> bool:
+    """Check ABA PayWay (KHMER SYSTEM) payment status — returns True if PAID"""
+    try:
+        r = http.post(
+            ABA_CHECK_URL,
+            json={"api_key": _effective_aba_key(), "merchant_id": _effective_aba_merchant(),
+                  "payment_id": payment_id},
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            timeout=10,
+        )
+        data = r.json()
+        logger.info(f"[aba_check] payment_id={payment_id} resp={data}")
+        return bool(data.get("ok")) and str(data.get("status", "")).upper() == "PAID"
+    except Exception as e:
+        logger.error(f"[aba_check] {e}")
+        return False
+
+def _build_aba_app_deeplink(data):
+    """បើ response ពី khmer-system.com មាន field deeplink ត្រង់ៗ ត្រឡប់វាភ្លាម។ បើគ្មាន
+    ប៉ុន្តែមាន raw KHQR string ត្រូវបង្កើត deep link ដោយខ្លួនឯង តាម scheme ផ្លូវការរបស់
+    ABA Mobile (abamobilebank://ababank.com?type=payway&qrcode=...) ។ ត្រឡប់ None បើគ្មាន field
+    ណាមួយសមរម្យទេ។"""
+    if not isinstance(data, dict):
+        return None
+    for key in ("abapay_deeplink", "aba_deeplink", "deeplink", "deep_link"):
+        val = data.get(key)
+        if val and str(val).strip():
+            return str(val).strip()
+    qr_raw = None
+    for key in ("qr_string", "qrString", "qr_code", "qrCode", "qr"):
+        val = data.get(key)
+        if val and str(val).strip():
+            qr_raw = str(val).strip()
+            break
+    if qr_raw:
+        from urllib.parse import quote
+        return f"abamobilebank://ababank.com?type=payway&qrcode={quote(qr_raw, safe='')}"
+    logger.warning(f"[aba_deeplink] គ្មាន deeplink/qr_string field ក្នុង response — keys: {list(data.keys())}")
+    return None
+
 def _bakong_deeplink(qr_str, uid=None):
     """
     ហៅ Bakong Open API (NBC) ដើម្បីបំលែង KHQR string → Deep Link មួយ
@@ -1879,13 +2000,16 @@ def _bakong_deeplink(qr_str, uid=None):
         logger.warning(f"[bakong_deeplink] exception: {e}")
         return None
 
-def _watch_deposit(uid, uid_str, dep_id, amount, reference):
-    """Poll CamRapidPay until paid or expired (5 min)"""
+def _watch_deposit(uid, uid_str, dep_id, amount, reference, checker=None):
+    """Poll payment gateway until paid or expired (5 min). `checker` ជា function ទទួល
+    reference/payment_id → True/False ថាបានទូទាត់ហើយឬនៅ — default ជា CamRapidPay (backward
+    compatible), ប្ដូរជា _aba_check ពេលហៅសម្រាប់ ABA PayWay deposit (v12)."""
+    checker = checker or _camrapid_check
     deadline = time.time() + DEPOSIT_EXPIRE_SEC + 30
     while time.time() < deadline:
         dep = smm_deps.get(dep_id)
         if not dep or dep.get("status") != "pending": return
-        if _camrapid_check(reference):
+        if checker(reference):
             bonus       = float(dep.get("bonus") or 0)
             promo_bonus = float(dep.get("promo_bonus") or 0)
             auto_bonus  = float(dep.get("auto_bonus") or 0)
@@ -1938,8 +2062,15 @@ def _watch_deposit(uid, uid_str, dep_id, amount, reference):
         except Exception as _e: logger.debug(f"[silent] {_e}")
 
 def _send_deposit_qr(uid, amount, promo_code=None, label="💸 ដាក់លុយ", bonus=0.0, promo_code_name=None,
-                      promo_bonus=0.0, auto_bonus=0.0):
-    """Create KHQR via CamRapidPay API → send branded QR card to user"""
+                      promo_bonus=0.0, auto_bonus=0.0, method="camrapid"):
+    """Create payment QR → send branded QR card to user.
+    method="camrapid" (default — ដដែលពីមុន, backward-compatible) ឬ method="aba"
+    (ABA PayWay តាម KHMER SYSTEM — v12, មិនប៉ះពាល់ code path CamRapidPay ខាងក្រោមទេ)"""
+    if method == "aba":
+        _send_deposit_qr_aba(uid, amount, promo_code_name=promo_code_name, bonus=bonus,
+                              promo_bonus=promo_bonus, auto_bonus=auto_bonus)
+        return
+
     uid_str       = str(uid)
     promo_applied = promo_code_name
     reference     = f"KZ{uid}_{int(time.time())}"[:50]
@@ -2032,13 +2163,137 @@ def _send_deposit_qr(uid, amount, promo_code=None, label="💸 ដាក់ល�
     threading.Thread(target=_watch_deposit,
                      args=(uid, uid_str, dep_id, amount, reference), daemon=True).start()
 
+def _send_deposit_qr_aba(uid, amount, promo_code_name=None, bonus=0.0, promo_bonus=0.0, auto_bonus=0.0):
+    """Create payment via ABA PayWay (KHMER SYSTEM) → send QR/card image ដែល khmer-system.com
+    បង្កើតរួចជាស្រេច (v12) — ខុសពី CamRapidPay ត្រង់ khmer-system.com ត្រឡប់ card_image
+    (base64 ឬ URL) ដោយផ្ទាល់ ជាជាងឲ្យ bot ខ្លួនឯង render ពី raw KHQR string ។"""
+    uid_str       = str(uid)
+    promo_applied = promo_code_name
+    username      = users_db.get(uid_str, {}).get("username") or f"tg{uid}"
+
+    data = _aba_create(uid, amount, username)
+    if not data:
+        bot.send_message(uid, "⚠️ <b>មានបញ្ហា Generate QR (ABA PayWay)!</b>\nសូមព្យាយាមម្តងទៀត ឬ ទំនាក់ Admin",
+                         parse_mode="HTML")
+        try:
+            bot.send_message(ADMIN_ID,
+                f"⚠️ <b>ABA PayWay បរាជ័យ (aba_generate_qr)</b>\n👤 <code>{uid_str}</code> — ${amount:.2f}\n"
+                f"🔎 <code>{_last_aba_error[:500]}</code>", parse_mode="HTML")
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        return
+
+    payment_id   = data.get("payment_id", "")
+    card_image   = data.get("card_image") or data.get("qr_image")
+    pay_url      = data.get("pay_url")
+    aba_app_link = _build_aba_app_deeplink(data)
+
+    dep_id = f"dep_{uid}_{int(time.time())}"
+    reference = payment_id or f"ABA{uid}_{int(time.time())}"[:50]
+    smm_deps[dep_id] = {
+        "uid":         uid_str,
+        "amount":      amount,
+        "status":      "pending",
+        "bonus":       bonus,
+        "promo_bonus": promo_bonus,
+        "auto_bonus":  auto_bonus,
+        "promo":       promo_applied or "",
+        "reference":   reference,
+        "payment_url": pay_url or "",
+        "method":      "aba",
+    }
+    _save(SMM_DEP_FILE, smm_deps)
+
+    ref_short = reference[-12:] if len(reference) > 12 else reference
+    bonus_bits = []
+    if promo_bonus > 0:
+        bonus_bits.append(f"🎟️ Promo Bonus: <b>+${promo_bonus:.2f}</b> ({promo_applied})")
+    if auto_bonus > 0:
+        bonus_bits.append(f"🎁 Auto Bonus ({dep_bonus_cfg.get('pct',5):.0f}%): <b>+${auto_bonus:.2f}</b>")
+    bonus_line = ("\n" + "\n".join(bonus_bits)) if bonus_bits else ""
+    cap = (f"💸 <b>SMM Panel — បញ្ចូលលុយ</b>{bonus_line}\n"
+           f"💳 វិធីទូទាត់: <b>ABA PayWay</b>\n"
+           f"💰 Amount: <b>${amount:.2f}</b>\n"
+           f"🔖 Ref: <code>{ref_short}</code>\n"
+           f"⏱ Expires in: <b>5 minutes</b>\n"
+           f"✅ <i>ប្រព័ន្ធ auto-detect — Balance update ភ្លាមៗ!</i>")
+
+    kb_pay = None
+    if aba_app_link or pay_url:
+        kb_pay = InlineKeyboardMarkup()
+        if aba_app_link:
+            kb_pay.add(InlineKeyboardButton("🏦 បើក ABA App ស្កេនស្វ័យប្រវត្តិ", url=aba_app_link, color="active"))
+        if pay_url:
+            kb_pay.add(InlineKeyboardButton("🌐 បើកទំព័រទូទាត់", url=pay_url, color="progress"))
+
+    # khmer-system.com ត្រឡប់ card_image ជា http(s) URL ធម្មតា ឬ base64 string (មានពេលមាន
+    # prefix "data:image/...;base64," មានពេលគ្មាន) — ត្រូវ decode ជា raw bytes មុននឹងផ្ញើ
+    # ដើម្បីកុំឲ្យ Telegram បដិសេធជា "MESSAGE_TOO_LONG" ពេល string វែងពេក។
+    photo_payload = None
+    if card_image:
+        img_str = str(card_image).strip()
+        if img_str.lower().startswith(("http://", "https://")):
+            photo_payload = img_str
+        else:
+            try:
+                b64_part = img_str.split(",", 1)[1] if img_str.startswith("data:") else img_str
+                photo_payload = io.BytesIO(base64.b64decode(b64_part, validate=False))
+                photo_payload.name = "aba_payment.png"
+            except Exception as e:
+                logger.warning(f"[deposit_qr_aba] base64 decode failed: {e}")
+                photo_payload = None
+
+    sent_ok = False
+    if photo_payload:
+        try:
+            bot.send_photo(uid, photo_payload, caption=cap, parse_mode="HTML", reply_markup=kb_pay)
+            sent_ok = True
+        except Exception as e:
+            logger.warning(f"[deposit_qr_aba] send_photo failed: {e}")
+    if not sent_ok:
+        bot.send_message(uid, cap, parse_mode="HTML", reply_markup=kb_pay)
+
+    if not payment_id:
+        bot.send_message(uid, "⚠️ <b>ABA PayWay មិនបាន Return payment_id!</b>\nសូមទំនាក់ Admin ជូនវិក័យប័ត្រផ្ទាល់",
+                         parse_mode="HTML")
+        return
+
+    try:
+        bot.send_message(ADMIN_ID,
+            f"🆕 <b>QR ត្រូវបានបង្កើត (ABA PayWay)</b>\n👤 <code>{uid_str}</code>\n"
+            f"💵 ${amount:.2f}\n🔖 <code>{payment_id}</code>", parse_mode="HTML")
+    except Exception as _e: logger.debug(f"[silent] {_e}")
+
+    threading.Thread(target=_watch_deposit,
+                     args=(uid, uid_str, dep_id, amount, reference),
+                     kwargs={"checker": _aba_check}, daemon=True).start()
+
 def _get_dep_promo(uid):
     step = waiting.get(uid)
     if isinstance(step, dict):
         return step.get("promo")
     return None
 
-def _process_deposit(uid, uid_str, amount, promo_code=None):
+_pending_dep_choice = {}   # uid -> {"amount":..., "promo_code":...} — រង់ចាំ user ជ្រើស Payment Method (v12)
+
+def _process_deposit(uid, uid_str, amount, promo_code=None, method=None):
+    """method=None → decide ស្វ័យប្រវត្តិ: បើមានទាំង CamRapidPay + ABA PayWay ព្រមគ្នា
+    ឲ្យ user ជ្រើសរើសមុន (picker) ； បើមានតែ ABA ប្រើ ABA ភ្លាម；  មិនដូច្នេះទេ ប្រើ CamRapidPay
+    (ដដែលពីមុន — backward compatible)។ (v12)"""
+    camrapid_ok = bool(_effective_camrapid_key())
+    aba_ok      = has_aba_payway()
+    if method is None:
+        if camrapid_ok and aba_ok:
+            _pending_dep_choice[uid] = {"amount": amount, "promo_code": promo_code}
+            lang = get_lang(uid)
+            kb = InlineKeyboardMarkup()
+            kb.add(InlineKeyboardButton("🔄 CamRapidPay KHQR", callback_data="depm:camrapid", color="active"))
+            kb.add(InlineKeyboardButton("💳 ABA PayWay", callback_data="depm:aba", color="primary"))
+            bot.send_message(uid,
+                f"💳 <b>{'ជ្រើសរើសវិធីទូទាត់' if lang=='kh' else 'Choose payment method'}</b> — ${amount:.2f}",
+                parse_mode="HTML", reply_markup=kb)
+            return
+        method = "aba" if aba_ok else "camrapid"
+
     lang  = get_lang(uid)
     promo_bonus = 0.0
     promo_applied = None
@@ -2057,7 +2312,20 @@ def _process_deposit(uid, uid_str, amount, promo_code=None):
     _send_deposit_qr(uid, amount,
                      label=f"💸 <b>{'ដាក់លុយ' if lang=='kh' else 'Top Up'}</b>",
                      bonus=total_bonus, promo_code_name=promo_applied,
-                     promo_bonus=promo_bonus, auto_bonus=auto_bonus)
+                     promo_bonus=promo_bonus, auto_bonus=auto_bonus, method=method)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("depm:"))
+def cb_dep_method(call):
+    """ចម្លើយ user ជ្រើសរើស Payment Method ពី picker ក្នុង _process_deposit (v12)"""
+    uid = call.message.chat.id
+    uid_str = str(uid)
+    method = call.data.split(":", 1)[1]
+    bot.answer_callback_query(call.id)
+    pending = _pending_dep_choice.pop(uid, None)
+    if not pending:
+        bot.send_message(uid, "⚠️ Session ផុតកំណត់ — សូមចាប់ផ្ដើមដាក់លុយម្តងទៀត")
+        return
+    _process_deposit(uid, uid_str, pending["amount"], pending.get("promo_code"), method=method)
 
 # ═══════════════════════════════════════════════════════════
 #  KEYBOARDS
@@ -2119,7 +2387,8 @@ def admin_kb():
     kb.row(KeyboardButton("✏️ កែ Support",      color="progress"),
            KeyboardButton("👥 Sub Admins",      color="progress"))
     kb.row(KeyboardButton("🔑 CamRapidPay Key", color="progress"),
-           KeyboardButton("🏦 Bakong Deep Link", color="progress"))
+           KeyboardButton("💳 ABA PayWay Key", color="progress"))
+    kb.row(KeyboardButton("🏦 Bakong Deep Link", color="progress"))
     kb.row(KeyboardButton("📝 Welcome Msg",     color="progress"),
            KeyboardButton("😊 កំណត់ Emoji", color="progress"))
     return kb
@@ -3773,6 +4042,38 @@ def cb_set_camrapid(call):
                 f"(Render/VPS) ពី <code>pay.camrapidpay.com</code>",
                 parse_mode="HTML", reply_markup=admin_kb())
 
+@bot.callback_query_handler(func=lambda c: c.data.startswith("set_aba:"))
+def cb_set_aba(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID: bot.answer_callback_query(call.id, "🚫"); return
+    action = call.data.split(":")[1]
+    bot.answer_callback_query(call.id)
+    if action == "edit_key":
+        waiting[uid] = "set_aba_key"
+        bot.send_message(uid,
+            "🔑 <b>ផ្ញើ ABA PayWay Profile Key ថ្មី</b> (khmer-system.com/operator/profile):\n"
+            "ឬផ្ញើ <code>-</code> ដើម្បី reset ទៅ env/default",
+            parse_mode="HTML", reply_markup=cancel_kb())
+    elif action == "edit_merchant":
+        waiting[uid] = "set_aba_merchant"
+        bot.send_message(uid,
+            "🏪 <b>ផ្ញើ ABA PayWay Merchant ID ថ្មី</b> (ឧ. <code>r72mCt</code>):\n"
+            "ឬផ្ញើ <code>-</code> ដើម្បី reset ទៅ env/default",
+            parse_mode="HTML", reply_markup=cancel_kb())
+    elif action == "testcreate":
+        bot.send_message(uid, "⏳ កំពុង Test Generate QR ជាមួយ ABA PayWay ($0.10)...")
+        test_data = _aba_create(uid, 0.10, f"tg{uid}")
+        ok = bool(test_data)
+        bot.send_message(uid,
+            f"{'✅' if ok else '❌'} <b>ABA PayWay Test (Generate QR)</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🌐 URL: <code>{ABA_CREATE_URL}</code>\n"
+            f"📋 Response: <code>{str(test_data if ok else _last_aba_error)[:500]}</code>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            + ("✅ QR គួរតែចេញបានធម្មតា!" if ok else
+               "❌ សូមអានសារ Error ខាងលើ (ឧ. Key/Merchant ID មិនត្រឹមត្រូវ, service down ។ល។)"),
+            parse_mode="HTML", reply_markup=admin_kb())
+
 @bot.callback_query_handler(func=lambda c: c.data.startswith("set_bakong:"))
 def cb_set_bakong(call):
     uid = call.message.chat.id
@@ -5314,6 +5615,28 @@ def handle_msg(message):
                 f"Source: {wh_src}",
                 parse_mode="HTML", reply_markup=kb2); return
 
+        if text == "💳 ABA PayWay Key":
+            if uid != ADMIN_ID:
+                bot.send_message(uid, "🚫 Master Admin only!", reply_markup=sub_admin_kb()); return
+            cur_key = _effective_aba_key()
+            cur_mid = _effective_aba_merchant()
+            masked_key = cur_key[:6] + "..." + cur_key[-4:] if len(cur_key) > 10 else (("*" * len(cur_key)) if cur_key else "(មិនទាន់កំណត់)")
+            kb2 = InlineKeyboardMarkup()
+            kb2.add(InlineKeyboardButton("✏️ ប្តូរ API Key ថ្មី", callback_data="set_aba:edit_key", color="progress"))
+            kb2.add(InlineKeyboardButton("✏️ ប្តូរ Merchant ID ថ្មី", callback_data="set_aba:edit_merchant", color="progress"))
+            kb2.add(InlineKeyboardButton("🧪 Test Generate QR ($0.10)", callback_data="set_aba:testcreate", color="active"))
+            bot.send_message(uid,
+                f"💳 <b>ABA PayWay Key (KHMER SYSTEM)</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🔑 Profile Key: <code>{masked_key}</code>\n"
+                f"🏪 Merchant ID: <code>{cur_mid or '(មិនទាន់កំណត់)'}</code>\n"
+                f"Source: {'📁 runtime' if (aba_cfg.get('key') or aba_cfg.get('merchant_id')) else '⚙️ env/default'}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"📌 ត្រូវការទាំង ២ (Key + Merchant ID) ដើម្បីបើក ABA PayWay ជាវិធីទូទាត់ស្វ័យប្រវត្តិ។\n"
+                f"យកពី: khmer-system.com/operator/profile\n"
+                f"💡 បើកំណត់ទាំង CamRapidPay + ABA ព្រមគ្នា Bot នឹងឲ្យ User ជ្រើសរើសពេលដាក់លុយ។",
+                parse_mode="HTML", reply_markup=kb2); return
+
         if text == "🏦 Bakong Deep Link":
             if uid != ADMIN_ID:
                 bot.send_message(uid, "🚫 Master Admin only!", reply_markup=sub_admin_kb()); return
@@ -5407,6 +5730,36 @@ def handle_msg(message):
                 _save(CAMRAPID_CFG_FILE, camrapid_cfg)
                 masked = k[:8] + "..." + k[-4:] if len(k) > 12 else "*" * len(k)
                 bot.send_message(uid, f"✅ CamRapidPay Key ថ្មីបានរក្សា!\n🔑 <code>{masked}</code>",
+                                 parse_mode="HTML", reply_markup=admin_kb())
+            return
+
+        if step == "set_aba_key":
+            waiting.pop(uid, None)
+            if text.strip() == "-":
+                aba_cfg["key"] = ""
+                _save(ABA_CFG_FILE, aba_cfg)
+                bot.send_message(uid, "✅ ABA PayWay Key reset ទៅ env/default!", reply_markup=admin_kb())
+            else:
+                k = text.strip()
+                if len(k) < 6:
+                    bot.send_message(uid, "❌ Key ខ្លីពេក!", reply_markup=admin_kb()); return
+                aba_cfg["key"] = k
+                _save(ABA_CFG_FILE, aba_cfg)
+                masked = k[:6] + "..." + k[-4:] if len(k) > 10 else "*" * len(k)
+                bot.send_message(uid, f"✅ ABA PayWay Key ថ្មីបានរក្សា!\n🔑 <code>{masked}</code>",
+                                 parse_mode="HTML", reply_markup=admin_kb())
+            return
+
+        if step == "set_aba_merchant":
+            waiting.pop(uid, None)
+            if text.strip() == "-":
+                aba_cfg["merchant_id"] = ""
+                _save(ABA_CFG_FILE, aba_cfg)
+                bot.send_message(uid, "✅ ABA PayWay Merchant ID reset ទៅ env/default!", reply_markup=admin_kb())
+            else:
+                aba_cfg["merchant_id"] = text.strip()
+                _save(ABA_CFG_FILE, aba_cfg)
+                bot.send_message(uid, f"✅ ABA PayWay Merchant ID ថ្មីបានរក្សា!\n🏪 <code>{text.strip()}</code>",
                                  parse_mode="HTML", reply_markup=admin_kb())
             return
 
