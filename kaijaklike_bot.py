@@ -4009,6 +4009,7 @@ def cb_cln_view(call):
     masked = cfg["token"][:10] + "..." + cfg["token"][-4:]
     pay_txt = _clone_pay_txt(cfg.get("pay_method"))
     text = (f"🤖 <b>{name}</b>\nស្ថានភាព: {status}\n"
+            f"ឈ្មោះ Display: <code>{cfg.get('display_name', name)}</code>\n"
             f"Admin ID: <code>{cfg['admin_id']}</code>\nToken: <code>{masked}</code>\n"
             f"ការទូទាត់: {pay_txt}\n"
             f"Port: <code>{cfg['port']}</code>")
@@ -4020,6 +4021,8 @@ def cb_cln_view(call):
         kb.add(InlineKeyboardButton("▶️ ដំណើរការ", callback_data=f"cln_start|{name}", color="active"))
     kb.add(InlineKeyboardButton("🔁 ប្តូរ Step ទូទាត់", callback_data=f"cln_pay|{name}", color="progress"))
     kb.add(InlineKeyboardButton("👤 ប្តូរ Admin", callback_data=f"cln_admin|{name}", color="progress"))
+    kb.add(InlineKeyboardButton("✏️ ប្តូរ ឈ្មោះ Bot", callback_data=f"cln_rename|{name}", color="progress"))
+    kb.add(InlineKeyboardButton("⚙️ ការកំណត់ផ្សេងទៀត", callback_data=f"cln_more|{name}", color="progress"))
     kb.add(InlineKeyboardButton("🗑️ លុប", callback_data=f"cln_delete|{name}", color="inactive"))
     kb.add(InlineKeyboardButton("⬅️ ត្រឡប់", callback_data="cln_list", color="inactive"))
     bot.send_message(uid, text, parse_mode="HTML", reply_markup=kb)
@@ -4082,6 +4085,177 @@ def cb_cln_admin(call):
         f"👤 <b>ប្តូរ Admin — {name}</b>\n"
         f"Admin ID បច្ចុប្បន្ន: <code>{cfg['admin_id']}</code>\n\n"
         f"វាយ <b>Telegram ID</b> ថ្មីរបស់ admin (លេខ):",
+        parse_mode="HTML", reply_markup=cancel_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cln_rename|"))
+def cb_cln_rename(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID or not IS_MASTER:
+        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
+    name = call.data.split("|", 1)[1]
+    cfg = clone_registry.get(name)
+    if not cfg:
+        bot.answer_callback_query(call.id, "រកមិនឃើញ"); return
+    bot.answer_callback_query(call.id)
+    waiting[uid] = {"step": "cln_rename_name", "clone": name}
+    bot.send_message(uid,
+        f"✏️ <b>ប្តូរ ឈ្មោះ Bot (Display Name) — {name}</b>\n"
+        f"ឈ្មោះបច្ចុប្បន្ន: <code>{cfg.get('display_name', name)}</code>\n\n"
+        f"វាយ <b>ឈ្មោះថ្មី</b> ដែលបង្ហាញដល់អ្នកប្រើ (ឧ. <code>Jak Like Shop</code>)\n"
+        f"ចំណាំ: នេះជាឈ្មោះបង្ហាញ (display) ប៉ុណ្ណោះ — មិនប៉ះពាល់ឈ្មោះ internal (<code>{name}</code>) ដែលប្រើសម្គាល់ក្នុង /mybots ទេ:",
+        parse_mode="HTML", reply_markup=cancel_kb())
+
+# ═══════════════════════════════════════════════════════════
+#  Clone ⚙️ ការកំណត់ផ្សេងទៀត (Support / Sub Admins / Bakong / QR Cooldown)
+#  — កែផ្ទាល់ពី Master តាម /mybots ដោយសរសេរ file JSON ចូល bot_clones/<n>/
+#    ដោយផ្ទាល់ (ដូចលក្ខណៈ manual_qr.json ដែលមានស្រាប់) — clone process
+#    ត្រូវ restart ដើម្បីអានតម្លៃថ្មី (config files ទាំងនេះផ្ទុកតែម្តងពេល startup)
+# ═══════════════════════════════════════════════════════════
+def _clone_file(name, filename):
+    return os.path.join(_clone_dir(name), filename)
+
+def _clone_load(name, filename, default):
+    return _load(_clone_file(name, filename), default)
+
+def _clone_save_restart(uid, name, filename, data, ok_text):
+    _save(_clone_file(name, filename), data)
+    cfg = clone_registry.get(name)
+    was_running = cfg and _clone_is_running(name)
+    if was_running:
+        _stop_clone(name); time.sleep(1); _spawn_clone(name, cfg)
+    bot.send_message(uid, ok_text + (" ហើយ restart រួច។" if was_running else " (bot នេះកំពុងបិទ — ចាប់ផ្តើមវាដើម្បីអនុវត្ត)។"),
+                      parse_mode="HTML", reply_markup=admin_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cln_more|"))
+def cb_cln_more(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID or not IS_MASTER:
+        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
+    name = call.data.split("|", 1)[1]
+    if name not in clone_registry:
+        bot.answer_callback_query(call.id, "រកមិនឃើញ"); return
+    bot.answer_callback_query(call.id)
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(InlineKeyboardButton("💬 Support Message", callback_data=f"cln_support|{name}", color="progress"))
+    kb.add(InlineKeyboardButton("👥 Sub Admins", callback_data=f"cln_subadmin|{name}", color="progress"))
+    kb.add(InlineKeyboardButton("🏦 Bakong Deep Link", callback_data=f"cln_bakong|{name}", color="progress"))
+    kb.add(InlineKeyboardButton("⏳ QR Cooldown", callback_data=f"cln_cooldown|{name}", color="progress"))
+    kb.add(InlineKeyboardButton("⬅️ ត្រឡប់", callback_data=f"cln_view|{name}", color="inactive"))
+    bot.send_message(uid, f"⚙️ <b>ការកំណត់ផ្សេងទៀត — {name}</b>", parse_mode="HTML", reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cln_support|"))
+def cb_cln_support(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID or not IS_MASTER:
+        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
+    name = call.data.split("|", 1)[1]
+    if name not in clone_registry:
+        bot.answer_callback_query(call.id, "រកមិនឃើញ"); return
+    bot.answer_callback_query(call.id)
+    cur = _clone_load(name, "smm_support.json", {"kh": "", "en": ""})
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(InlineKeyboardButton("✏️ កែ ខ្មែរ", callback_data=f"cln_support_lang|kh|{name}", color="progress"))
+    kb.add(InlineKeyboardButton("✏️ កែ English", callback_data=f"cln_support_lang|en|{name}", color="progress"))
+    kb.add(InlineKeyboardButton("⬅️ ត្រឡប់", callback_data=f"cln_more|{name}", color="inactive"))
+    bot.send_message(uid,
+        f"💬 <b>Support Message — {name}</b>\n"
+        f"ខ្មែរ: <code>{(cur.get('kh') or '(default)')[:200]}</code>\n"
+        f"English: <code>{(cur.get('en') or '(default)')[:200]}</code>",
+        parse_mode="HTML", reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cln_support_lang|"))
+def cb_cln_support_lang(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID or not IS_MASTER:
+        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
+    _, lang, name = call.data.split("|", 2)
+    if name not in clone_registry:
+        bot.answer_callback_query(call.id, "រកមិនឃើញ"); return
+    bot.answer_callback_query(call.id)
+    waiting[uid] = {"step": "cln_support_text", "clone": name, "lang": lang}
+    bot.send_message(uid,
+        f"✏️ <b>វាយ Support Message {'(ខ្មែរ)' if lang=='kh' else '(English)'} — {name}</b>\n"
+        "ឬផ្ញើ <code>-</code> ដើម្បី reset ទៅ default:",
+        parse_mode="HTML", reply_markup=cancel_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cln_subadmin|"))
+def cb_cln_subadmin(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID or not IS_MASTER:
+        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
+    name = call.data.split("|", 1)[1]
+    if name not in clone_registry:
+        bot.answer_callback_query(call.id, "រកមិនឃើញ"); return
+    bot.answer_callback_query(call.id)
+    cur = _clone_load(name, "smm_sub_admins.json", [])
+    kb = InlineKeyboardMarkup(row_width=1)
+    for sa in cur:
+        kb.add(InlineKeyboardButton(f"🗑️ លុប {sa}", callback_data=f"cln_subadmin_del|{sa}|{name}", color="inactive"))
+    kb.add(InlineKeyboardButton("➕ បន្ថែម Sub Admin", callback_data=f"cln_subadmin_add|{name}", color="active"))
+    kb.add(InlineKeyboardButton("⬅️ ត្រឡប់", callback_data=f"cln_more|{name}", color="inactive"))
+    bot.send_message(uid,
+        f"👥 <b>Sub Admins — {name}</b> ({len(cur)})",
+        parse_mode="HTML", reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cln_subadmin_add|"))
+def cb_cln_subadmin_add(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID or not IS_MASTER:
+        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
+    name = call.data.split("|", 1)[1]
+    if name not in clone_registry:
+        bot.answer_callback_query(call.id, "រកមិនឃើញ"); return
+    bot.answer_callback_query(call.id)
+    waiting[uid] = {"step": "cln_subadmin_add_id", "clone": name}
+    bot.send_message(uid, f"➕ <b>បន្ថែម Sub Admin — {name}</b>\nផ្ញើ Telegram ID (លេខ):",
+                      parse_mode="HTML", reply_markup=cancel_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cln_subadmin_del|"))
+def cb_cln_subadmin_del(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID or not IS_MASTER:
+        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
+    _, sa_id, name = call.data.split("|", 2)
+    if name not in clone_registry:
+        bot.answer_callback_query(call.id, "រកមិនឃើញ"); return
+    bot.answer_callback_query(call.id)
+    cur = _clone_load(name, "smm_sub_admins.json", [])
+    sa_id = int(sa_id)
+    if sa_id in cur:
+        cur.remove(sa_id)
+    _clone_save_restart(uid, name, "smm_sub_admins.json", cur,
+                         f"✅ លុប Sub Admin <code>{sa_id}</code> ចេញពី '<b>{name}</b>'")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cln_bakong|"))
+def cb_cln_bakong(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID or not IS_MASTER:
+        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
+    name = call.data.split("|", 1)[1]
+    if name not in clone_registry:
+        bot.answer_callback_query(call.id, "រកមិនឃើញ"); return
+    bot.answer_callback_query(call.id)
+    waiting[uid] = {"step": "cln_bakong_token", "clone": name}
+    bot.send_message(uid,
+        f"🏦 <b>ផ្ញើ Bakong Developer Token ថ្មី — {name}</b>\n"
+        "(យកពី https://api-bakong.nbc.gov.kh/register/)\n"
+        "ឬផ្ញើ <code>-</code> ដើម្បី reset ទៅ env/default:",
+        parse_mode="HTML", reply_markup=cancel_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cln_cooldown|"))
+def cb_cln_cooldown(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID or not IS_MASTER:
+        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
+    name = call.data.split("|", 1)[1]
+    if name not in clone_registry:
+        bot.answer_callback_query(call.id, "រកមិនឃើញ"); return
+    bot.answer_callback_query(call.id)
+    cur = _clone_load(name, "dep_qr_cooldown.json", {"seconds": DEP_QR_COOLDOWN_SEC})
+    waiting[uid] = {"step": "cln_cooldown_sec", "clone": name}
+    bot.send_message(uid,
+        f"⏳ <b>QR Cooldown — {name}</b>\nបច្ចុប្បន្ន: <b>{cur.get('seconds', DEP_QR_COOLDOWN_SEC)} វិនាទី</b>\n\n"
+        "វាយ <b>ចំនួនវិនាទី</b> ថ្មី (0 = បិទ Cooldown):",
         parse_mode="HTML", reply_markup=cancel_kb())
 
 def _apply_clone_pay_update(uid, name, pay_method, camrapid_key="", manual_photo_id="", manual_info="",
@@ -5018,6 +5192,74 @@ def handle_msg(message):
                 f"ចាស់: <code>{old_admin_id}</code> → ថ្មី: <code>{new_admin_id}</code>"
                 + (" ហើយ restart រួច។" if was_running else " (bot នេះកំពុងបិទ — ចាប់ផ្តើមវាដើម្បីអនុវត្ត)។"),
                 parse_mode="HTML", reply_markup=admin_kb())
+            return
+
+        if isinstance(step, dict) and step.get("step") == "cln_rename_name":
+            new_name = text.strip()[:60]
+            if not new_name:
+                bot.send_message(uid, "⚠️ ឈ្មោះមិនត្រឹមត្រូវ សូមផ្ញើម្តងទៀត:", reply_markup=cancel_kb()); return
+            name = step["clone"]
+            cfg = clone_registry.get(name)
+            waiting.pop(uid, None)
+            if not cfg:
+                bot.send_message(uid, "❌ រកមិនឃើញ bot នេះទេ (ប្រហែលត្រូវបានលុប)។", reply_markup=admin_kb())
+                return
+            old_name = cfg.get("display_name", name)
+            cfg["display_name"] = new_name
+            clone_registry[name] = cfg
+            _save(CLONES_REGISTRY, clone_registry)
+            was_running = _clone_is_running(name)
+            if was_running:
+                _stop_clone(name); time.sleep(1); _spawn_clone(name, cfg)
+            bot.send_message(uid,
+                f"✅ បានប្តូរ ឈ្មោះ Bot សម្រាប់ '<b>{name}</b>'\n"
+                f"ចាស់: <code>{old_name}</code> → ថ្មី: <code>{new_name}</code>"
+                + (" ហើយ restart រួច។" if was_running else " (bot នេះកំពុងបិទ — ចាប់ផ្តើមវាដើម្បីអនុវត្ត)។"),
+                parse_mode="HTML", reply_markup=admin_kb())
+            return
+
+        # ── Clone ⚙️ ការកំណត់ផ្សេងទៀត — Support / Sub Admins / Bakong / QR Cooldown ──
+        if isinstance(step, dict) and step.get("step") == "cln_support_text":
+            name = step["clone"]; lang = step["lang"]
+            raw = text.strip()
+            cur = _clone_load(name, "smm_support.json", {"kh": "", "en": ""})
+            cur[lang] = "" if raw == "-" else raw
+            waiting.pop(uid, None)
+            _clone_save_restart(uid, name, "smm_support.json", cur,
+                f"✅ Support Message ({'ខ្មែរ' if lang=='kh' else 'English'}) បានរក្សាទុកសម្រាប់ '<b>{name}</b>'")
+            return
+
+        if isinstance(step, dict) and step.get("step") == "cln_subadmin_add_id":
+            if not text.strip().isdigit():
+                bot.send_message(uid, "⚠️ សូមផ្ញើជាលេខតែប៉ុណ្ណោះ:", reply_markup=cancel_kb()); return
+            name = step["clone"]
+            new_id = int(text.strip())
+            cur = _clone_load(name, "smm_sub_admins.json", [])
+            if new_id not in cur:
+                cur.append(new_id)
+            waiting.pop(uid, None)
+            _clone_save_restart(uid, name, "smm_sub_admins.json", cur,
+                f"✅ បន្ថែម Sub Admin <code>{new_id}</code> ចូល '<b>{name}</b>'")
+            return
+
+        if isinstance(step, dict) and step.get("step") == "cln_bakong_token":
+            name = step["clone"]
+            raw = text.strip()
+            token = "" if raw == "-" else raw
+            waiting.pop(uid, None)
+            _clone_save_restart(uid, name, "smm_bakong.json", {"token": token},
+                f"✅ Bakong Token បានរក្សាទុកសម្រាប់ '<b>{name}</b>'")
+            return
+
+        if isinstance(step, dict) and step.get("step") == "cln_cooldown_sec":
+            raw = text.strip()
+            if not raw.isdigit():
+                bot.send_message(uid, "⚠️ សូមផ្ញើជាលេខតែប៉ុណ្ណោះ (0 = បិទ):", reply_markup=cancel_kb()); return
+            name = step["clone"]
+            sec = int(raw)
+            waiting.pop(uid, None)
+            _clone_save_restart(uid, name, "dep_qr_cooldown.json", {"seconds": sec},
+                f"✅ QR Cooldown បានកំណត់ទៅ <b>{sec} វិនាទី</b> សម្រាប់ '<b>{name}</b>'")
             return
 
         if isinstance(step, dict) and step.get("step") == "newbot_display":
