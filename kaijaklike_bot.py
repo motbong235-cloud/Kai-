@@ -83,6 +83,11 @@ _EMOJI_CHAR_LIST = [
     # ក្នុងបញ្ជីនេះទេ ធ្វើឲ្យមិនអាចប្តូរជា Premium Emoji បាន — រកឃើញដោយស្កេន
     # ប៊ូតុងទាំងអស់ក្នុងកូដ ធៀបនឹងបញ្ជីនេះ។
     '⏰', '🎨', '🏆', '💾', '📈', '📷', '🧾',
+    # ⚠️ បន្ថែម 2026-08-31 — ស្កេនប៊ូតុងទាំងអស់ម្តងទៀត រកឃើញ emoji ថ្មីៗពី
+    # feature ថ្មីៗ (បិទ/បើកវិធីទូទាត់, QR Cooldown, ប្តូរ Step ទូទាត់,
+    # Manual QR) ដែលមិនធ្លាប់នៅក្នុងបញ្ជីនេះ — ធ្វើឲ្យ Admin មិនអាចកំណត់
+    # ជា Premium Emoji បាន (គ្មានកន្លែង setup ក្នុង /setemojis grid)។
+    '🔀', '⏳', '🔁', '🖼',
 ]
 EMOJI_MAP = {ch: None for ch in _EMOJI_CHAR_LIST}
 # ធ្វើ regex pattern មួយសម្រាប់ចាប់ emoji នៅដើម string (រួមទាំង variation
@@ -734,6 +739,8 @@ def _spawn_clone(name, cfg):
     env["BOT_TOKEN"]        = cfg["token"]
     env["ADMIN_ID"]         = str(cfg["admin_id"])
     env["CAMRAPID_API_KEY"] = cfg.get("camrapid_key", "")
+    env["ABA_API_KEY"]      = cfg.get("aba_key", "")
+    env["ABA_MERCHANT_ID"]  = cfg.get("aba_merchant", "")
     env["PAY_METHOD"]       = cfg.get("pay_method", "auto")
     env["CONTROL_PORT"]     = str(cfg["port"])
     env["CONTROL_KEY"]      = f"ctrl_{name}"
@@ -2113,11 +2120,55 @@ def _watch_deposit(uid, uid_str, dep_id, amount, reference, checker=None):
         try: bot.send_message(uid, "⏰ <b>QR ផុតកំណត់!</b> សូម top up ម្តងទៀត", parse_mode="HTML")
         except Exception as _e: logger.debug(f"[silent] {_e}")
 
+def _dep_created_ts(dep_id, dep):
+    """ត្រឡប់ created timestamp របស់ deposit មួយ — ប្រើ field 'created_ts' បើមាន
+    (deposit ថ្មីៗ), បើអត់ (deposit ចាស់មុន update នេះ) fallback ទៅ parse ពី
+    dep_id ខ្លួនឯង (format: dep_{uid}_{unix_ts})។"""
+    ts = dep.get("created_ts")
+    if ts:
+        return float(ts)
+    try:
+        return float(dep_id.rsplit("_", 1)[-1])
+    except Exception:
+        return 0.0
+
+def _active_pending_deposit(uid):
+    """បើ User មាន QR deposit ដែលកំពុង 'pending' ហើយមិនទាន់ផុតកំណត់ (5 នាទី)
+    សូមត្រឡប់ (dep, remain_sec) មកវិញ — បើគ្មាន ត្រឡប់ (None, 0)។ ប្រើដើម្បីទប់
+    User មិនឲ្យបង្កើត QR ថ្មីម្តងទៀត ព្រោះ QR ចាស់ (5 នាទី) នៅតែសកម្ម — ត្រូវឲ្យ
+    QR នោះផុតកំណត់ (ឬបានទូទាត់ជោគជ័យ) សិន ទើបបង្កើតបានថ្មីទៀត។"""
+    uid_str = str(uid)
+    now = time.time()
+    for dep_id, dep in smm_deps.items():
+        if dep.get("uid") != uid_str or dep.get("status") != "pending":
+            continue
+        elapsed = now - _dep_created_ts(dep_id, dep)
+        remain  = DEPOSIT_EXPIRE_SEC - elapsed
+        if remain > 0:
+            return dep, int(remain) + 1
+    return None, 0
+
 def _send_deposit_qr(uid, amount, promo_code=None, label="💸 ដាក់លុយ", bonus=0.0, promo_code_name=None,
                       promo_bonus=0.0, auto_bonus=0.0, method="camrapid"):
     """Create payment QR → send branded QR card to user.
     method="camrapid" (default — ដដែលពីមុន, backward-compatible) ឬ method="aba"
     (ABA PayWay តាម KHMER SYSTEM — v12, មិនប៉ះពាល់ code path CamRapidPay ខាងក្រោមទេ)"""
+    # ── ទប់ស្កាត់ User មិនឲ្យបង្កើត QR ថ្មី ដរាបណា QR ចាស់ (5 នាទី) មិនទាន់ផុត
+    #    កំណត់ — ការពារកុំឲ្យមាន QR pending ច្រើនក្នុងពេលតែមួយសម្រាប់ User តែម្នាក់
+    #    (Admin មិនកំណត់ ដើម្បីងាយ Test) ──
+    if str(uid) != str(ADMIN_ID):
+        _dep, _remain = _active_pending_deposit(uid)
+        if _dep:
+            _mins, _secs = divmod(_remain, 60)
+            _remain_txt = f"{_mins} នាទី {_secs} វិនាទី" if _mins else f"{_secs} វិនាទី"
+            bot.send_message(uid,
+                f"⏳ <b>អ្នកមាន QR ដែលកំពុងរង់ចាំទូទាត់ស្រាប់ហើយ!</b>\n"
+                f"សូមប្រើ QR នោះ ឬស្កេនវាដើម្បីទូទាត់ជាមុនសិន។\n"
+                f"បើមិនចង់ប្រើទៀត សូមរង់ចាំ <b>{_remain_txt}</b> ដល់ QR ចាស់ផុតកំណត់ "
+                f"ទើបអាចបង្កើតថ្មីម្តងទៀតបាន។",
+                parse_mode="HTML")
+            return
+
     # ── Anti-Spam Cooldown — ការពារ User ចុចបង្កើត QR ជាប់ៗគ្នា (spam) ដែលនាំឲ្យ
     #    ហៅ CamRapidPay/ABA API ច្រើនដងឥតប្រយោជន៍ ។ Admin (ADMIN_ID) មិនកំណត់ ដើម្បីងាយ Test ។
     _cd_key = str(uid)
@@ -2175,6 +2226,7 @@ def _send_deposit_qr(uid, amount, promo_code=None, label="💸 ដាក់ល�
         "promo":       promo_applied or "",
         "reference":   reference,
         "payment_url": payment_url,
+        "created_ts":  time.time(),
     }
     _save(SMM_DEP_FILE, smm_deps)
 
@@ -2292,6 +2344,7 @@ def _send_deposit_qr_aba(uid, amount, promo_code_name=None, bonus=0.0, promo_bon
         "reference":   reference,
         "payment_url": pay_url or "",
         "method":      "aba",
+        "created_ts":  time.time(),
     }
     _save(SMM_DEP_FILE, smm_deps)
 
@@ -2523,16 +2576,23 @@ def admin_kb():
            KeyboardButton("🔄 ធ្វើឱ្យទាន់សម័យ", color="progress"))
     kb.row(KeyboardButton("🔔 Notify Channel", color="progress"),
            KeyboardButton("🧪 តេស្ត Notify",   color="active"))
-    kb.row("━━━ ⚙️ Settings ━━━")
-    kb.row(KeyboardButton("✏️ កែ Support",      color="progress"),
-           KeyboardButton("👥 Sub Admins",      color="progress"))
-    kb.row(KeyboardButton("🔑 CamRapidPay Key", color="progress"),
-           KeyboardButton("💳 ABA PayWay Key", color="progress"))
-    kb.row(KeyboardButton("🔀 វិធីទូទាត់", color="progress"),
-           KeyboardButton("🏦 Bakong Deep Link", color="progress"))
-    kb.row(KeyboardButton("⏳ QR Cooldown", color="progress"))
-    kb.row(KeyboardButton("📝 Welcome Msg",     color="progress"),
-           KeyboardButton("😊 កំណត់ Emoji", color="progress"))
+    # ── ⚙️ Settings — Bot Clone (INSTANCE_NAME set / IS_MASTER=False) មិនបង្ហាញ
+    #    ប៊ូតុងទាំងនេះទេ ព្រោះជា credential/config ដែលគ្រប់គ្រងតាមម្ចាស់ (Master Bot)
+    #    តាមរយៈ /newbot wizard និង /mybots → 🔁 ប្តូរ Step ទូទាត់ / 👤 ប្តូរ Admin
+    #    រួចហើយ — បើទុកឲ្យកែពី clone ខ្លួនឯងផ្ទាល់ នឹងធ្វើឲ្យ config ចាស់ក្នុង
+    #    clone_registry.json (Master) មិនត្រូវគ្នានឹងតម្លៃពិតរបស់ clone ទៀត
+    #    (bug ប្រភពទិន្នន័យស្ទួន — clone restart វិញនឹងទាញយកតម្លៃចាស់ពី Master មកជាន់)។
+    if IS_MASTER:
+        kb.row("━━━ ⚙️ Settings ━━━")
+        kb.row(KeyboardButton("✏️ កែ Support",      color="progress"),
+               KeyboardButton("👥 Sub Admins",      color="progress"))
+        kb.row(KeyboardButton("🔑 CamRapidPay Key", color="progress"),
+               KeyboardButton("💳 ABA PayWay Key", color="progress"))
+        kb.row(KeyboardButton("🔀 វិធីទូទាត់", color="progress"),
+               KeyboardButton("🏦 Bakong Deep Link", color="progress"))
+        kb.row(KeyboardButton("⏳ QR Cooldown", color="progress"))
+        kb.row(KeyboardButton("📝 Welcome Msg",     color="progress"),
+               KeyboardButton("😊 កំណត់ Emoji", color="progress"))
     return kb
 
 def emoji_menu_kb():
@@ -3858,6 +3918,8 @@ def cb_newbot_confirm_yes(call):
         "pay_method": pay_method,
         "manual_qr_photo_id": step.get("manual_qr_photo_id", ""),
         "manual_qr_info": step.get("manual_qr_info", ""),
+        "aba_key": step.get("aba_key", ""),
+        "aba_merchant": step.get("aba_merchant", ""),
     }
     clone_registry[name] = cfg
     _save(CLONES_REGISTRY, clone_registry)
@@ -3890,6 +3952,15 @@ def cb_newbot_confirm_no(call):
     bot.answer_callback_query(call.id, "បានបោះបង់")
     bot.send_message(uid, "❌ បានបោះបង់ការបង្កើត bot ថ្មី។", reply_markup=admin_kb())
 
+def _clone_pay_txt(pay_method):
+    """Label ស្តង់ដារសម្រាប់វិធីទូទាត់របស់ clone មួយ — ប្រើទាំង /mybots view និង
+    ក្រោយប្តូរ Step ទូទាត់ (cln_pay) ដើម្បីកុំឲ្យ text ខុសគ្នារវាងកន្លែង។"""
+    if pay_method == "manual":
+        return "🖼 Manual QR (Step 2)"
+    if pay_method == "aba":
+        return "🏦 ABA PayWay Auto (Step 3)"
+    return "🔄 CamRapidPay Auto (Step 1)"
+
 _STEP_EMOJI = ["0️⃣","1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣"]
 def _step_label(n, total=None):
     """បង្កើត label ជំហានស្តង់ដារ ('3️⃣ ជំហានទី 3/7') សម្រាប់ wizard /newbot
@@ -3912,6 +3983,12 @@ def cb_newbot_paymethod(call):
         waiting[uid] = {**step, "step": "newbot_key", "pay_method": "auto"}
         bot.send_message(uid, f"{_step_label(5, 7)} — វាយ <b>CamRapidPay API Key</b> សម្រាប់ bot នេះ:",
                           parse_mode="HTML", reply_markup=cancel_kb())
+    elif method == "aba":
+        waiting[uid] = {**step, "step": "newbot_aba_key", "pay_method": "aba", "camrapid_key": ""}
+        bot.send_message(uid,
+            f"{_step_label(5, 8)} — វាយ <b>ABA PayWay Profile Key</b> សម្រាប់ bot នេះ "
+            "(ពី khmer-system.com/operator/profile):",
+            parse_mode="HTML", reply_markup=cancel_kb())
     else:
         waiting[uid] = {**step, "step": "newbot_manual_qr_photo", "pay_method": "manual", "camrapid_key": ""}
         bot.send_message(uid,
@@ -3930,7 +4007,7 @@ def cb_cln_view(call):
     bot.answer_callback_query(call.id)
     status = "🟢 កំពុងដំណើរការ" if _clone_is_running(name) else "🔴 បិទ"
     masked = cfg["token"][:10] + "..." + cfg["token"][-4:]
-    pay_txt = "🖼 Manual QR (Step 2)" if cfg.get("pay_method") == "manual" else "🔄 CamRapidPay Auto (Step 1)"
+    pay_txt = _clone_pay_txt(cfg.get("pay_method"))
     text = (f"🤖 <b>{name}</b>\nស្ថានភាព: {status}\n"
             f"Admin ID: <code>{cfg['admin_id']}</code>\nToken: <code>{masked}</code>\n"
             f"ការទូទាត់: {pay_txt}\n"
@@ -3958,11 +4035,13 @@ def cb_cln_pay(call):
     bot.answer_callback_query(call.id)
     kb = InlineKeyboardMarkup(row_width=1)
     kb.add(InlineKeyboardButton("1️⃣ Step 1 — CamRapidPay QR ស្វ័យប្រវត្តិ", callback_data=f"cln_paysel|auto|{name}", color="active"))
+    kb.add(InlineKeyboardButton("3️⃣ Step 3 — ABA PayWay ស្វ័យប្រវត្តិ", callback_data=f"cln_paysel|aba|{name}", color="active"))
     kb.add(InlineKeyboardButton("2️⃣ Step 2 — QR ដាក់ដោយដៃ (Manual)", callback_data=f"cln_paysel|manual|{name}", color="progress"))
     kb.add(InlineKeyboardButton("⬅️ ត្រឡប់", callback_data=f"cln_view|{name}", color="inactive"))
     bot.send_message(uid,
         f"🔁 <b>ប្តូរ Step ទូទាត់ — {name}</b>\n\n"
         "1️⃣ <b>Step 1</b> — CamRapidPay API Key → QR ស្វ័យប្រវត្តិ\n"
+        "3️⃣ <b>Step 3</b> — ABA PayWay Profile Key + Merchant ID → QR ស្វ័យប្រវត្តិ\n"
         "2️⃣ <b>Step 2</b> — Upload រូប QR ដាក់ដោយដៃ",
         parse_mode="HTML", reply_markup=kb)
 
@@ -3978,6 +4057,10 @@ def cb_cln_paysel(call):
     if method == "auto":
         waiting[uid] = {"step": "cln_pay_key", "clone": name}
         bot.send_message(uid, f"វាយ <b>CamRapidPay API Key</b> ថ្មីសម្រាប់ '{name}':",
+                          parse_mode="HTML", reply_markup=cancel_kb())
+    elif method == "aba":
+        waiting[uid] = {"step": "cln_pay_aba_key", "clone": name}
+        bot.send_message(uid, f"វាយ <b>ABA PayWay Profile Key</b> ថ្មីសម្រាប់ '{name}':",
                           parse_mode="HTML", reply_markup=cancel_kb())
     else:
         waiting[uid] = {"step": "cln_pay_qr_photo", "clone": name}
@@ -4001,7 +4084,8 @@ def cb_cln_admin(call):
         f"វាយ <b>Telegram ID</b> ថ្មីរបស់ admin (លេខ):",
         parse_mode="HTML", reply_markup=cancel_kb())
 
-def _apply_clone_pay_update(uid, name, pay_method, camrapid_key="", manual_photo_id="", manual_info=""):
+def _apply_clone_pay_update(uid, name, pay_method, camrapid_key="", manual_photo_id="", manual_info="",
+                             aba_key="", aba_merchant=""):
     """កែប្រែ payment method របស់ clone ដែលមានស្រាប់ ហើយ restart វា"""
     cfg = clone_registry.get(name)
     if not cfg:
@@ -4012,9 +4096,20 @@ def _apply_clone_pay_update(uid, name, pay_method, camrapid_key="", manual_photo
         cfg["camrapid_key"] = camrapid_key
         cfg["manual_qr_photo_id"] = ""
         cfg["manual_qr_info"] = ""
+        cfg["aba_key"] = ""
+        cfg["aba_merchant"] = ""
+    elif pay_method == "aba":
+        cfg["aba_key"] = aba_key
+        cfg["aba_merchant"] = aba_merchant
+        cfg["manual_qr_photo_id"] = ""
+        cfg["manual_qr_info"] = ""
+        cfg["camrapid_key"] = ""
     else:
         cfg["manual_qr_photo_id"] = manual_photo_id
         cfg["manual_qr_info"] = manual_info
+        cfg["camrapid_key"] = ""
+        cfg["aba_key"] = ""
+        cfg["aba_merchant"] = ""
     clone_registry[name] = cfg
     _save(CLONES_REGISTRY, clone_registry)
     try:
@@ -4029,7 +4124,7 @@ def _apply_clone_pay_update(uid, name, pay_method, camrapid_key="", manual_photo
     was_running = _clone_is_running(name)
     if was_running:
         _stop_clone(name); time.sleep(1); _spawn_clone(name, cfg)
-    pay_txt = "🖼 Manual QR (Step 2)" if pay_method == "manual" else "🔄 CamRapidPay Auto (Step 1)"
+    pay_txt = _clone_pay_txt(pay_method)
     bot.send_message(uid,
         f"✅ បានប្តូរការទូទាត់សម្រាប់ '<b>{name}</b>' ទៅជា {pay_txt}"
         + (" ហើយ restart រួច។" if was_running else " (bot នេះកំពុងបិទ — ចាប់ផ្តើមវាដើម្បីអនុវត្ត)។"),
@@ -4800,10 +4895,12 @@ def handle_msg(message):
             waiting[uid] = {**step, "step": "newbot_paymethod", "new_admin_id": int(text.strip())}
             kb = InlineKeyboardMarkup(row_width=1)
             kb.add(InlineKeyboardButton("🔄 CamRapidPay QR ស្វ័យប្រវត្តិ (7 ជំហាន)", callback_data="newbot_pay|auto", color="active"))
+            kb.add(InlineKeyboardButton("🏦 ABA PayWay ស្វ័យប្រវត្តិ (8 ជំហាន)", callback_data="newbot_pay|aba", color="active"))
             kb.add(InlineKeyboardButton("🖼 QR ដាក់ដោយដៃ Manual (8 ជំហាន)", callback_data="newbot_pay|manual", color="progress"))
             bot.send_message(uid,
                 f"{_step_label(4)} — ជ្រើសរើស <b>របៀបទទួលទឹក</b> សម្រាប់ bot នេះ:\n\n"
                 "🔄 <b>CamRapidPay Auto</b> — ប្រើ API Key បង្កើត QR ស្វ័យប្រវត្តិ (ត្រូវការ API Key) — សរុប 7 ជំហាន\n"
+                "🏦 <b>ABA PayWay Auto</b> — ប្រើ Profile Key + Merchant ID (KHMER SYSTEM) បង្កើត QR ស្វ័យប្រវត្តិ — សរុប 8 ជំហាន\n"
                 "🖼 <b>Manual QR</b> — Upload រូប QR (Bakong KHQR) ដាក់ដោយដៃ គ្មានត្រូវការ API Key — សរុប 8 ជំហាន",
                 parse_mode="HTML", reply_markup=kb)
             return
@@ -4821,6 +4918,30 @@ def handle_msg(message):
                 f"{_step_label(6, 7)} — វាយ <b>ឈ្មោះ bot</b> ដែលបង្ហាញដល់អ្នកប្រើ (ឧ. <code>Jak Like Shop</code>)\n"
                 "ឬផ្ញើ <code>-</code> ដើម្បីប្រើឈ្មោះ internal (<code>"
                 + step["name"] + "</code>) ជំនួស:",
+                parse_mode="HTML", reply_markup=cancel_kb())
+            return
+
+        if isinstance(step, dict) and step.get("step") == "newbot_aba_key":
+            key = text.strip()
+            if len(key) < 10:
+                bot.send_message(uid, "⚠️ Profile Key ខ្លីពេក សូមផ្ញើម្តងទៀត:", reply_markup=cancel_kb()); return
+            waiting[uid] = {**step, "step": "newbot_aba_merchant", "aba_key": key}
+            bot.send_message(uid,
+                f"{_step_label(6, 8)} — វាយ <b>ABA Merchant ID</b> សម្រាប់ bot នេះ (ឧ. <code>r72mCt</code>):",
+                parse_mode="HTML", reply_markup=cancel_kb())
+            return
+
+        if isinstance(step, dict) and step.get("step") == "newbot_aba_merchant":
+            merchant = text.strip()
+            if not merchant:
+                bot.send_message(uid, "⚠️ Merchant ID មិនត្រឹមត្រូវ សូមផ្ញើម្តងទៀត:", reply_markup=cancel_kb()); return
+            name = step["name"]
+            port = _next_clone_port()
+            waiting[uid] = {**step, "step": "newbot_display", "aba_merchant": merchant, "port": port}
+            bot.send_message(uid,
+                f"{_step_label(7, 8)} — វាយ <b>ឈ្មោះ bot</b> ដែលបង្ហាញដល់អ្នកប្រើ (ឧ. <code>Jak Like Shop</code>)\n"
+                "ឬផ្ញើ <code>-</code> ដើម្បីប្រើឈ្មោះ internal (<code>"
+                + name + "</code>) ជំនួស:",
                 parse_mode="HTML", reply_markup=cancel_kb())
             return
 
@@ -4844,6 +4965,25 @@ def handle_msg(message):
             name = step["clone"]
             waiting.pop(uid, None)
             _apply_clone_pay_update(uid, name, "auto", camrapid_key=key)
+            return
+
+        if isinstance(step, dict) and step.get("step") == "cln_pay_aba_key":
+            key = text.strip()
+            if len(key) < 10:
+                bot.send_message(uid, "⚠️ Profile Key ខ្លីពេក សូមផ្ញើម្តងទៀត:", reply_markup=cancel_kb()); return
+            name = step["clone"]
+            waiting[uid] = {"step": "cln_pay_aba_merchant", "clone": name, "aba_key": key}
+            bot.send_message(uid, f"វាយ <b>ABA Merchant ID</b> ថ្មីសម្រាប់ '{name}' (ឧ. <code>r72mCt</code>):",
+                              parse_mode="HTML", reply_markup=cancel_kb())
+            return
+
+        if isinstance(step, dict) and step.get("step") == "cln_pay_aba_merchant":
+            merchant = text.strip()
+            if not merchant:
+                bot.send_message(uid, "⚠️ Merchant ID មិនត្រឹមត្រូវ សូមផ្ញើម្តងទៀត:", reply_markup=cancel_kb()); return
+            name = step["clone"]
+            waiting.pop(uid, None)
+            _apply_clone_pay_update(uid, name, "aba", aba_key=step.get("aba_key", ""), aba_merchant=merchant)
             return
 
         if isinstance(step, dict) and step.get("step") == "cln_pay_qr_info":
@@ -4884,7 +5024,7 @@ def handle_msg(message):
             raw = text.strip()
             display = step["name"] if raw == "-" else raw[:60]
             waiting[uid] = {**step, "step": "newbot_welcome", "display_name": display}
-            _total = 8 if step.get("pay_method") == "manual" else 7
+            _total = 7 if step.get("pay_method", "auto") == "auto" else 8
             bot.send_message(uid,
                 f"{_step_label(_total, _total)} — វាយ <b>Welcome Message</b> custom សម្រាប់ bot នេះ\n"
                 "ប្រើ <code>{}</code> ដើម្បីដាក់ balance ក្នុង text\n"
@@ -4901,6 +5041,9 @@ def handle_msg(message):
             masked_tok = tok[:10] + "..." + tok[-4:]
             if pay_method == "manual":
                 pay_line = "🖼 QR ដាក់ដោយដៃ (Manual) — Step 2"
+            elif pay_method == "aba":
+                masked_key = step["aba_key"][:6] + "..." + step["aba_key"][-4:]
+                pay_line = f"🏦 ABA PayWay — Key (<code>{masked_key}</code>) / Merchant (<code>{step['aba_merchant']}</code>)"
             else:
                 masked_key = step["camrapid_key"][:6] + "..." + step["camrapid_key"][-4:]
                 pay_line = f"🔄 CamRapidPay Key — Step 1 (<code>{masked_key}</code>)"
