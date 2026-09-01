@@ -716,6 +716,23 @@ def is_admin(uid):
     """True if uid is master admin OR sub-admin"""
     return uid == ADMIN_ID or uid in sub_admins
 clone_procs    = {}                            # name -> subprocess.Popen (តែក្នុង process នេះប៉ុណ្ណោះ)
+# ⚠️ កំណត់ត្រា (រកឃើញ 2026-09-01) — មូលហេតុពិតនៃ error 409 "Conflict:
+# terminated by other getUpdates request" កើតឡើងដដែលៗលើ clone ណាមួយ៖
+# (1) _clone_watchdog() ខាងក្រោម (រត់រៀងរាល់ 20s) ធ្វើតែឆែក clone_registry
+#     (persisted) ធៀបនឹង clone_procs (in-memory) — គ្មាន flag "admin ចង់ឲ្យ
+#     bot នេះបិទ" persisted សោះ ដូច្នេះបើ Admin ចុច "🛑 បិទ" ខ្លួនឯង, watchdog
+#     នៅតែគិតថា "crash" ហើយ auto-restart ក្នុងរយៈពេល 20 វិនាទីជានិច្ច។
+# (2) _spawn_clone() គ្មាន lock ការពារទេ — បើ watchdog ហើយ Admin ចុច
+#     ▶️/🔄 ស្របគ្នាដោយចៃដន្យ (race condition), ទាំង ២ ខាងហៅ Popen() ដាច់ដោយ
+#     ឡែក → កើតមាន 2 process ជាមួយ token តែមួយ ដំណើរការក្នុងពេលតែមួយ ។
+#     clone_procs[name] ត្រូវបាន process ចុងក្រោយសរសេរជាន់ លុប reference ទៅ
+#     process មុន ចោល — ធ្វើឲ្យ Admin លែងអាចបិទ process ដែលនៅសល់នោះបានទៀត
+#     (លែងមាន handle) → 409 កើតឡើងដដែលៗជារៀងរហូតរហូតដល់ restart server ។
+# ការដោះស្រាយ៖ (a) _clone_lock ការពារ spawn/stop កុំឲ្យប៉ះគ្នា, (b) _spawn_clone
+# ធ្វើ idempotent ដោយ kill process ចាស់ (បើមាន) មុននឹង spawn ថ្មីជានិច្ច,
+# (c) clone_registry[name]["stopped"]=True persist ពេល Admin បិទដោយដៃ ដើម្បី
+# watchdog ដឹងថាកុំ auto-restart ។
+_clone_lock    = threading.Lock()
 
 def _clone_dir(name):
     d = os.path.join(CLONES_DIR, name)
@@ -734,6 +751,21 @@ def _clone_is_running(name):
     return proc is not None and proc.poll() is None
 
 def _spawn_clone(name, cfg):
+    with _clone_lock:
+        return _spawn_clone_locked(name, cfg)
+
+def _spawn_clone_locked(name, cfg):
+    # ការពារ double-spawn ១០០% — បើមាន process ចាស់ដែលកំពុងរត់ស្រាប់សម្រាប់
+    # ឈ្មោះនេះ (ដឹងឬអត់ដឹងក៏ដោយ) ត្រូវសម្លាប់វាមុននឹង spawn ថ្មី ដើម្បីកុំឲ្យ
+    # 2 process ជាមួយ token តែមួយ ដំណើរការជាន់គ្នាទាល់តែសោះ។
+    _old = clone_procs.get(name)
+    if _old is not None and _old.poll() is None:
+        try:
+            _old.terminate(); _old.wait(timeout=8)
+        except Exception:
+            try: _old.kill()
+            except Exception: pass
+        clone_procs.pop(name, None)
     wdir = _clone_dir(name)
     env = os.environ.copy()
     env["BOT_TOKEN"]        = cfg["token"]
@@ -758,17 +790,20 @@ def _spawn_clone(name, cfg):
     return proc
 
 def _stop_clone(name):
-    proc = clone_procs.get(name)
-    if proc and proc.poll() is None:
-        proc.terminate()
-        try: proc.wait(timeout=8)
-        except _subprocess.TimeoutExpired: proc.kill()
-    clone_procs.pop(name, None)
+    with _clone_lock:
+        proc = clone_procs.get(name)
+        if proc and proc.poll() is None:
+            proc.terminate()
+            try: proc.wait(timeout=8)
+            except _subprocess.TimeoutExpired: proc.kill()
+        clone_procs.pop(name, None)
 
 def _clone_watchdog():
     while True:
         time.sleep(20)
         for name, cfg in list(clone_registry.items()):
+            if cfg.get("stopped"):
+                continue  # Admin បិទដោយចេតនា — កុំ auto-restart
             if not _clone_is_running(name):
                 logger.warning(f"Clone '{name}' not running — starting/restarting...")
                 try:
@@ -4393,14 +4428,20 @@ def cb_cln_actions(call):
         bot.answer_callback_query(call.id, "រកមិនឃើញ"); return
 
     if action == "cln_start":
+        cfg["stopped"] = False
+        clone_registry[name] = cfg; _save(CLONES_REGISTRY, clone_registry)
         _spawn_clone(name, cfg)
         bot.answer_callback_query(call.id, "ដំណើរការ...")
         bot.send_message(uid, f"✅ ដំណើរការ '{name}' ជោគជ័យ")
     elif action == "cln_stop":
+        cfg["stopped"] = True
+        clone_registry[name] = cfg; _save(CLONES_REGISTRY, clone_registry)
         _stop_clone(name)
         bot.answer_callback_query(call.id, "បានបិទ")
-        bot.send_message(uid, f"🛑 បានបិទ '{name}'")
+        bot.send_message(uid, f"🛑 បានបិទ '{name}' (នឹងមិន auto-restart ដោយ watchdog ទេ លុះត្រាតែចុច ▶️ ដំណើរការ វិញ)")
     elif action == "cln_restart":
+        cfg["stopped"] = False
+        clone_registry[name] = cfg; _save(CLONES_REGISTRY, clone_registry)
         _stop_clone(name); time.sleep(1); _spawn_clone(name, cfg)
         bot.answer_callback_query(call.id, "Restarting...")
         bot.send_message(uid, f"🔄 បាន restart '{name}'")
