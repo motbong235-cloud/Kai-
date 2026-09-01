@@ -2840,6 +2840,28 @@ def _extract_custom_emoji(src):
             out.append((ch, str(sticker.custom_emoji_id)))
     return out
 
+def _msg_custom_emoji_entities(msg):
+    """ត្រឡប់ list [{'offset','length','custom_emoji_id'}] នៃ premium emoji
+    entities ទាំងអស់ក្នុងសារមួយ ដោយផ្ទាល់ពី Telegram — មិនអាស្រ័យ EMOJI_MAP/
+    _EMOJI_CHAR_LIST ("setup") ទាល់តែសោះ, ដូច្នេះប្រើ premium emoji ណាមួយ
+    (setup ឬអត់) ក្នុង Welcome Message បាន ព្រោះទាញយក custom_emoji_id ពិតៗ
+    ដោយផ្ទាល់ពី entities របស់សារ។"""
+    entities = list(getattr(msg, "entities", None) or []) + list(getattr(msg, "caption_entities", None) or [])
+    out = []
+    for e in entities:
+        if getattr(e, "type", None) == "custom_emoji" and getattr(e, "custom_emoji_id", None):
+            out.append({"offset": e.offset, "length": e.length, "custom_emoji_id": str(e.custom_emoji_id)})
+    return out
+
+def _entities_from_dicts(dicts):
+    """ត្រឡប់ list of _MessageEntity ពី list of dict ដែល save ក្នុង JSON
+    (custom_emoji entities + bold សម្រាប់ Balance line បើមាន)."""
+    out = []
+    for d in dicts or []:
+        out.append(_MessageEntity(type=d.get("type", "custom_emoji"), offset=d["offset"], length=d["length"],
+                                    custom_emoji_id=d.get("custom_emoji_id")))
+    return out
+
 def _norm_vs(s):
     """ដក Variation Selector-16 (U+FE0F) ចេញ សម្រាប់ធៀបធៀប emoji ដោយអត់ខ្ជិលរឹង —
     Telegram ពេលខ្លះត្រឡប់ underlying char ដោយគ្មាន VS16 ខណៈ EMOJI_MAP key មាន
@@ -3156,7 +3178,26 @@ def _save_welcome_photo(file_id):
 def _show_welcome(uid):
     b       = bal(uid)
     custom_msg = welcome_cfg.get("custom_msg", "")
-    if custom_msg:
+    custom_ents = welcome_cfg.get("custom_msg_entities") or []
+    entities = None
+    if custom_msg and custom_ents:
+        # ── មាន Premium Emoji entities ជាប់ — មិនអាចលាយ parse_mode="HTML" ជាមួយ
+        #    entities= ក្នុង request តែមួយបានទេ (Telegram API កំណត់) ដូច្នេះប្រើ
+        #    entities ទាំងស្រុង៖ custom_emoji entities ដដែល + bold entity ថ្មីមួយ
+        #    សម្រាប់ Balance line (ជំនួស <b>...</b> ដែលធ្លាប់ប្រើ)។ ចំណាំ៖ បើ
+        #    admin ដាក់ "{}" ក្នុង text ខ្លួនឯង (មិនមែន append) ជាមួយ emoji
+        #    ក្រោយ "{}" នោះ offset អាចនឹងមិនត្រឹមត្រូវ ១០០% ទៀត (rare case)។
+        if "{}" in custom_msg:
+            caption = custom_msg.format(b)
+            entities = _entities_from_dicts(custom_ents)
+        else:
+            bal_line = f"\n💳 Balance: ${b:.2f}"
+            caption = custom_msg + bal_line
+            bal_offset = len(custom_msg.encode("utf-16-le")) // 2 + len("\n💳 Balance: $")
+            bal_len = len(f"{b:.2f}".encode("utf-16-le")) // 2
+            entities = _entities_from_dicts(custom_ents) + \
+                       _entities_from_dicts([{"type": "bold", "offset": bal_offset, "length": bal_len}])
+    elif custom_msg:
         caption = custom_msg.format(b) if "{}" in custom_msg else custom_msg + f"\n💳 Balance: <b>${b:.2f}</b>"
     elif BOT_WELCOME_MSG:
         caption = BOT_WELCOME_MSG.format(b) if "{}" in BOT_WELCOME_MSG else BOT_WELCOME_MSG + f"\n💳 Balance: <b>${b:.2f}</b>"
@@ -3169,14 +3210,16 @@ def _show_welcome(uid):
                 uid,
                 photo=photo_id,
                 caption=caption,
-                parse_mode="HTML",
+                parse_mode=None if entities else "HTML",
+                caption_entities=entities,
                 reply_markup=main_kb(uid)
             )
             return
         except Exception:
             pass
     # Fallback: text only
-    bot.send_message(uid, caption, parse_mode="HTML", reply_markup=main_kb(uid))
+    bot.send_message(uid, caption, parse_mode=None if entities else "HTML",
+                      entities=entities, reply_markup=main_kb(uid))
 
 # ═══════════════════════════════════════════════════════════
 #  CALLBACKS
@@ -4140,6 +4183,7 @@ def cb_cln_more(call):
     kb.add(InlineKeyboardButton("👥 Sub Admins", callback_data=f"cln_subadmin|{name}", color="progress"))
     kb.add(InlineKeyboardButton("🏦 Bakong Deep Link", callback_data=f"cln_bakong|{name}", color="progress"))
     kb.add(InlineKeyboardButton("⏳ QR Cooldown", callback_data=f"cln_cooldown|{name}", color="progress"))
+    kb.add(InlineKeyboardButton("📝 Welcome Msg", callback_data=f"cln_welcome|{name}", color="progress"))
     kb.add(InlineKeyboardButton("⬅️ ត្រឡប់", callback_data=f"cln_view|{name}", color="inactive"))
     bot.send_message(uid, f"⚙️ <b>ការកំណត់ផ្សេងទៀត — {name}</b>", parse_mode="HTML", reply_markup=kb)
 
@@ -4256,6 +4300,26 @@ def cb_cln_cooldown(call):
     bot.send_message(uid,
         f"⏳ <b>QR Cooldown — {name}</b>\nបច្ចុប្បន្ន: <b>{cur.get('seconds', DEP_QR_COOLDOWN_SEC)} វិនាទី</b>\n\n"
         "វាយ <b>ចំនួនវិនាទី</b> ថ្មី (0 = បិទ Cooldown):",
+        parse_mode="HTML", reply_markup=cancel_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cln_welcome|"))
+def cb_cln_welcome(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID or not IS_MASTER:
+        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
+    name = call.data.split("|", 1)[1]
+    if name not in clone_registry:
+        bot.answer_callback_query(call.id, "រកមិនឃើញ"); return
+    bot.answer_callback_query(call.id)
+    cur = _clone_load(name, "smm_welcome.json", {"photo_id": ""})
+    cur_txt = cur.get("custom_msg") or clone_registry[name].get("welcome_msg", "")
+    waiting[uid] = {"step": "cln_welcome_text", "clone": name}
+    bot.send_message(uid,
+        f"📝 <b>Welcome Message — {name}</b>\n"
+        f"បច្ចុប្បន្ន: <code>{(cur_txt or '(default)')[:300]}</code>\n\n"
+        "វាយសារថ្មី (អាច paste Premium Emoji ដោយផ្ទាល់ក៏បាន — មិនចាំបាច់ setup ក្នុង "
+        "/setemojis ជាមុនទេ)\nប្រើ <code>{}</code> ដើម្បីដាក់ balance ក្នុង text\n"
+        "ឬផ្ញើ <code>-</code> ដើម្បី reset ទៅ default:",
         parse_mode="HTML", reply_markup=cancel_kb())
 
 def _apply_clone_pay_update(uid, name, pay_method, camrapid_key="", manual_photo_id="", manual_info="",
@@ -5260,6 +5324,28 @@ def handle_msg(message):
             waiting.pop(uid, None)
             _clone_save_restart(uid, name, "dep_qr_cooldown.json", {"seconds": sec},
                 f"✅ QR Cooldown បានកំណត់ទៅ <b>{sec} វិនាទី</b> សម្រាប់ '<b>{name}</b>'")
+            return
+
+        if isinstance(step, dict) and step.get("step") == "cln_welcome_text":
+            name = step["clone"]
+            cur = _clone_load(name, "smm_welcome.json", {"photo_id": ""})
+            waiting.pop(uid, None)
+            if text.strip() == "-":
+                cur.pop("custom_msg", None)
+                cur.pop("custom_msg_entities", None)
+                _ok_note = ""
+            else:
+                _ents = _msg_custom_emoji_entities(message)
+                if _ents:
+                    cur["custom_msg"] = message.text or text
+                    cur["custom_msg_entities"] = _ents
+                    _ok_note = " (រួម premium emoji ផងដែរ)"
+                else:
+                    cur["custom_msg"] = text.strip()
+                    cur.pop("custom_msg_entities", None)
+                    _ok_note = ""
+            _clone_save_restart(uid, name, "smm_welcome.json", cur,
+                f"✅ Welcome Message{_ok_note} បានរក្សាទុកសម្រាប់ '<b>{name}</b>'")
             return
 
         if isinstance(step, dict) and step.get("step") == "newbot_display":
@@ -6395,12 +6481,24 @@ def handle_msg(message):
             waiting.pop(uid, None)
             if text.strip() == "-":
                 welcome_cfg.pop("custom_msg", None)
+                welcome_cfg.pop("custom_msg_entities", None)
                 _save(WELCOME_SETTINGS_FILE, welcome_cfg)
                 bot.send_message(uid, "✅ Welcome Message reset ទៅ default!", reply_markup=admin_kb())
             else:
-                welcome_cfg["custom_msg"] = text.strip()
+                _ents = _msg_custom_emoji_entities(message)
+                if _ents:
+                    # ត្រូវប្រើ text ដើមឥតកាត់ (មិន .strip()) ព្រោះ offset របស់
+                    # entities គិតតាម position ក្នុង text ដើមរបស់ Telegram ១០០%
+                    # បើ .strip() កាត់ whitespace ខាងដើម នឹងធ្វើឲ្យ offset ខុសទាំងអស់។
+                    welcome_cfg["custom_msg"] = message.text or text
+                    welcome_cfg["custom_msg_entities"] = _ents
+                    _ok_note = " (រួម premium emoji ផងដែរ — ទោះ setup ក្នុង /setemojis ឬអត់ក៏ដោយ)"
+                else:
+                    welcome_cfg["custom_msg"] = text.strip()
+                    welcome_cfg.pop("custom_msg_entities", None)
+                    _ok_note = ""
                 _save(WELCOME_SETTINGS_FILE, welcome_cfg)
-                bot.send_message(uid, "✅ Welcome Message ថ្មីបានរក្សា!", reply_markup=admin_kb())
+                bot.send_message(uid, f"✅ Welcome Message ថ្មីបានរក្សា{_ok_note}!", reply_markup=admin_kb())
             return
 
         _kb_reply = admin_kb() if _is_master_admin else sub_admin_kb()
