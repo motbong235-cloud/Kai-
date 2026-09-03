@@ -522,6 +522,19 @@ def _bot_username():
         _BOT_USERNAME_CACHE["v"] = "KaiJakLikeBot"
     return _BOT_USERNAME_CACHE["v"]
 
+_BOT_BRAND_CACHE = {"v": None}
+def _bot_brand():
+    """យកឈ្មោះ (display name) របស់ bot បច្ចុប្បន្នដើម្បីប្រើក្នុងសារទាំងឡាយ —
+    ធានាថា Sub Bot នីមួយៗបង្ហាញឈ្មោះខ្លួនឯង មិនមែន 'Kaijaklike' ទេ។"""
+    if _BOT_BRAND_CACHE["v"]:
+        return _BOT_BRAND_CACHE["v"]
+    try:
+        _BOT_BRAND_CACHE["v"] = bot.get_me().first_name or "Kaijaklike"
+    except Exception as e:
+        logger.warning(f"[bot_brand] failed: {e}")
+        _BOT_BRAND_CACHE["v"] = "Kaijaklike"
+    return _BOT_BRAND_CACHE["v"]
+
 
 # ── Premium emoji auto-injection — ជាមួយ AUTO-FALLBACK សុវត្ថិភាព ──────────
 # គ្រោះថ្នាក់ដែលត្រូវការពារ៖ បើ custom_emoji_id ណាមួយខូច/លែងមាន ឬ admin
@@ -894,6 +907,8 @@ def get_lang(uid): return user_lang.get(str(uid), "kh")
 def t(uid, key, *args):
     lang = get_lang(uid)
     s = STRINGS.get(lang, STRINGS["kh"]).get(key) or STRINGS["kh"].get(key, key)
+    if "Kaijaklike" in s:
+        s = s.replace("Kaijaklike", _bot_brand())
     if args:
         try: return s.format(*args)
         except: return s
@@ -1471,7 +1486,7 @@ def _smm_order_watcher():
                             f"🔢 ចំនួន: <b>{o.get('qty',0):,}</b>\n"
                             f"🔗 <code>{o.get('link','')}</code>\n"
                             f"━━━━━━━━━━━━━━━━━━\n"
-                            f"🙏 អរគុណដែលប្រើ Kaijaklike!",
+                            f"🙏 អរគុណដែលប្រើ {_bot_brand()}!",
                             parse_mode="HTML")
                     except Exception as _e: logger.debug(f"[silent] {_e}")
                     try:
@@ -1791,7 +1806,7 @@ def _build_qr_image(qr_string, amount=None, ref=None, label=None, subtitle=None,
 
         # 3. Store name + subtitle
         y = content_top
-        _cx_text(draw, cx, y, label or "Kaijaklike", f_name, _CARD_NAVY)
+        _cx_text(draw, cx, y, label or _bot_brand(), f_name, _CARD_NAVY)
         y += NAME_ROW
         _cx_text(draw, cx, y, subtitle or "SMM Panel Deposit", f_label, _CARD_GRAY)
         y += SUB_ROW + GAP1
@@ -2086,7 +2101,7 @@ def _watch_deposit(uid, uid_str, dep_id, amount, reference, checker=None):
                 msg += f"\n🎟️ Promo Bonus: <b>+${promo_bonus:.2f}</b>"
             if auto_bonus > 0:
                 msg += f"\n🎁 Auto Bonus: <b>+${auto_bonus:.2f}</b>"
-            msg += f"\n💳 Balance: <b>${new_b:.2f}</b>\n━━━━━━━━━━━━━━━━━━\n💙 អរគុណដែលប្រើ Kaijaklike!"
+            msg += f"\n💳 Balance: <b>${new_b:.2f}</b>\n━━━━━━━━━━━━━━━━━━\n💙 អរគុណដែលប្រើ {_bot_brand()}!"
             try: bot.send_message(uid, msg, parse_mode="HTML", reply_markup=main_kb(uid))
             except Exception as _e: logger.debug(f"[silent] {_e}")
             try:
@@ -3003,7 +3018,7 @@ def cmd_start(message):
     if uid == ADMIN_ID:
         _multibot_hint = "\n🤖 /newbot បង្កើត Bot ថ្មី · /mybots គ្រប់គ្រង Bot រង\n" if IS_MASTER else ""
         bot.send_message(uid,
-            f"🤖 <b>Panel Admin — Kaijaklike</b>\n"
+            f"🤖 <b>Panel Admin — {_bot_brand()}</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"🆔 <code>{ADMIN_ID}</code>\n"
             f"💹 ចំណេញ SMM: <b>{_smm_profit_pct():.0f}%</b>\n"
@@ -3014,7 +3029,7 @@ def cmd_start(message):
         return
     if uid in sub_admins:
         bot.send_message(uid,
-            f"🛡️ <b>Sub Admin Panel — Kaijaklike</b>\n"
+            f"🛡️ <b>Sub Admin Panel — {_bot_brand()}</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"🆔 <code>{uid}</code>\n"
             f"📊 Services: <b>{len(smm_services)}</b>\n"
@@ -6818,7 +6833,7 @@ def _check_key():
 
 @flask_app.route("/health")
 def health():
-    return jsonify({"status": "running", "bot": "Kaijaklike"})
+    return jsonify({"status": "running", "bot": _bot_brand()})
 
 @flask_app.route("/webhook/camrapid", methods=["POST"])
 def camrapid_webhook():
