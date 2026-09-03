@@ -1166,7 +1166,8 @@ def _smm_cost_for_order(slug, qty):
 def _profit_sum(period_days=None):
     """សរុប (revenue, cost, profit, count, margin%) របស់ SMM Orders ក្នុងចន្លោះ
     period_days ថ្ងៃចុងក្រោយ (None = គ្រប់ពេល)។ Order ស្ថានភាព rejected/canceled
-    ត្រូវលើកលែង ព្រោះលុយត្រូវបានសងវិញ — មិនមែនចំណេញពិតប្រាកដទេ។"""
+    ត្រូវលើកលែង ព្រោះលុយត្រូវបានសងវិញទាំងអស់ — មិនមែនចំណេញពិតប្រាកដទេ។ Order
+    partial គិត Revenue ដកចេញនូវចំនួនលុយដែលបានសងវិញ (refunded) ដើម្បីឲ្យត្រឹមត្រូវ។"""
     cutoff = int(time.time()) - period_days * 86400 if period_days else 0
     revenue = cost = 0.0
     count = 0
@@ -1175,7 +1176,7 @@ def _profit_sum(period_days=None):
             continue
         if o.get("ts", 0) < cutoff:
             continue
-        price = float(o.get("price", 0) or 0)
+        price = float(o.get("price", 0) or 0) - float(o.get("refunded", 0) or 0)
         revenue += price
         cost += _smm_cost_for_order(o.get("slug", ""), o.get("qty", 0))
         count += 1
@@ -1199,7 +1200,7 @@ def _profit_report_text():
         f"\n📊 <b>សរុបគ្រប់ពេល</b>\n"
         f"  🛒 Orders: <b>{cnt}</b>  |  💵 លក់: <b>${rev:.2f}</b>\n"
         f"  📦 ដើម: <b>${cost:.2f}</b>  |  💹 ចំណេញ: <b>${profit:.2f}</b> ({margin:.1f}%)")
-    lines.append("\n<i>* លុប Order rejected/canceled ចេញ (បានសងលុយវិញ) · Cost គិតតាមអត្រាបច្ចុប្បន្នរបស់ Service</i>")
+    lines.append("\n<i>* លុប Order rejected/canceled ចេញ (បានសងលុយវិញទាំងអស់) · Order partial ដកចំនួនសងវិញ · Cost គិតតាមអត្រាបច្ចុប្បន្នរបស់ Service</i>")
     return "\n".join(lines)
 
 @bot.message_handler(commands=["profit"])
@@ -1219,7 +1220,7 @@ def _top_report_text(period_days=30, top_n=5):
             continue
         if o.get("ts", 0) < cutoff:
             continue
-        price = float(o.get("price", 0) or 0)
+        price = float(o.get("price", 0) or 0) - float(o.get("refunded", 0) or 0)
         slug  = o.get("slug", "")
         label = o.get("label", slug)
         cs = svc_stats.setdefault(slug, [0, 0.0, label])
@@ -1459,57 +1460,127 @@ def _smm_api_status(api_order_id):
     except Exception as e:
         logger.error(f"SMM API status: {e}"); return None
 
+def _smm_sync_order(oid):
+    """🔄 ត្រួតពិនិត្យ + Sync ស្ថានភាព Order មួយពី Supplier API ភ្លាមៗ (Live) —
+    ប្រើទាំងដោយ Background Watcher (Poll ទៀងទាត់) និងដោយ User ខ្លួនឯងពេលចុច
+    🔍 Track Order (ដើម្បីទទួលបានស្ថានភាព Live មិនចាំបាច់រង់ចាំ Poll Cycle បន្ទាប់)។
+    ត្រឡប់ status ថ្មីបំផុតរបស់ Order (str)។ គ្មានផលប៉ះពាល់ទេបើ Order មិនមែន
+    'pending' ឬគ្មាន api_order_id (Manual order) — ត្រឡប់ status បច្ចុប្បន្នវិញ។"""
+    o = smm_orders.get(oid)
+    if not o: return None
+    if o.get("status") != "pending": return o.get("status")
+    api_oid = o.get("api_order_id")
+    if not api_oid: return o.get("status")
+    res = _smm_api_status(api_oid)
+    if not res or not isinstance(res, dict): return o.get("status")
+    st = str(res.get("status", "")).strip().lower()
+    if st == "completed":
+        smm_orders[oid]["status"]  = "completed"
+        smm_orders[oid]["remains"] = res.get("remains", 0)
+        _save(SMM_ORD_FILE, smm_orders)
+        try:
+            bot.send_message(int(o["uid"]),
+                f"✅ <b>Order បានជោគជ័យគ្រប់ចំនួន 100%!</b> 🎉\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🆔 <code>{oid}</code>\n"
+                f"📊 {o.get('label','?')}\n"
+                f"🔢 ចំនួន: <b>{o.get('qty',0):,}</b>\n"
+                f"🔗 <code>{o.get('link','')}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🙏 អរគុណដែលប្រើ {_bot_brand()}!",
+                parse_mode="HTML")
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        try:
+            bot.send_message(ADMIN_ID,
+                f"✅ <b>Order បានគ្រប់ចំនួន 100%!</b>\n"
+                f"🆔 <code>{oid}</code>\n"
+                f"👤 {_user_display(o.get('uid',''))}\n"
+                f"📦 {o.get('label','?')}\n"
+                f"🔢 {o.get('qty',0):,} | 💰 ${float(o.get('price',0)):.4f}\n"
+                f"🔗 <code>{o.get('link','')}</code>",
+                parse_mode="HTML")
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        return "completed"
+    elif st in ("canceled", "cancelled"):
+        smm_orders[oid]["status"] = "canceled"
+        price = float(o.get("price") or 0)
+        smm_orders[oid]["refunded"] = price
+        _save(SMM_ORD_FILE, smm_orders)
+        # Refund ស្វ័យប្រវត្តិ — ដាច់ដោយឡែកពី Notify, ដើម្បីកុំឲ្យ User ខាតលុយបើផ្ញើសារទៅគាត់មិនចេញ
+        add_bal(int(o["uid"]), price)
+        try:
+            bot.send_message(int(o["uid"]),
+                f"⚠️ <b>Order ត្រូវបានលុបចោល (Canceled)</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🆔 <code>{oid}</code>\n"
+                f"📊 {o.get('label','?')}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"💰 លុយត្រូវបានសងវិញ: <b>${price:.4f}</b>\n"
+                f"💳 Balance: <b>${bal(int(o['uid'])):.2f}</b>\n"
+                f"🙏 សូមអភ័យទោសចំពោះការរអាក់រអួល!",
+                parse_mode="HTML")
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        try:
+            bot.send_message(ADMIN_ID,
+                f"⚠️ <b>Order ត្រូវបានលុបចោល (Auto-Refunded)</b>\n"
+                f"🆔 <code>{oid}</code>\n"
+                f"👤 {_user_display(o.get('uid',''))}\n"
+                f"📊 {o.get('label','?')} | {o.get('qty',0):,} | ${price:.4f}\n"
+                f"🔗 <code>{o.get('link','')}</code>\n"
+                f"💰 លុយបានសងវិញស្វ័យប្រវត្តិទៅ User",
+                parse_mode="HTML")
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        return "canceled"
+    elif st == "partial":
+        # Supplier បានប្រគល់ខ្លះ ប៉ុន្តែមិនគ្រប់ចំនួន → សងលុយវិញសម្រាប់ចំនួនដែលមិនបានប្រគល់ (remains)
+        remains  = float(res.get("remains", 0) or 0)
+        qty_orig = float(o.get("qty", 0) or 0)
+        price    = float(o.get("price") or 0)
+        refund   = round(price * remains / qty_orig, 4) if qty_orig > 0 and remains > 0 else 0.0
+        delivered = int(qty_orig - remains) if qty_orig else 0
+        smm_orders[oid]["status"]   = "partial"
+        smm_orders[oid]["remains"]  = remains
+        smm_orders[oid]["refunded"] = refund
+        _save(SMM_ORD_FILE, smm_orders)
+        if refund > 0:
+            add_bal(int(o["uid"]), refund)
+        try:
+            bot.send_message(int(o["uid"]),
+                f"⚠️ <b>Order ប្រគល់មិនគ្រប់ចំនួន (Partial)</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🆔 <code>{oid}</code>\n"
+                f"📊 {o.get('label','?')}\n"
+                f"✅ បានប្រគល់: <b>{delivered:,}</b> / {int(qty_orig):,}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                + (f"💰 លុយត្រូវបានសងវិញ: <b>${refund:.4f}</b>\n"
+                   f"💳 Balance: <b>${bal(int(o['uid'])):.2f}</b>\n" if refund > 0 else "")
+                + f"🙏 សូមអភ័យទោសចំពោះការរអាក់រអួល!",
+                parse_mode="HTML")
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        try:
+            bot.send_message(ADMIN_ID,
+                f"⚠️ <b>Order ប្រគល់មិនគ្រប់ (Partial, Auto-Refunded)</b>\n"
+                f"🆔 <code>{oid}</code>\n"
+                f"👤 {_user_display(o.get('uid',''))}\n"
+                f"📊 {o.get('label','?')} | ប្រគល់ {delivered:,}/{int(qty_orig):,}\n"
+                f"🔗 <code>{o.get('link','')}</code>\n"
+                f"💰 សងវិញ: ${refund:.4f}",
+                parse_mode="HTML")
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        return "partial"
+    return o.get("status")
+
 def _smm_order_watcher():
     """ 🕑 Background thread — Poll ស្ថានភាព Order ដែលដាក់ស្វ័យប្រវត្តិតាម API ជាទៀងទាត់
-    ពេល Order ដល់ស្ថានភាព "Completed" (បានគ្រប់ចំនួនដែលទិញ) → ផ្ញើសារជូនដំណឹងទៅ User ភ្លាម។
+    ដោយហៅ _smm_sync_order() សម្រាប់ Order pending នីមួយៗ។
     Order ដែលជា Manual (គ្មាន api_order_id) មិនត្រូវបាន Poll ទេ — Admin ត្រូវ Mark Done ដោយផ្ទាល់។"""
     while True:
         try:
             time.sleep(SMM_ORDER_POLL_INTERVAL)
             for oid, o in list(smm_orders.items()):
                 if o.get("status") != "pending": continue
-                api_oid = o.get("api_order_id")
-                if not api_oid: continue
-                res = _smm_api_status(api_oid)
-                if not res or not isinstance(res, dict): continue
-                st = str(res.get("status", "")).strip().lower()
-                if st == "completed":
-                    smm_orders[oid]["status"]  = "completed"
-                    smm_orders[oid]["remains"] = res.get("remains", 0)
-                    _save(SMM_ORD_FILE, smm_orders)
-                    try:
-                        bot.send_message(int(o["uid"]),
-                            f"✅ <b>Order បានជោគជ័យគ្រប់ចំនួន 100%!</b> 🎉\n"
-                            f"━━━━━━━━━━━━━━━━━━\n"
-                            f"🆔 <code>{oid}</code>\n"
-                            f"📊 {o.get('label','?')}\n"
-                            f"🔢 ចំនួន: <b>{o.get('qty',0):,}</b>\n"
-                            f"🔗 <code>{o.get('link','')}</code>\n"
-                            f"━━━━━━━━━━━━━━━━━━\n"
-                            f"🙏 អរគុណដែលប្រើ {_bot_brand()}!",
-                            parse_mode="HTML")
-                    except Exception as _e: logger.debug(f"[silent] {_e}")
-                    try:
-                        bot.send_message(ADMIN_ID,
-                            f"✅ <b>Order បានគ្រប់ចំនួន 100%!</b>\n"
-                            f"🆔 <code>{oid}</code>\n"
-                            f"👤 {_user_display(o.get('uid',''))}\n"
-                            f"📦 {o.get('label','?')}\n"
-                            f"🔢 {o.get('qty',0):,} | 💰 ${float(o.get('price',0)):.4f}\n"
-                            f"🔗 <code>{o.get('link','')}</code>",
-                            parse_mode="HTML")
-                    except Exception as _e: logger.debug(f"[silent] {_e}")
-                elif st in ("canceled", "cancelled"):
-                    smm_orders[oid]["status"] = "canceled"
-                    _save(SMM_ORD_FILE, smm_orders)
-                    try:
-                        bot.send_message(int(o["uid"]),
-                            f"⚠️ <b>Order ត្រូវបានលុបចោល (Canceled)</b>\n"
-                            f"🆔 <code>{oid}</code>\n"
-                            f"📊 {o.get('label','?')}\n"
-                            f"សូមទាក់ទង Admin សម្រាប់ Refund។",
-                            parse_mode="HTML")
-                    except Exception as _e: logger.debug(f"[silent] {_e}")
+                if not o.get("api_order_id"): continue
+                _smm_sync_order(oid)
         except Exception as e:
             logger.error(f"[order_watcher] {e}")
 
@@ -3695,7 +3766,7 @@ def cb_manord(call):
         bot.send_message(uid, f"❌ Order <code>{oid}</code> រកមិនឃើញ",
                          parse_mode="HTML"); return
     # ការពារចុច Done/Reject ដដែលៗ (ឧ. Admin ចុចលឿនពីរដង) ដែលអាចធ្វើឲ្យសងលុយ/Complete ២ដង
-    if o.get("status") in ("completed", "rejected", "canceled"):
+    if o.get("status") in ("completed", "rejected", "canceled", "partial"):
         bot.send_message(uid,
             f"⚠️ Order <code>{oid}</code> ត្រូវបានដំណើរការរួចហើយ (ស្ថានភាព: <b>{o.get('status')}</b>)",
             parse_mode="HTML"); return
@@ -3713,6 +3784,7 @@ def cb_manord(call):
             parse_mode="HTML", reply_markup=cancel_kb())
     elif action == "reject":
         smm_orders[oid]["status"] = "rejected"
+        smm_orders[oid]["refunded"] = float(o.get("price") or 0)
         _save(SMM_ORD_FILE, smm_orders)
         try:
             bot.edit_message_reply_markup(uid, call.message.message_id, reply_markup=None)
@@ -6698,6 +6770,11 @@ def handle_msg(message):
         waiting.pop(uid, None)
         if not o or o.get("uid") != uid_str:
             bot.send_message(uid, "❌ Order រកមិនឃើញ!", reply_markup=main_kb(uid)); return
+        # Sync ស្ថានភាព Live ពី Supplier API ភ្លាមៗ (មិនចាំបាច់រង់ចាំ Poll Cycle បន្ទាប់ទេ) —
+        # បើ Order ត្រូវ Cancel/Partial នៅខាង Supplier រួច Refund នឹងកើតឡើងស្វ័យប្រវត្តិទីនេះតែម្តង
+        if o.get("status") == "pending" and o.get("api_order_id"):
+            _smm_sync_order(oid)
+            o = smm_orders.get(oid, o)
         bot.send_message(uid,
             f"📊 <b>SMM Order: <code>{oid}</code></b>\n"
             f"{o.get('label','?')}\n"
