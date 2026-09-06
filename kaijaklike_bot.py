@@ -96,6 +96,37 @@ _EMOJI_CHARS_SORTED = sorted(EMOJI_MAP.keys(), key=len, reverse=True)
 _LEADING_EMOJI_RE = _re.compile(
     "^(" + "|".join(_re.escape(c) for c in _EMOJI_CHARS_SORTED) + ")"
 )
+# Pattern ដូចគ្នា ប៉ុន្តែគ្មាន anchor '^' — ប្រើសម្រាប់ស្កេន emoji នៅកន្លែង
+# ណាមួយក៏បានក្នុង string (មិនមែនត្រឹមតែដើម) សម្រាប់ caption/សារវែងៗ។
+_EMOJI_ANY_RE = _re.compile(
+    "(" + "|".join(_re.escape(c) for c in _EMOJI_CHARS_SORTED) + ")"
+)
+
+def _entities_for_emoji_text(text):
+    """ត្រឡប់ list of MessageEntity(type='custom_emoji') សម្រាប់រាល់ emoji ក្នុង
+    text ណាដែលមាន custom_emoji_id កំណត់រួចនៅ EMOJI_MAP (កន្លែង /setemojis) —
+    emoji ណាមិនទាន់កំណត់ត្រូវទុកចោល (fallback ទៅ unicode ធម្មតាដដែល)។
+    គណនា offset/length ជា UTF-16 code units ដូចលក្ខណៈពិតរបស់ Telegram
+    MessageEntity (សំខាន់សម្រាប់ emoji ក្រៅ BMP)."""
+    if not text:
+        return []
+    entities, utf16_pos, idx = [], 0, 0
+    while idx < len(text):
+        m = _EMOJI_ANY_RE.match(text, idx)
+        if m:
+            ch = m.group(1)
+            length = len(ch.encode("utf-16-le")) // 2
+            eid = EMOJI_MAP.get(ch)
+            if eid:
+                entities.append(_MessageEntity(type="custom_emoji", offset=utf16_pos,
+                                                length=length, custom_emoji_id=eid))
+            utf16_pos += length
+            idx += len(ch)
+        else:
+            c = text[idx]
+            utf16_pos += len(c.encode("utf-16-le")) // 2
+            idx += 1
+    return entities
 
 def _leading_emoji(s):
     """បើ string ចាប់ផ្ដើមដោយ emoji ណាមួយក្នុង EMOJI_MAP សូមត្រឡប់តួនោះមកវិញ។"""
@@ -3249,6 +3280,14 @@ def _save_tutorial_video(file_id):
     tutorial_cfg["file_id"] = file_id
     _save(TUTORIAL_VIDEO_FILE, tutorial_cfg)
 
+def _tutorial_caption():
+    """Caption ខ្លីៗសម្រាប់វីដេអូបង្រៀន — ប្រើតែ emoji ដែលមានស្រាប់ក្នុងបញ្ជី
+    /setemojis (💡, 🤖) ដូច្នេះបើ Admin បានកំណត់ Premium Emoji សម្រាប់វា
+    រួចហើយ វានឹងបង្ហាញជា Premium icon ភ្លាមៗ (មើល _entities_for_emoji_text)។
+    @username ប្តូរស្វ័យប្រវត្តិទៅតាម Bot ខ្លួនឯង (Master ឬ Sub Bot នីមួយៗ)"""
+    return (f"💡 នេះជាវីដេអូដែលបង្ហាញនូវរបៀបប្រើប្រាស់\n"
+            f"🤖 @{_bot_username()}")
+
 def _show_welcome(uid):
     b       = bal(uid)
     custom_msg = welcome_cfg.get("custom_msg", "")
@@ -3259,6 +3298,7 @@ def _show_welcome(uid):
     else:
         caption = t(uid, "welcome", b)
     photo_id = welcome_cfg.get("photo_id", "")
+    video_id = tutorial_cfg.get("file_id", "")
     if photo_id:
         try:
             bot.send_photo(
@@ -3266,13 +3306,28 @@ def _show_welcome(uid):
                 photo=photo_id,
                 caption=caption,
                 parse_mode="HTML",
+                reply_markup=(None if video_id else main_kb(uid))
+            )
+        except Exception:
+            bot.send_message(uid, caption, parse_mode="HTML",
+                              reply_markup=(None if video_id else main_kb(uid)))
+    else:
+        # Fallback: text only
+        bot.send_message(uid, caption, parse_mode="HTML",
+                          reply_markup=(None if video_id else main_kb(uid)))
+    # ── វីដេអូបង្រៀន (ដូចកន្លែង 💡 របៀបប្រើប្រាស់) — ផ្ញើបន្ទាប់ពី Welcome ──
+    if video_id:
+        try:
+            bot.send_video(
+                uid,
+                video_id,
+                caption=_tutorial_caption(),
+                caption_entities=_entities_for_emoji_text(_tutorial_caption()),
                 reply_markup=main_kb(uid)
             )
-            return
-        except Exception:
-            pass
-    # Fallback: text only
-    bot.send_message(uid, caption, parse_mode="HTML", reply_markup=main_kb(uid))
+        except Exception as e:
+            logger.warning(f"⚠️ send tutorial video (welcome) failed: {e}")
+            bot.send_message(uid, t(uid, "how_to_use"), parse_mode="HTML", reply_markup=main_kb(uid))
 
 # ═══════════════════════════════════════════════════════════
 #  CALLBACKS
@@ -6889,7 +6944,9 @@ def handle_msg(message):
         video_id = tutorial_cfg.get("file_id")
         if video_id:
             try:
-                bot.send_video(uid, video_id, reply_markup=main_kb(uid))
+                bot.send_video(uid, video_id, caption=_tutorial_caption(),
+                                caption_entities=_entities_for_emoji_text(_tutorial_caption()),
+                                reply_markup=main_kb(uid))
             except Exception as e:
                 logger.warning(f"⚠️ send tutorial video failed: {e}")
                 bot.send_message(uid, t(uid, "how_to_use"), parse_mode="HTML", reply_markup=main_kb(uid))
