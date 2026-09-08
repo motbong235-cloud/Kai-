@@ -88,6 +88,13 @@ _EMOJI_CHAR_LIST = [
     # Manual QR) ដែលមិនធ្លាប់នៅក្នុងបញ្ជីនេះ — ធ្វើឲ្យ Admin មិនអាចកំណត់
     # ជា Premium Emoji បាន (គ្មានកន្លែង setup ក្នុង /setemojis grid)។
     '🔀', '⏳', '🔁', '🖼',
+    # ⚠️ បន្ថែម 2026-09-09 — ស្កេនប៊ូតុង/សារទាំងអស់ម្តងទៀត (ដោយប្រៀបធៀប emoji
+    # ពិតប្រាកដទាំងអស់ក្នុងកូដ ធៀបនឹងបញ្ជីនេះ) រកឃើញ emoji ជាច្រើនកន្លែងដែល
+    # Admin កំណត់ custom premium emoji ហើយ ប៉ុន្តែមិនដែលបង្ហាញ ព្រោះ char
+    # ទាំងនោះមិនស្ថិតក្នុងបញ្ជីនេះទាល់តែសោះ (EMOJI_MAP គ្មាន key នេះ ⇒ /setemojis
+    # មិនអាចផ្តល់ជម្រើសកំណត់បាន ⇒ _emojify() រំលងវាជានិច្ច)។
+    '⭕', '🎬', '🏪', '👉', '📅', '📆', '📡', '📥', '🔎', '🔒',
+    '🔘', '🔧', '🕑', '👁', '🗓️', '🚨', '🥇', '🥈', '🥉', '✓', '⬜',
 ]
 EMOJI_MAP = {ch: None for ch in _EMOJI_CHAR_LIST}
 # ធ្វើ regex pattern មួយសម្រាប់ចាប់ emoji នៅដើម string (រួមទាំង variation
@@ -1491,6 +1498,35 @@ def _smm_api_status(api_order_id):
     except Exception as e:
         logger.error(f"SMM API status: {e}"); return None
 
+def _smm_api_refill(api_order_id):
+    """ស្នើសុំ Refill (បំពេញបន្ថែម) ពី Supplier API (action=refill) សម្រាប់ Order
+    ដែល Service គាំទ្រ Refill។ ត្រឡប់ refill id (str) បើជោគជ័យ, បើពុំនោះ None។"""
+    key = smm_api.get("key", ""); url = smm_api.get("url", "")
+    if not key or not url or not api_order_id: return None
+    try:
+        r = http.post(url, data={"key": key, "action": "refill", "order": api_order_id}, timeout=25)
+        d = r.json()
+        if isinstance(d, list) and d:
+            d = d[0]
+        if isinstance(d, dict) and not d.get("error") and d.get("refill") is not None:
+            return str(d["refill"])
+        return None
+    except Exception as e:
+        logger.error(f"SMM API refill: {e}"); return None
+
+def _smm_api_refill_status(refill_id):
+    """ពិនិត្យស្ថានភាព Refill request (action=refill_status)។"""
+    key = smm_api.get("key", ""); url = smm_api.get("url", "")
+    if not key or not url or not refill_id: return None
+    try:
+        r = http.post(url, data={"key": key, "action": "refill_status", "refill": refill_id}, timeout=25)
+        d = r.json()
+        if isinstance(d, list) and d:
+            d = d[0]
+        return d if isinstance(d, dict) else None
+    except Exception as e:
+        logger.error(f"SMM API refill_status: {e}"); return None
+
 def _smm_sync_order(oid):
     """🔄 ត្រួតពិនិត្យ + Sync ស្ថានភាព Order មួយពី Supplier API ភ្លាមៗ (Live) —
     ប្រើទាំងដោយ Background Watcher (Poll ទៀងទាត់) និងដោយ User ខ្លួនឯងពេលចុច
@@ -1563,11 +1599,44 @@ def _smm_sync_order(oid):
         except Exception as _e: logger.debug(f"[silent] {_e}")
         return "canceled"
     elif st == "partial":
-        # Supplier បានប្រគល់ខ្លះ ប៉ុន្តែមិនគ្រប់ចំនួន → សងលុយវិញសម្រាប់ចំនួនដែលមិនបានប្រគល់ (remains)
         remains  = float(res.get("remains", 0) or 0)
         qty_orig = float(o.get("qty", 0) or 0)
-        price    = float(o.get("price") or 0)
-        refund   = round(price * remains / qty_orig, 4) if qty_orig > 0 and remains > 0 else 0.0
+        svc      = smm_services.get(o.get("slug"), {}) or {}
+        # ── បើ Service គាំទ្រ Refill និងមិនទាន់សុំ Refill ពីមុន → សុំ Refill ស្វ័យប្រវត្តិសិន
+        # ជំនួសសងលុយភ្លាម (សូម្បីតែសងលុយវិញ បើ Refill បរាជ័យ ក៏ Fallback ទៅ Logic ចាស់វិញ) ──
+        if svc.get("refill") and not o.get("refill_id") and not o.get("refill_tried") and remains > 0:
+            rf_id = _smm_api_refill(o.get("api_order_id"))
+            smm_orders[oid]["refill_tried"] = True
+            smm_orders[oid]["remains"] = remains
+            if rf_id:
+                smm_orders[oid]["status"]    = "refilling"
+                smm_orders[oid]["refill_id"] = rf_id
+                _save(SMM_ORD_FILE, smm_orders)
+                try:
+                    bot.send_message(int(o["uid"]),
+                        f"🔄 <b>Order ចុះថយ — កំពុងស្នើសុំបំពេញបន្ថែម (Refill)</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"🆔 <code>{oid}</code>\n"
+                        f"📊 {o.get('label','?')}\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"⏳ Bot កំពុងស្នើសុំ Supplier បំពេញចំនួនដែលបាត់ដោយស្វ័យប្រវត្តិ\n"
+                        f"បើ Refill មិនជោគជ័យ លុយនឹងសងវិញស្វ័យប្រវត្តិ",
+                        parse_mode="HTML")
+                except Exception as _e: logger.debug(f"[silent] {_e}")
+                try:
+                    bot.send_message(ADMIN_ID,
+                        f"🔄 <b>Order Partial → សុំ Refill ស្វ័យប្រវត្តិ</b>\n"
+                        f"🆔 <code>{oid}</code> | Refill ID: <code>{rf_id}</code>\n"
+                        f"👤 {_user_display(o.get('uid',''))}\n"
+                        f"📊 {o.get('label','?')}",
+                        parse_mode="HTML")
+                except Exception as _e: logger.debug(f"[silent] {_e}")
+                return "refilling"
+            _save(SMM_ORD_FILE, smm_orders)
+            # Refill request បរាជ័យ → បន្តទៅ Refund Logic ខាងក្រោម
+        # ── Refund សម្រាប់ចំនួនដែលមិនបានប្រគល់ (Service គ្មាន Refill ឬ Refill បរាជ័យ) ──
+        price     = float(o.get("price") or 0)
+        refund    = round(price * remains / qty_orig, 4) if qty_orig > 0 and remains > 0 else 0.0
         delivered = int(qty_orig - remains) if qty_orig else 0
         smm_orders[oid]["status"]   = "partial"
         smm_orders[oid]["remains"]  = remains
@@ -1601,17 +1670,87 @@ def _smm_sync_order(oid):
         return "partial"
     return o.get("status")
 
+def _smm_sync_refill(oid):
+    """🔄 ត្រួតពិនិត្យស្ថានភាព Refill request មួយ (action=refill_status)។
+    បើ Refill ជោគជ័យ → Mark Order ត្រឡប់ជា completed វិញ។
+    បើ Refill ត្រូវបដិសេធ/បរាជ័យ → Fallback ទៅ Refund ដូច Logic partial ចាស់។
+    បើនៅតែកំពុងដំណើរការ → មិនធ្វើអ្វីទេ រង់ចាំ Poll លើកក្រោយ។"""
+    o = smm_orders.get(oid)
+    if not o or o.get("status") != "refilling": return o.get("status") if o else None
+    rf_id = o.get("refill_id")
+    if not rf_id: return "refilling"
+    res = _smm_api_refill_status(rf_id)
+    if not res: return "refilling"
+    st = str(res.get("status", "")).strip().lower()
+    if st in ("completed", "success"):
+        smm_orders[oid]["status"]  = "completed"
+        smm_orders[oid]["remains"] = 0
+        _save(SMM_ORD_FILE, smm_orders)
+        try:
+            bot.send_message(int(o["uid"]),
+                f"✅ <b>Refill បានជោគជ័យ!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🆔 <code>{oid}</code>\n"
+                f"📊 {o.get('label','?')}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🎉 ចំនួនដែលបានធ្លាក់ត្រូវបានបំពេញវិញគ្រប់ចំនួន!",
+                parse_mode="HTML")
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        try:
+            bot.send_message(ADMIN_ID,
+                f"✅ <b>Refill ជោគជ័យ</b>\n🆔 <code>{oid}</code> | 👤 {_user_display(o.get('uid',''))}",
+                parse_mode="HTML")
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        return "completed"
+    if st in ("rejected", "canceled", "cancelled", "error"):
+        # Refill បរាជ័យ → Refund ចំនួនដែលនៅសល់ (Fallback)
+        remains   = float(o.get("remains", 0) or 0)
+        qty_orig  = float(o.get("qty", 0) or 0)
+        price     = float(o.get("price") or 0)
+        refund    = round(price * remains / qty_orig, 4) if qty_orig > 0 and remains > 0 else 0.0
+        delivered = int(qty_orig - remains) if qty_orig else 0
+        smm_orders[oid]["status"]   = "partial"
+        smm_orders[oid]["refunded"] = refund
+        _save(SMM_ORD_FILE, smm_orders)
+        if refund > 0:
+            add_bal(int(o["uid"]), refund)
+        try:
+            bot.send_message(int(o["uid"]),
+                f"⚠️ <b>Refill ត្រូវបានបដិសេធ</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🆔 <code>{oid}</code>\n"
+                f"📊 {o.get('label','?')}\n"
+                f"✅ បានប្រគល់: <b>{delivered:,}</b> / {int(qty_orig):,}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                + (f"💰 លុយត្រូវបានសងវិញ: <b>${refund:.4f}</b>\n"
+                   f"💳 Balance: <b>${bal(int(o['uid'])):.2f}</b>\n" if refund > 0 else "")
+                + f"🙏 សូមអភ័យទោសចំពោះការរអាក់រអួល!",
+                parse_mode="HTML")
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        try:
+            bot.send_message(ADMIN_ID,
+                f"⚠️ <b>Refill បដិសេធ → Auto-Refunded</b>\n"
+                f"🆔 <code>{oid}</code> | 👤 {_user_display(o.get('uid',''))}\n"
+                f"💰 សងវិញ: ${refund:.4f}",
+                parse_mode="HTML")
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        return "partial"
+    return "refilling"
+
 def _smm_order_watcher():
     """ 🕑 Background thread — Poll ស្ថានភាព Order ដែលដាក់ស្វ័យប្រវត្តិតាម API ជាទៀងទាត់
-    ដោយហៅ _smm_sync_order() សម្រាប់ Order pending នីមួយៗ។
+    ដោយហៅ _smm_sync_order() សម្រាប់ Order pending នីមួយៗ, និង _smm_sync_refill()
+    សម្រាប់ Order ដែលកំពុងរង់ចាំ Refill (status='refilling')។
     Order ដែលជា Manual (គ្មាន api_order_id) មិនត្រូវបាន Poll ទេ — Admin ត្រូវ Mark Done ដោយផ្ទាល់។"""
     while True:
         try:
             time.sleep(SMM_ORDER_POLL_INTERVAL)
             for oid, o in list(smm_orders.items()):
-                if o.get("status") != "pending": continue
-                if not o.get("api_order_id"): continue
-                _smm_sync_order(oid)
+                st = o.get("status")
+                if st == "pending" and o.get("api_order_id"):
+                    _smm_sync_order(oid)
+                elif st == "refilling" and o.get("refill_id"):
+                    _smm_sync_refill(oid)
         except Exception as e:
             logger.error(f"[order_watcher] {e}")
 
@@ -1637,11 +1776,23 @@ def _smm_fetch_service(api_id):
                     "min":       max(1, int(float(s.get("min") or 10))),
                     "max":       int(float(s.get("max") or 100000)),
                     "raw_name":  s.get("name") or s.get("Name") or str(api_id),
+                    "refill":    bool(s.get("refill", False)),
                 }
         logger.error(f"SMM API: service {api_id} not found in list")
     except Exception as e:
         logger.error(f"Fetch service {api_id}: {e}")
     return None
+
+_ORD_STATUS_LABELS = {
+    "pending":   "⏳ កំពុងដំណើរការ",
+    "completed": "✅ ជោគជ័យ",
+    "partial":   "⚠️ ប្រគល់មិនគ្រប់",
+    "canceled":  "❌ បានលុបចោល",
+    "cancelled": "❌ បានលុបចោល",
+    "refilling": "🔄 កំពុងសុំ Refill",
+}
+def _ord_status_label(st):
+    return _ORD_STATUS_LABELS.get(str(st or "").lower(), str(st or "?"))
 
 def _smm_clean_name(raw):
     raw = re.sub(r'\s*\[.*?\]\s*', ' ', raw)
@@ -2818,6 +2969,22 @@ def deposit_amt_kb(uid=None, promo_code=None):
             callback_data="dep:manual", color="active")])
     return InlineKeyboardMarkup(btns)
 
+def admin_bal_amt_kb(target, kind):
+    """Admin ចុចជ្រើសចំនួន (ឬ 'ចំនួនផ្សេង' ដើម្បីវាយដោយដៃ) សម្រាប់ បន្ថែម/កាត់ Balance
+    របស់ user — ដូចរចនាបទ deposit_amt_kb (preset buttons + custom)."""
+    amounts = [1, 2, 5, 10, 20, 50]
+    btns = []
+    row = []
+    for amt in amounts:
+        row.append(InlineKeyboardButton(f"💵 ${amt}",
+            callback_data=f"balamt:{kind}:{target}:{amt}", color="active"))
+        if len(row) == 3:
+            btns.append(row); row = []
+    if row: btns.append(row)
+    btns.append([InlineKeyboardButton("✏️ ចំនួនផ្សេង",
+        callback_data=f"balamt:{kind}:{target}:custom", color="progress")])
+    return InlineKeyboardMarkup(btns)
+
 def smm_cat_kb():
     PLATFORM_ICONS = {
         "tiktok khmer": "🇰🇭",
@@ -3871,10 +4038,15 @@ def cb_editsvc(call):
     old_label = s.get("label", slug)
     api_id    = s.get("api_id", "?")
     cur_plabel = _PLATFORM_LABEL_BY_KEY.get(s.get("platform"), "⚠️ មិនទាន់កំណត់ (Guess ស្វ័យប្រវត្តិ)")
+    rf_on = bool(s.get("refill"))
     waiting[uid] = {"step": "edit_svc_name", "slug": slug}
     kb = InlineKeyboardMarkup()
     kb.add(InlineKeyboardButton("🌐 កែ Platform (សម្រាប់ Link)",
                                  callback_data=f"editsvcplat:{slug}", color="progress"))
+    if not s.get("manual"):
+        kb.add(InlineKeyboardButton(
+            f"🔄 Refill ស្វ័យប្រវត្តិ: {'✅ បើក' if rf_on else '⭕ បិទ'} (ចុចដើម្បីប្តូរ)",
+            callback_data=f"svcrefill:{slug}", color="active" if rf_on else "inactive"))
     kb.add(InlineKeyboardButton("❌ Cancel", callback_data="back:main", color="inactive"))
     bot.send_message(uid,
         f"✏️ <b>កែ Service</b>\n"
@@ -3882,9 +4054,46 @@ def cb_editsvc(call):
         f"🆔 API ID: <code>{api_id}</code>\n"
         f"📝 ឈ្មោះ​បច្ចុប្បន្ន:\n<b>{old_label}</b>\n"
         f"🌐 Platform បច្ចុប្បន្ន: <b>{cur_plabel}</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
+        + (f"🔄 Refill ស្វ័យប្រវត្តិ: <b>{'✅ បើក' if rf_on else '⭕ បិទ'}</b>\n" if not s.get("manual") else "")
+        + f"━━━━━━━━━━━━━━━━━━\n"
         f"វាយ <b>ឈ្មោះថ្មី</b> ដើម្បីប្ដូរ, ឬចុច 🌐 ដើម្បីកែ Platform:",
         parse_mode="HTML", reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("svcrefill:"))
+def cb_svcrefill(call):
+    """Admin ចុចប្តូរបើក/បិទ Refill ស្វ័យប្រវត្តិ សម្រាប់ Service មួយ ដោយដៃ —
+    មានប្រយោជន៍បើ Supplier API មិនរាយការណ៍ត្រឹមត្រូវថា Service គាំទ្រ Refill ។"""
+    uid = call.message.chat.id
+    if uid != ADMIN_ID: bot.answer_callback_query(call.id); return
+    slug = call.data[len("svcrefill:"):]
+    s = smm_services.get(slug)
+    if not s:
+        bot.answer_callback_query(call.id, "❌ Service រកមិនឃើញ"); return
+    s["refill"] = not bool(s.get("refill"))
+    _save(SMM_SVC_FILE, smm_services)
+    bot.answer_callback_query(call.id,
+        f"🔄 Refill ស្វ័យប្រវត្តិ: {'✅ បើក' if s['refill'] else '⭕ បិទ'}")
+    cur_plabel = _PLATFORM_LABEL_BY_KEY.get(s.get("platform"), "⚠️ មិនទាន់កំណត់ (Guess ស្វ័យប្រវត្តិ)")
+    rf_on = bool(s.get("refill"))
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("🌐 កែ Platform (សម្រាប់ Link)",
+                                 callback_data=f"editsvcplat:{slug}", color="progress"))
+    kb.add(InlineKeyboardButton(
+        f"🔄 Refill ស្វ័យប្រវត្តិ: {'✅ បើក' if rf_on else '⭕ បិទ'} (ចុចដើម្បីប្តូរ)",
+        callback_data=f"svcrefill:{slug}", color="active" if rf_on else "inactive"))
+    kb.add(InlineKeyboardButton("❌ Cancel", callback_data="back:main", color="inactive"))
+    try:
+        bot.edit_message_text(
+            f"✏️ <b>កែ Service</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 API ID: <code>{s.get('api_id','?')}</code>\n"
+            f"📝 ឈ្មោះ​បច្ចុប្បន្ន:\n<b>{s.get('label',slug)}</b>\n"
+            f"🌐 Platform បច្ចុប្បន្ន: <b>{cur_plabel}</b>\n"
+            f"🔄 Refill ស្វ័យប្រវត្តិ: <b>{'✅ បើក' if rf_on else '⭕ បិទ'}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"វាយ <b>ឈ្មោះថ្មី</b> ដើម្បីប្ដូរ, ឬចុច 🌐 ដើម្បីកែ Platform:",
+            uid, call.message.message_id, parse_mode="HTML", reply_markup=kb)
+    except Exception as _e: logger.debug(f"[silent] {_e}")
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("editsvcplat:"))
 def cb_editsvcplat(call):
@@ -4005,18 +4214,18 @@ def cb_useraction(call):
     target = parts[2] if len(parts) > 2 else ""
 
     if action == "addbal":
-        waiting[uid] = {"step": "add_balance_amt", "target": target}
         bot.send_message(uid,
             f"💸 <b>បន្ថែមប្រាក់</b>\n👤 UID: <code>{target}</code>\n"
-            f"💳 Balance: <b>${bal(int(target)):.2f}</b>\nផ្ញើ Amount $:",
-            parse_mode="HTML", reply_markup=cancel_kb())
+            f"💳 Balance: <b>${bal(int(target)):.2f}</b>\n"
+            f"ជ្រើសរើសចំនួន ឬ ចុច ✏️ ចំនួនផ្សេង ដើម្បីវាយបញ្ចូល:",
+            parse_mode="HTML", reply_markup=admin_bal_amt_kb(target, "add"))
 
     elif action == "dedbal":
-        waiting[uid] = {"step": "deduct_balance_amt", "target": target}
         bot.send_message(uid,
             f"💔 <b>កាត់ប្រាក់</b>\n👤 UID: <code>{target}</code>\n"
-            f"💳 Balance: <b>${bal(int(target)):.2f}</b>\nផ្ញើ Amount $ ដក:",
-            parse_mode="HTML", reply_markup=cancel_kb())
+            f"💳 Balance: <b>${bal(int(target)):.2f}</b>\n"
+            f"ជ្រើសរើសចំនួន ឬ ចុច ✏️ ចំនួនផ្សេង ដើម្បីវាយបញ្ចូល:",
+            parse_mode="HTML", reply_markup=admin_bal_amt_kb(target, "ded"))
 
     elif action == "ban":
         users_db[target]["banned"] = True; _save(USERS_FILE, users_db)
@@ -4027,6 +4236,58 @@ def cb_useraction(call):
         users_db[target]["banned"] = False; _save(USERS_FILE, users_db)
         bot.send_message(uid, f"🔓 Unbanned <code>{target}</code>",
                          parse_mode="HTML", reply_markup=admin_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("balamt:"))
+def cb_balamt(call):
+    """Admin ចុចប៊ូតុងចំនួន (ឬ ចំនួនផ្សេង) ដើម្បី បន្ថែម/កាត់ Balance — ដូច flow QR Auto."""
+    uid = call.message.chat.id
+    if uid != ADMIN_ID:
+        bot.answer_callback_query(call.id); return
+    bot.answer_callback_query(call.id)
+    try:
+        _, kind, target, val = call.data.split(":", 3)
+    except Exception as _e:
+        logger.debug(f"[silent] {_e}"); return
+
+    # ── ចំនួនផ្សេង → ស្នើឲ្យវាយបញ្ចូល ដូច custom deposit ──
+    if val == "custom":
+        waiting[uid] = {"step": "add_balance_amt" if kind == "add" else "deduct_balance_amt",
+                         "target": target}
+        bot.send_message(uid,
+            "✏️ <b>វាយចំនួន (USD):</b>\nឧ: <code>3</code> ឬ <code>7.50</code>",
+            parse_mode="HTML", reply_markup=cancel_kb())
+        return
+
+    # ── ចុចចំនួន preset ──
+    try:
+        amt = float(val)
+    except Exception as _e:
+        logger.debug(f"[silent] {_e}"); return
+    waiting.pop(uid, None)
+
+    if kind == "add":
+        add_bal(int(target), amt)
+        _save(WALLETS_FILE, wallets)
+        bot.send_message(uid,
+            f"✅ <b>បន្ថែម Balance</b>\n👤 <code>{target}</code>\n"
+            f"💰 +${amt:.2f} | Balance: <b>${bal(int(target)):.2f}</b>",
+            parse_mode="HTML", reply_markup=admin_kb())
+        try: bot.send_message(int(target),
+            f"✅ <b>Admin បន្ថែមលុយ!</b>\n💰 +${amt:.2f} | Balance: <b>${bal(int(target)):.2f}</b>",
+            parse_mode="HTML")
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+    else:
+        cur = bal(int(target))
+        ded = min(amt, cur)
+        ded_bal(int(target), ded)
+        bot.send_message(uid,
+            f"✅ <b>កាត់ Balance</b>\n👤 <code>{target}</code>\n"
+            f"💔 -${ded:.2f} | Balance: <b>${bal(int(target)):.2f}</b>",
+            parse_mode="HTML", reply_markup=admin_kb())
+        try: bot.send_message(int(target),
+            f"⚠️ <b>Admin កាត់លុយ!</b>\n💔 -${ded:.2f} | Balance: <b>${bal(int(target)):.2f}</b>",
+            parse_mode="HTML")
+        except Exception as _e: logger.debug(f"[silent] {_e}")
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adminpromo:"))
 def cb_adminpromo(call):
@@ -4497,7 +4758,7 @@ def cb_cln_actions(call):
         clone_registry.pop(name, None)
         _save(CLONES_REGISTRY, clone_registry)
         bot.answer_callback_query(call.id, "បានលុប")
-        bot.send_message(uid, f"🗑 បានលុប '{name}' ចេញពី registry (ទិន្នន័យ bot_clones/{name}/ នៅសល់)")
+        bot.send_message(uid, f"🗑️ បានលុប '{name}' ចេញពី registry (ទិន្នន័យ bot_clones/{name}/ នៅសល់)")
         return
     bot.send_message(uid, f"ស្ថានភាព '{name}':")
     cb_cln_view_inline = InlineKeyboardMarkup(row_width=2)
@@ -5600,8 +5861,10 @@ def handle_msg(message):
                         "label":     _smm_clean_name(info["raw_name"]),
                         "category":  cat,
                         "platform":  platform,
+                        "refill":    info.get("refill", False),
                     }
-                    ok.append(f"✅ <code>{api_id}</code> — {smm_services[slug]['label']}")
+                    rf_tag = " 🔄" if info.get("refill") else ""
+                    ok.append(f"✅ <code>{api_id}</code> — {smm_services[slug]['label']}{rf_tag}")
                 else:
                     fail.append(f"❌ <code>{api_id}</code> — not found / API error")
             if ok:
@@ -6830,13 +7093,16 @@ def handle_msg(message):
         if o.get("status") == "pending" and o.get("api_order_id"):
             _smm_sync_order(oid)
             o = smm_orders.get(oid, o)
+        elif o.get("status") == "refilling" and o.get("refill_id"):
+            _smm_sync_refill(oid)
+            o = smm_orders.get(oid, o)
         bot.send_message(uid,
             f"📊 <b>SMM Order: <code>{oid}</code></b>\n"
             f"{o.get('label','?')}\n"
             f"🔢 ចំនួន: {o.get('qty','?'):,} | 💰 ${o.get('price',0):.4f}\n"
             f"🔗 <code>{o.get('link','?')}</code>\n"
             f"📌 API: <code>{o.get('api_order_id','?')}</code>\n"
-            f"✅ ស្ថានភាព: <b>{o.get('status','?')}</b>",
+            f"✅ ស្ថានភាព: <b>{_ord_status_label(o.get('status'))}</b>",
             parse_mode="HTML", reply_markup=main_kb(uid)); return
 
     # ── Main menu buttons ──
@@ -6877,7 +7143,7 @@ def handle_msg(message):
                 parse_mode="HTML", reply_markup=main_kb(uid)); return
         lines = ["📦 <b>ការបញ្ជា SMM</b>\n━━━━━━━━━━━━━━━━━━"]
         for oid, o in sorted(my_orders.items(), key=lambda x: x[1].get("ts",0), reverse=True)[:10]:
-            lines.append(f"📊 <code>{oid}</code> — {o.get('label','?')} x{o.get('qty','?')} | ${o.get('price',0):.4f} | {o.get('status','?')}")
+            lines.append(f"📊 <code>{oid}</code> — {o.get('label','?')} x{o.get('qty','?')} | ${o.get('price',0):.4f} | {_ord_status_label(o.get('status'))}")
         bot.send_message(uid, "\n".join(lines), parse_mode="HTML", reply_markup=main_kb(uid)); return
 
     if text in ("📋 ប្រវត្តិ", "📋 History"):
@@ -6889,7 +7155,7 @@ def handle_msg(message):
         lines = ["📋 <b>ប្រវត្តិ</b>\n━━━━━━━━━━━━━━━━━━"]
         for oid, o in sorted(my_orders.items(), key=lambda x: x[1].get("ts",0), reverse=True)[:15]:
             dt = datetime.datetime.fromtimestamp(o.get("ts",0)).strftime("%d/%m %H:%M")
-            lines.append(f"📊 <code>{oid}</code> | {o.get('label','?')} x{o.get('qty','?')} | ${o.get('price',0):.4f} | {o.get('status','?')} | {dt}")
+            lines.append(f"📊 <code>{oid}</code> | {o.get('label','?')} x{o.get('qty','?')} | ${o.get('price',0):.4f} | {_ord_status_label(o.get('status'))} | {dt}")
         bot.send_message(uid, "\n".join(lines)[:4000], parse_mode="HTML", reply_markup=main_kb(uid)); return
 
     if text in ("👜 កាបូបលុយ", "👜 Wallet", "👤 តំណាំការគណនី", "👤 គណនី", "👤 My Account"):
