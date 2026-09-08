@@ -4729,7 +4729,34 @@ def cb_cln_list(call):
     for nm in clone_registry:
         st = "🟢" if _clone_is_running(nm) else "🔴"
         kb.add(InlineKeyboardButton(f"{st} {nm}", callback_data=f"cln_view|{nm}", color="default"))
+    kb.add(InlineKeyboardButton("🔄 Restart All (ទាញកូដ/Feature ថ្មីចូល Bot រងទាំងអស់)",
+                                 callback_data="cln_restart_all", color="progress"))
     bot.send_message(uid, "📋 <b>Bot រងទាំងអស់</b>", parse_mode="HTML", reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda c: c.data == "cln_restart_all")
+def cb_cln_restart_all(call):
+    """Admin ចុចម្តង Restart Bot រង (Clone) ទាំងអស់ម្តងតែម្តង — ព្រោះ Clone រត់ script
+    ឯកសារដដែលនឹង Bot ដើម (មិនមែន copy ដាច់ដោយឡែកទេ) ដូច្នេះ Feature/ការកែថ្មីៗ
+    ណាមួយ (ដូចជា emoji list, refill/cancel ។ល។) ចូលទៅ Bot រងទាំងអស់ស្វ័យប្រវត្តិ
+    ភ្លាមតែ Restart — មិនចាំបាច់ Deploy ដាច់ដោយឡែកម្នាក់ៗឡើយ។"""
+    uid = call.message.chat.id
+    if uid != ADMIN_ID or not IS_MASTER:
+        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
+    bot.answer_callback_query(call.id, "កំពុង Restart...")
+    if not clone_registry:
+        bot.send_message(uid, "📭 មិនទាន់មាន Bot រងណាមួយទេ។", reply_markup=admin_kb()); return
+    ok, fail = [], []
+    for name, cfg in list(clone_registry.items()):
+        try:
+            _stop_clone(name); time.sleep(1); _spawn_clone(name, cfg)
+            ok.append(name)
+        except Exception as e:
+            logger.error(f"cln_restart_all '{name}': {e}")
+            fail.append(name)
+    msg = f"🔄 <b>Restart All បានបញ្ចប់!</b>\n━━━━━━━━━━━━━━━━━━\n✅ ជោគជ័យ ({len(ok)}): {', '.join(ok) if ok else '-'}"
+    if fail:
+        msg += f"\n❌ បរាជ័យ ({len(fail)}): {', '.join(fail)}"
+    bot.send_message(uid, msg, parse_mode="HTML", reply_markup=admin_kb())
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith(("cln_start|", "cln_stop|", "cln_restart|", "cln_delete|")))
 def cb_cln_actions(call):
