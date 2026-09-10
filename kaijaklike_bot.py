@@ -4270,6 +4270,13 @@ def cb_editprice(call):
         f"វាយ <b>តម្លៃថ្មី</b> (លេខទទេ):",
         parse_mode="HTML", reply_markup=cancel_kb())
 
+def _tb_admin_kb(tb):
+    """Reply keyboard សម្រាប់សារឆ្លើយតបលើ Order Bot instance ណាមួយ — admin_kb()
+    (Menu SMM ពេញ) សម្រាប់ bot service ចម្បងប៉ុណ្ណោះ។ Order/Payment Bot ដាច់ដោយឡែក
+    ត្រូវនៅជា Notification bot សុទ្ធ (គ្មាន Menu SMM) ដូច្នេះ return None ដើម្បីកុំឲ្យ
+    Menu ពេញលេចចូល Chat នោះ។"""
+    return admin_kb() if tb is bot else None
+
 def _process_manord_action(call, tb):
     """ដំណើរការ manord: callback (Done/Reject manual order)។ `tb` = bot instance
     ដែលទទួល callback (service bot ឬ Order Bot ដាច់ដោយឡែក)។ សារទៅ User (customer)
@@ -4320,7 +4327,7 @@ def _process_manord_action(call, tb):
         except Exception as _e: logger.debug(f"[silent] {_e}")
         tb.send_message(uid,
             f"❌ <b>Rejected & Refunded</b>\n🆔 <code>{oid}</code>",
-            parse_mode="HTML", reply_markup=admin_kb())
+            parse_mode="HTML", reply_markup=_tb_admin_kb(tb))
 
 def _finish_manual_order(uid, tb, step, text):
     """បញ្ចប់ Manual Order (វាយ Note រួច Complete) — ហៅពី bot service ឬ Order Bot
@@ -4329,7 +4336,7 @@ def _finish_manual_order(uid, tb, step, text):
     user_uid = step.get("user_uid")
     o        = smm_orders.get(oid)
     if not o:
-        tb.send_message(uid, "❌ Order រកមិនឃើញ", reply_markup=admin_kb())
+        tb.send_message(uid, "❌ Order រកមិនឃើញ", reply_markup=_tb_admin_kb(tb))
         waiting.pop(uid, None); return
     note = text.strip()
     smm_orders[oid]["status"]   = "completed"
@@ -4350,7 +4357,7 @@ def _finish_manual_order(uid, tb, step, text):
     except Exception as _e: logger.debug(f"[silent] {_e}")
     tb.send_message(uid,
         f"✅ <b>Order Completed!</b>\n🆔 <code>{oid}</code>",
-        parse_mode="HTML", reply_markup=admin_kb())
+        parse_mode="HTML", reply_markup=_tb_admin_kb(tb))
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("manord:"))
 def cb_manord(call):
