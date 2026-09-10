@@ -1442,16 +1442,83 @@ def cmd_restore(message):
         "(users, wallets, orders...) ។ ធ្វើ /backup ទុកជាមុនសិន បើអ្នកមិនប្រាកដ។",
         parse_mode="HTML", reply_markup=cancel_kb())
 
+@bot.message_handler(commands=["restore_services"])
+def cmd_restore_services(message):
+    """Restore តែ smm_services.json ពី backup zip — មិនប៉ះពាល់ users/wallets/orders/
+    config ផ្សេងទៀតឡើយ។ ប្រើសម្រាប់ sync បញ្ជី Service ពី bot មួយទៅ bot មួយទៀត
+    ដោយមិនបាត់ data អតិថិជនរបស់ bot ដែលទទួល។"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    waiting[ADMIN_ID] = "await_restore_services_zip"
+    bot.reply_to(message,
+        "📥 <b>Restore តែ Service</b>\n"
+        "សូម Forward ឬផ្ញើ file <code>.zip</code> backup មកទីនេះ (ចេញពី /backup ឬ file <code>smm_services.json</code> តែមួយក៏បាន)។\n\n"
+        "✅ ត្រូវជំនួសតែ <code>smm_services.json</code> ប៉ុណ្ណោះ — "
+        "<b>users, wallets, orders, config ផ្សេងទៀត មិនប៉ះពាល់ទេ</b> ។",
+        parse_mode="HTML", reply_markup=cancel_kb())
+
 @bot.message_handler(content_types=["document"])
 def handle_document(message):
     uid = message.chat.id
     if uid != ADMIN_ID:
         return
     step = waiting.get(uid)
-    if step != "await_restore_zip":
+    if step not in ("await_restore_zip", "await_restore_services_zip"):
         return
     doc = message.document
-    if not (doc.file_name or "").lower().endswith(".zip"):
+    fname = (doc.file_name or "").lower()
+
+    # ── Restore តែ Service — ទទួលទាំង .zip និង .json តែមួយ (smm_services.json) ──
+    if step == "await_restore_services_zip":
+        if not (fname.endswith(".zip") or fname.endswith(".json")):
+            bot.send_message(uid, "❌ ត្រូវជា file .zip ឬ .json ប៉ុណ្ណោះ។ ផ្ញើម្តងទៀត ឬ ✕ Cancel។",
+                              reply_markup=cancel_kb())
+            return
+        try:
+            file_info = bot.get_file(doc.file_id)
+            raw = bot.download_file(file_info.file_path)
+            if fname.endswith(".json"):
+                new_content = raw
+            else:
+                with zipfile.ZipFile(io.BytesIO(raw), "r") as zf:
+                    svc_names = [n for n in zf.namelist() if n == "smm_services.json" or n.endswith("/smm_services.json")]
+                    if not svc_names:
+                        bot.send_message(uid, "❌ រកមិនឃើញ <code>smm_services.json</code> ក្នុង zip នេះទេ។ ផ្ញើម្តងទៀត ឬ ✕ Cancel។",
+                                          parse_mode="HTML", reply_markup=cancel_kb())
+                        return
+                    new_content = zf.read(svc_names[0])
+            # ត្រួតពិនិត្យថាជា JSON ត្រឹមត្រូវ មុននឹងសរសេរជាន់
+            try:
+                _parsed = json.loads(new_content.decode("utf-8"))
+            except Exception:
+                bot.send_message(uid, "❌ File នេះមិនមែនជា JSON ត្រឹមត្រូវទេ។ ផ្ញើម្តងទៀត ឬ ✕ Cancel។",
+                                  reply_markup=cancel_kb())
+                return
+            # ចម្លងទុកមុនសិន (safety backup) — តែ smm_services.json ប៉ុណ្ណោះ
+            safety_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            try:
+                import shutil as _shutil
+                if os.path.exists(SMM_SVC_FILE):
+                    _shutil.copy(SMM_SVC_FILE, _dpath(f"smm_services_pre_restore_{safety_ts}.json"))
+            except Exception: pass
+            global smm_services
+            smm_services = _parsed
+            _save(SMM_SVC_FILE, smm_services)
+            waiting.pop(uid, None)
+            bot.send_message(uid,
+                f"✅ <b>Restore Service ជោគជ័យ!</b> ({len(_parsed)} services)\n"
+                f"🛡️ Service ចាស់បានចម្លងទុកនៅ <code>smm_services_pre_restore_{safety_ts}.json</code>\n"
+                f"👤 users / 💰 wallets / 🛒 orders — <b>មិនប៉ះពាល់ទេ</b>។",
+                parse_mode="HTML", reply_markup=admin_kb())
+        except zipfile.BadZipFile:
+            bot.send_message(uid, "❌ File នេះមិនមែនជា zip ត្រឹមត្រូវទេ។ ផ្ញើម្តងទៀត ឬ ✕ Cancel។",
+                              reply_markup=cancel_kb())
+        except Exception as e:
+            logger.error(f"[restore_services] {e}")
+            bot.send_message(uid, f"❌ Restore Service បរាជ័យ: {e}", reply_markup=admin_kb())
+        return
+
+    if not fname.endswith(".zip"):
         bot.send_message(uid, "❌ ត្រូវជា file .zip ប៉ុណ្ណោះ។ ផ្ញើម្តងទៀត ឬ ✕ Cancel។",
                           reply_markup=cancel_kb())
         return
