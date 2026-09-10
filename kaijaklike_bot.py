@@ -411,107 +411,108 @@ dep_bonus_cfg = _load(DEP_BONUS_FILE, {"enabled": True, "min_amount": 1.0, "pct"
 DEP_QR_COOLDOWN_FILE = _dpath("dep_qr_cooldown.json")
 dep_qr_cooldown_cfg  = _load(DEP_QR_COOLDOWN_FILE, {"seconds": DEP_QR_COOLDOWN_SEC})
 
-# ── Auto-seed TikTok Promote Khmer packages ──
-_TIKTOK_PACKAGES = [
-    {
-        "slug":        "manual_tiktok_promote_p1",
-        "label":       "🇰🇭 ❤️ 500-1K + 👁️ 1.8K Views",
-        "description": "❤️ 500-1K Likes + 👁️ 1.8K Views\n⏱ 5-15 នាទី",
-        "flat_price":  0.99,
-    },
-    {
-        "slug":        "manual_tiktok_promote_p2",
-        "label":       "🇰🇭 ❤️ 1K-2K + 👁️ 3.5K Views",
-        "description": "❤️ 1K-2K Likes + 👁️ 3.5K Views\n⏱ 5-15 នាទី",
-        "flat_price":  1.99,
-    },
-    {
-        "slug":        "manual_tiktok_promote_p3",
-        "label":       "🇰🇭 ❤️ 2K-3K + 👁️ 10K Views",
-        "description": "❤️ 2K-3K Likes + 👁️ 10K Views\n⏱ 10-20 នាទី",
-        "flat_price":  3.25,
-    },
-    {
-        "slug":        "manual_tiktok_promote_p4",
-        "label":       "🇰🇭 ❤️ 3K-5K + 👁️ 20K Views",
-        "description": "❤️ 3K-5K Likes + 👁️ 20K Views\n⏱ 15-30 នាទី",
-        "flat_price":  5.49,
-    },
-    {
-        "slug":        "manual_tiktok_promote_p5",
-        "label":       "🇰🇭 ❤️ 500 + 👁️ 1K + 👤 100",
-        "description": "❤️ 500 Likes + 👁️ 1K Views + 👤 100 Followers\n⏱ 5-15 នាទី",
-        "flat_price":  1.99,
-    },
-    {
-        "slug":        "manual_tiktok_promote_view1",
-        "label":       "🇰🇭 👁️ 2K-5K Views",
-        "description": "👁️ 2K-5K Views (Video ណាមួយ)\n⏱ 5-15 នាទី",
-        "flat_price":  0.99,
-    },
-    {
-        "slug":        "manual_tiktok_promote_view2",
-        "label":       "🇰🇭 👁️ 5K-10K Views",
-        "description": "👁️ 5K-10K Views (Video ណាមួយ)\n⏱ 5-15 នាទី",
-        "flat_price":  1.99,
-    },
-    {
-        "slug":        "manual_tiktok_promote_follow1",
-        "label":       "🇰🇭 👤 100-200 Followers",
-        "description": "👤 100-200 Followers\n⏱ 10-20 នាទី",
-        "flat_price":  0.99,
-    },
-    {
-        "slug":        "manual_tiktok_promote_follow2",
-        "label":       "🇰🇭 👤 300-500 Followers",
-        "description": "👤 300-500 Followers\n⏱ 10-20 នាទី",
-        "flat_price":  1.99,
-    },
-]
-_changed = False
-for _pkg in _TIKTOK_PACKAGES:
-    _slug = _pkg["slug"]
-    if _slug not in smm_services:
-        smm_services[_slug] = {
-            "api_id":      None,
-            "manual":      True,
-            "cost_rate":   0,
-            "min":         1,
-            "max":         1,
-            "label":       _pkg["label"],
-            "category":    "🇰🇭 TikTok Khmer",
-            "flat_price":  _pkg["flat_price"],
-            "preset_qtys": [1],
-            "description": _pkg["description"],
-        }
-        _changed = True
-    else:
-        # ✨ Migration (2026-08-12): រៀបចំ label/description ចាស់ឲ្យស្អាត
-        # ស្របគ្នា (icon នៅមុខលេខជានិច្ច, 👁️ មាន VS16 ត្រឹមត្រូវ, K លាកតួពេញ)
-        # — ធ្វើតែម្តងគត់ ដោយប្រៀបធៀបនឹង label ចាស់ជាក់លាក់ដែលធ្លាប់ seed ស្រាប់,
-        # មិនប៉ះពាល់ admin ដែលធ្លាប់កែ label ដោយខ្លួនឯងរួចហើយទេ
-        _old_labels = {
-            "manual_tiktok_promote_p1":      "🇰🇭 500-1k ❤️ · 1.8k 👁 View",
-            "manual_tiktok_promote_p2":      "🇰🇭 1k-2k ❤️ · 3.5k 👁 View",
-            "manual_tiktok_promote_p3":      "🇰🇭 2k-3k ❤️ · 10k 👁 View",
-            "manual_tiktok_promote_p4":      "🇰🇭 3k-5k ❤️ · 20k 👁 View",
-            "manual_tiktok_promote_p5":      "🇰🇭 500 ❤️ · 1k 👁 · 100 👤 Follow",
-            "manual_tiktok_promote_view1":   "🇰🇭 2k-5k 👁 View",
-            "manual_tiktok_promote_view2":   "🇰🇭 5k-10k 👁 View",
-            "manual_tiktok_promote_follow1": "🇰🇭 100-200 👤 Follow",
-            "manual_tiktok_promote_follow2": "🇰🇭 300-500 👤 Follow",
-        }
-        if smm_services[_slug].get("label") == _old_labels.get(_slug):
-            smm_services[_slug]["label"]       = _pkg["label"]
-            smm_services[_slug]["description"] = _pkg["description"]
+if IS_MASTER:  # ★ កុំឲ្យ service auto-seed របស់ master ចូលទៅ sub bot (clone) — packages ខាងក្រោមសម្រាប់តែ master bot ប៉ុណ្ណោះ
+    # ── Auto-seed TikTok Promote Khmer packages ──
+    _TIKTOK_PACKAGES = [
+        {
+            "slug":        "manual_tiktok_promote_p1",
+            "label":       "🇰🇭 ❤️ 500-1K + 👁️ 1.8K Views",
+            "description": "❤️ 500-1K Likes + 👁️ 1.8K Views\n⏱ 5-15 នាទី",
+            "flat_price":  0.99,
+        },
+        {
+            "slug":        "manual_tiktok_promote_p2",
+            "label":       "🇰🇭 ❤️ 1K-2K + 👁️ 3.5K Views",
+            "description": "❤️ 1K-2K Likes + 👁️ 3.5K Views\n⏱ 5-15 នាទី",
+            "flat_price":  1.99,
+        },
+        {
+            "slug":        "manual_tiktok_promote_p3",
+            "label":       "🇰🇭 ❤️ 2K-3K + 👁️ 10K Views",
+            "description": "❤️ 2K-3K Likes + 👁️ 10K Views\n⏱ 10-20 នាទី",
+            "flat_price":  3.25,
+        },
+        {
+            "slug":        "manual_tiktok_promote_p4",
+            "label":       "🇰🇭 ❤️ 3K-5K + 👁️ 20K Views",
+            "description": "❤️ 3K-5K Likes + 👁️ 20K Views\n⏱ 15-30 នាទី",
+            "flat_price":  5.49,
+        },
+        {
+            "slug":        "manual_tiktok_promote_p5",
+            "label":       "🇰🇭 ❤️ 500 + 👁️ 1K + 👤 100",
+            "description": "❤️ 500 Likes + 👁️ 1K Views + 👤 100 Followers\n⏱ 5-15 នាទី",
+            "flat_price":  1.99,
+        },
+        {
+            "slug":        "manual_tiktok_promote_view1",
+            "label":       "🇰🇭 👁️ 2K-5K Views",
+            "description": "👁️ 2K-5K Views (Video ណាមួយ)\n⏱ 5-15 នាទី",
+            "flat_price":  0.99,
+        },
+        {
+            "slug":        "manual_tiktok_promote_view2",
+            "label":       "🇰🇭 👁️ 5K-10K Views",
+            "description": "👁️ 5K-10K Views (Video ណាមួយ)\n⏱ 5-15 នាទី",
+            "flat_price":  1.99,
+        },
+        {
+            "slug":        "manual_tiktok_promote_follow1",
+            "label":       "🇰🇭 👤 100-200 Followers",
+            "description": "👤 100-200 Followers\n⏱ 10-20 នាទី",
+            "flat_price":  0.99,
+        },
+        {
+            "slug":        "manual_tiktok_promote_follow2",
+            "label":       "🇰🇭 👤 300-500 Followers",
+            "description": "👤 300-500 Followers\n⏱ 10-20 នាទី",
+            "flat_price":  1.99,
+        },
+    ]
+    _changed = False
+    for _pkg in _TIKTOK_PACKAGES:
+        _slug = _pkg["slug"]
+        if _slug not in smm_services:
+            smm_services[_slug] = {
+                "api_id":      None,
+                "manual":      True,
+                "cost_rate":   0,
+                "min":         1,
+                "max":         1,
+                "label":       _pkg["label"],
+                "category":    "🇰🇭 TikTok Khmer",
+                "flat_price":  _pkg["flat_price"],
+                "preset_qtys": [1],
+                "description": _pkg["description"],
+            }
             _changed = True
-if _changed:
-    _save(SMM_SVC_FILE, smm_services)
+        else:
+            # ✨ Migration (2026-08-12): រៀបចំ label/description ចាស់ឲ្យស្អាត
+            # ស្របគ្នា (icon នៅមុខលេខជានិច្ច, 👁️ មាន VS16 ត្រឹមត្រូវ, K លាកតួពេញ)
+            # — ធ្វើតែម្តងគត់ ដោយប្រៀបធៀបនឹង label ចាស់ជាក់លាក់ដែលធ្លាប់ seed ស្រាប់,
+            # មិនប៉ះពាល់ admin ដែលធ្លាប់កែ label ដោយខ្លួនឯងរួចហើយទេ
+            _old_labels = {
+                "manual_tiktok_promote_p1":      "🇰🇭 500-1k ❤️ · 1.8k 👁 View",
+                "manual_tiktok_promote_p2":      "🇰🇭 1k-2k ❤️ · 3.5k 👁 View",
+                "manual_tiktok_promote_p3":      "🇰🇭 2k-3k ❤️ · 10k 👁 View",
+                "manual_tiktok_promote_p4":      "🇰🇭 3k-5k ❤️ · 20k 👁 View",
+                "manual_tiktok_promote_p5":      "🇰🇭 500 ❤️ · 1k 👁 · 100 👤 Follow",
+                "manual_tiktok_promote_view1":   "🇰🇭 2k-5k 👁 View",
+                "manual_tiktok_promote_view2":   "🇰🇭 5k-10k 👁 View",
+                "manual_tiktok_promote_follow1": "🇰🇭 100-200 👤 Follow",
+                "manual_tiktok_promote_follow2": "🇰🇭 300-500 👤 Follow",
+            }
+            if smm_services[_slug].get("label") == _old_labels.get(_slug):
+                smm_services[_slug]["label"]       = _pkg["label"]
+                smm_services[_slug]["description"] = _pkg["description"]
+                _changed = True
+    if _changed:
+        _save(SMM_SVC_FILE, smm_services)
 
-# Remove old single-package slug if exists
-if "manual_tiktok_promote_khmer" in smm_services:
-    smm_services.pop("manual_tiktok_promote_khmer")
-    _save(SMM_SVC_FILE, smm_services)
+    # Remove old single-package slug if exists
+    if "manual_tiktok_promote_khmer" in smm_services:
+        smm_services.pop("manual_tiktok_promote_khmer")
+        _save(SMM_SVC_FILE, smm_services)
 
 
 
@@ -572,6 +573,23 @@ def _bot_brand():
         logger.warning(f"[bot_brand] failed: {e}")
         _BOT_BRAND_CACHE["v"] = "Kaijaklike"
     return _BOT_BRAND_CACHE["v"]
+
+_ADMIN_CONTACT_CACHE = {"v": None}
+def _admin_contact():
+    """យក username Telegram របស់ម្ចាស់ bot (ADMIN_ID) បច្ចុប្បន្នដើម្បីប្រើក្នុង Support
+    message ស្វ័យប្រវត្តិ — ធានាថា Sub Bot នីមួយៗបង្ហាញ username ម្ចាស់ខ្លួនឯង
+    (admin_id ផ្ទាល់របស់ clone នោះ) មិនមែន username របស់ master ទេ។ បើម្ចាស់
+    គ្មាន username Telegram (តម្រូវអោយបើក) → fallback ទៅ mention link តាម user ID វិញ។"""
+    if _ADMIN_CONTACT_CACHE["v"]:
+        return _ADMIN_CONTACT_CACHE["v"]
+    try:
+        _chat = bot.get_chat(ADMIN_ID)
+        _uname = getattr(_chat, "username", None)
+        _ADMIN_CONTACT_CACHE["v"] = f"@{_uname}" if _uname else f'<a href="tg://user?id={ADMIN_ID}">Admin</a>'
+    except Exception as e:
+        logger.warning(f"[admin_contact] failed: {e}")
+        _ADMIN_CONTACT_CACHE["v"] = f'<a href="tg://user?id={ADMIN_ID}">Admin</a>'
+    return _ADMIN_CONTACT_CACHE["v"]
 
 
 # ── Premium emoji auto-injection — ជាមួយ AUTO-FALLBACK សុវត្ថិភាព ──────────
@@ -947,6 +965,8 @@ def t(uid, key, *args):
     s = STRINGS.get(lang, STRINGS["kh"]).get(key) or STRINGS["kh"].get(key, key)
     if "Kaijaklike" in s:
         s = s.replace("Kaijaklike", _bot_brand())
+    if "@smos_sne1" in s:
+        s = s.replace("@smos_sne1", _admin_contact())
     if args:
         try: return s.format(*args)
         except: return s
@@ -4018,7 +4038,7 @@ def cb_manord(call):
                 f"❌ <b>Order ត្រូវបាន Reject!</b>\n"
                 f"🆔 <code>{oid}</code>\n"
                 f"💳  លុយបានដក (${ o.get('price',0):.4f}) ត្រូវបានសងវិញ\n"
-                f"ទំនាក់ Admin ប្រសិនបើចង់ដឹង: @smos_sne1",
+                f"ទំនាក់ Admin ប្រសិនបើចង់ដឹង: {_admin_contact()}",
                 parse_mode="HTML")
         except Exception as _e: logger.debug(f"[silent] {_e}")
         bot.send_message(uid,
@@ -4394,18 +4414,18 @@ def cb_newbot_paymethod(call):
     bot.answer_callback_query(call.id)
     if method == "auto":
         waiting[uid] = {**step, "step": "newbot_key", "pay_method": "auto"}
-        bot.send_message(uid, f"{_step_label(5, 7)} — វាយ <b>CamRapidPay API Key</b> សម្រាប់ bot នេះ:",
+        bot.send_message(uid, f"{_step_label(5, 6)} — វាយ <b>CamRapidPay API Key</b> សម្រាប់ bot នេះ:",
                           parse_mode="HTML", reply_markup=cancel_kb())
     elif method == "aba":
         waiting[uid] = {**step, "step": "newbot_aba_key", "pay_method": "aba", "camrapid_key": ""}
         bot.send_message(uid,
-            f"{_step_label(5, 8)} — វាយ <b>ABA PayWay Profile Key</b> សម្រាប់ bot នេះ "
+            f"{_step_label(5, 7)} — វាយ <b>ABA PayWay Profile Key</b> សម្រាប់ bot នេះ "
             "(ពី khmer-system.com/operator/profile):",
             parse_mode="HTML", reply_markup=cancel_kb())
     else:
         waiting[uid] = {**step, "step": "newbot_manual_qr_photo", "pay_method": "manual", "camrapid_key": ""}
         bot.send_message(uid,
-            f"{_step_label(5, 8)} — ផ្ញើ <b>រូបភាព QR</b> (Bakong KHQR) សម្រាប់ bot នេះ (ផ្ញើជារូបភាព):",
+            f"{_step_label(5, 7)} — ផ្ញើ <b>រូបភាព QR</b> (Bakong KHQR) សម្រាប់ bot នេះ (ផ្ញើជារូបភាព):",
             parse_mode="HTML", reply_markup=cancel_kb())
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cln_view|"))
@@ -5166,7 +5186,7 @@ def handle_photo(message):
         photo_id = message.photo[-1].file_id
         waiting[uid] = {**step, "step": "newbot_manual_qr_info", "manual_qr_photo_id": photo_id}
         bot.send_message(uid,
-            f"{_step_label(6, 8)} — វាយ <b>ព័ត៌មានបន្ថែម</b> ខាងក្រោម QR (ឧ. ឈ្មោះគណនី/លេខទូរស័ព្ទ)\n"
+            f"{_step_label(6, 7)} — វាយ <b>ព័ត៌មានបន្ថែម</b> ខាងក្រោម QR (ឧ. ឈ្មោះគណនី/លេខទូរស័ព្ទ)\n"
             "ឬផ្ញើ <code>-</code> បើគ្មាន:",
             parse_mode="HTML", reply_markup=cancel_kb())
         return
@@ -5548,7 +5568,7 @@ def handle_msg(message):
             masked_key = key[:6] + "..." + key[-4:]
             waiting[uid] = {**step, "step": "newbot_display", "camrapid_key": key, "port": port}
             bot.send_message(uid,
-                f"{_step_label(6, 7)} — វាយ <b>ឈ្មោះ bot</b> ដែលបង្ហាញដល់អ្នកប្រើ (ឧ. <code>Jak Like Shop</code>)\n"
+                f"{_step_label(6, 6)} — វាយ <b>ឈ្មោះ bot</b> ដែលបង្ហាញដល់អ្នកប្រើ (ឧ. <code>Jak Like Shop</code>)\n"
                 "ឬផ្ញើ <code>-</code> ដើម្បីប្រើឈ្មោះ internal (<code>"
                 + step["name"] + "</code>) ជំនួស:",
                 parse_mode="HTML", reply_markup=cancel_kb())
@@ -5560,7 +5580,7 @@ def handle_msg(message):
                 bot.send_message(uid, "⚠️ Profile Key ខ្លីពេក សូមផ្ញើម្តងទៀត:", reply_markup=cancel_kb()); return
             waiting[uid] = {**step, "step": "newbot_aba_merchant", "aba_key": key}
             bot.send_message(uid,
-                f"{_step_label(6, 8)} — វាយ <b>ABA Merchant ID</b> សម្រាប់ bot នេះ (ឧ. <code>r72mCt</code>):",
+                f"{_step_label(6, 7)} — វាយ <b>ABA Merchant ID</b> សម្រាប់ bot នេះ (ឧ. <code>r72mCt</code>):",
                 parse_mode="HTML", reply_markup=cancel_kb())
             return
 
@@ -5572,7 +5592,7 @@ def handle_msg(message):
             port = _next_clone_port()
             waiting[uid] = {**step, "step": "newbot_display", "aba_merchant": merchant, "port": port}
             bot.send_message(uid,
-                f"{_step_label(7, 8)} — វាយ <b>ឈ្មោះ bot</b> ដែលបង្ហាញដល់អ្នកប្រើ (ឧ. <code>Jak Like Shop</code>)\n"
+                f"{_step_label(7, 7)} — វាយ <b>ឈ្មោះ bot</b> ដែលបង្ហាញដល់អ្នកប្រើ (ឧ. <code>Jak Like Shop</code>)\n"
                 "ឬផ្ញើ <code>-</code> ដើម្បីប្រើឈ្មោះ internal (<code>"
                 + name + "</code>) ជំនួស:",
                 parse_mode="HTML", reply_markup=cancel_kb())
@@ -5584,7 +5604,7 @@ def handle_msg(message):
             port = _next_clone_port()
             waiting[uid] = {**step, "step": "newbot_display", "manual_qr_info": info, "port": port}
             bot.send_message(uid,
-                f"{_step_label(7, 8)} — វាយ <b>ឈ្មោះ bot</b> ដែលបង្ហាញដល់អ្នកប្រើ (ឧ. <code>Jak Like Shop</code>)\n"
+                f"{_step_label(7, 7)} — វាយ <b>ឈ្មោះ bot</b> ដែលបង្ហាញដល់អ្នកប្រើ (ឧ. <code>Jak Like Shop</code>)\n"
                 "ឬផ្ញើ <code>-</code> ដើម្បីប្រើឈ្មោះ internal (<code>"
                 + step["name"] + "</code>) ជំនួស:",
                 parse_mode="HTML", reply_markup=cancel_kb())
@@ -5724,20 +5744,12 @@ def handle_msg(message):
         if isinstance(step, dict) and step.get("step") == "newbot_display":
             raw = text.strip()
             display = step["name"] if raw == "-" else raw[:60]
-            waiting[uid] = {**step, "step": "newbot_welcome", "display_name": display}
-            _total = 7 if step.get("pay_method", "auto") == "auto" else 8
-            bot.send_message(uid,
-                f"{_step_label(_total, _total)} — វាយ <b>Welcome Message</b> custom សម្រាប់ bot នេះ\n"
-                "ប្រើ <code>{}</code> ដើម្បីដាក់ balance ក្នុង text\n"
-                "ឬផ្ញើ <code>-</code> ដើម្បីប្រើ welcome message default:",
-                parse_mode="HTML", reply_markup=cancel_kb())
-            return
-
-        if isinstance(step, dict) and step.get("step") == "newbot_welcome":
-            raw = text.strip()
-            welcome = "" if raw == "-" else raw
             name = step["name"]; tok = step["token"]; new_admin = step["new_admin_id"]
-            port = step["port"]; display = step["display_name"]
+            port = step["port"]
+            # ★ Welcome Message ប្រើ default ជានិច្ច (មិនសួរ admin ទៀត) — default
+            # welcome message auto ដាក់ឈ្មោះ bot ខ្លួនឯង (តាម _bot_brand()) រួចស្រាប់
+            # ដូច្នេះមិនចាំបាច់ឲ្យ admin វាយបំពេញដោយដៃទេ
+            welcome = ""
             pay_method = step.get("pay_method", "auto")
             masked_tok = tok[:10] + "..." + tok[-4:]
             if pay_method == "manual":
@@ -5748,7 +5760,7 @@ def handle_msg(message):
             else:
                 masked_key = step["camrapid_key"][:6] + "..." + step["camrapid_key"][-4:]
                 pay_line = f"🔄 CamRapidPay Key — Step 1 (<code>{masked_key}</code>)"
-            waiting[uid] = {**step, "step": "newbot_confirm", "welcome_msg": welcome}
+            waiting[uid] = {**step, "step": "newbot_confirm", "display_name": display, "welcome_msg": welcome}
             kb = InlineKeyboardMarkup()
             kb.add(InlineKeyboardButton("✅ បង្កើត ហើយ ដំណើរការ", callback_data="newbot_confirm_yes", color="active"))
             kb.add(InlineKeyboardButton("❌ បោះបង់", callback_data="newbot_confirm_no", color="inactive"))
@@ -5759,7 +5771,7 @@ def handle_msg(message):
                 f"Token: <code>{masked_tok}</code>\n"
                 f"Admin ID: <code>{new_admin}</code>\n"
                 f"ការទូទាត់: {pay_line}\n"
-                f"Welcome: <code>{'(default)' if not welcome else welcome[:80]}</code>\n\n"
+                f"Welcome: <code>(default — auto ដាក់ឈ្មោះ '{display}')</code>\n\n"
                 f"ត្រឹមត្រូវទេ?",
                 parse_mode="HTML", reply_markup=kb)
             return
