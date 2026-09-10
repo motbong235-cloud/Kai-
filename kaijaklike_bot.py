@@ -1463,9 +1463,9 @@ def cmd_restore_services(message):
 #  ORDER BOT / PAYMENT BOT — Setup Commands
 # ═══════════════════════════════════════════════════════════
 def _show_setup_order_bot(message):
-    if message.from_user.id != ADMIN_ID:
+    if not is_admin(message.from_user.id):
         return
-    waiting[ADMIN_ID] = "await_order_bot_token"
+    waiting[message.chat.id] = "await_order_bot_token"
     cur = "✅ Setup រួច" if notify_bots_cfg.get("order_token") else "⭕ មិនទាន់ setup"
     bot.send_message(message.chat.id,
         f"🤖 <b>Setup Order Notify Bot</b>\n"
@@ -1479,9 +1479,9 @@ def _show_setup_order_bot(message):
         parse_mode="HTML", reply_markup=cancel_kb())
 
 def _show_setup_pay_bot(message):
-    if message.from_user.id != ADMIN_ID:
+    if not is_admin(message.from_user.id):
         return
-    waiting[ADMIN_ID] = "await_pay_bot_token"
+    waiting[message.chat.id] = "await_pay_bot_token"
     cur = "✅ Setup រួច" if notify_bots_cfg.get("pay_token") else "⭕ មិនទាន់ setup"
     bot.send_message(message.chat.id,
         f"🤖 <b>Setup Payment Notify Bot</b>\n"
@@ -1502,14 +1502,14 @@ def cmd_setup_order_bot(message):
 def cmd_setup_pay_bot(message):
     _show_setup_pay_bot(message)
 
-@bot.message_handler(func=lambda m: m.text in ("🤖 Setup Order Bot", "💳 Setup Payment Bot") and m.from_user.id == ADMIN_ID)
+@bot.message_handler(func=lambda m: m.text in ("🤖 Setup Order Bot", "💳 Setup Payment Bot") and is_admin(m.from_user.id))
 def handle_setup_bot_buttons(message):
     if message.text == "🤖 Setup Order Bot":
         _show_setup_order_bot(message)
     else:
         _show_setup_pay_bot(message)
 
-@bot.message_handler(func=lambda m: (m.chat.id == ADMIN_ID
+@bot.message_handler(func=lambda m: (is_admin(m.chat.id)
                       and waiting.get(m.chat.id) in ("await_order_bot_token", "await_pay_bot_token")))
 def handle_notify_bot_token(message):
     uid  = message.chat.id
