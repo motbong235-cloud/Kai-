@@ -1502,9 +1502,14 @@ def cmd_setup_order_bot(message):
 def cmd_setup_pay_bot(message):
     _show_setup_pay_bot(message)
 
-@bot.message_handler(func=lambda m: m.text in ("🤖 Setup Order Bot", "💳 Setup Payment Bot") and is_admin(m.from_user.id))
+def _restore_btn_text(m):
+    """Telegram ត្រឡប់ text ដែលកាត់ emoji ចេញ (custom emoji icon set) — restore វិញ
+    ពី _STRIPPED_TEXT_MAP ដើម្បីឲ្យ match ត្រូវទាំង ២ ករណី (មាន/គ្មាន custom emoji setup)"""
+    return _STRIPPED_TEXT_MAP.get(m.text, m.text)
+
+@bot.message_handler(func=lambda m: _restore_btn_text(m) in ("🤖 Setup Order Bot", "💳 Setup Payment Bot") and is_admin(m.from_user.id))
 def handle_setup_bot_buttons(message):
-    if message.text == "🤖 Setup Order Bot":
+    if _restore_btn_text(message) == "🤖 Setup Order Bot":
         _show_setup_order_bot(message)
     else:
         _show_setup_pay_bot(message)
