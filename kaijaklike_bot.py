@@ -350,6 +350,7 @@ LANG_FILE       = _dpath("smm_lang.json")
 PROMO_FILE      = _dpath("smm_promos.json")
 SETTINGS_FILE   = _dpath("smm_settings.json")
 NOTIFY_FILE     = _dpath("smm_notify.json")
+NOTIFY_BOTS_FILE = _dpath("smm_notify_bots.json")   # ★ Order Bot / Payment Bot ដាច់ដោយឡែក — token+chat
 
 SMM_API_FILE    = _dpath("smm_api.json")
 SMM_SVC_FILE    = _dpath("smm_services.json")
@@ -391,6 +392,7 @@ user_lang    = _load(LANG_FILE,      {})
 promos       = _load(PROMO_FILE,     {})
 settings     = _load(SETTINGS_FILE,  {})
 notify_cfg   = _load(NOTIFY_FILE,    {"channel_id": "-1003930705105", "enabled": True})
+notify_bots_cfg = _load(NOTIFY_BOTS_FILE, {"order_token": "", "pay_token": ""})
 
 smm_api      = _load(SMM_API_FILE,   {"url": "", "key": ""})
 smm_services = _load(SMM_SVC_FILE,   {})
@@ -1457,7 +1459,94 @@ def cmd_restore_services(message):
         "<b>users, wallets, orders, config ផ្សេងទៀត មិនប៉ះពាល់ទេ</b> ។",
         parse_mode="HTML", reply_markup=cancel_kb())
 
+# ═══════════════════════════════════════════════════════════
+#  ORDER BOT / PAYMENT BOT — Setup Commands
+# ═══════════════════════════════════════════════════════════
+def _show_setup_order_bot(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    waiting[ADMIN_ID] = "await_order_bot_token"
+    cur = "✅ Setup រួច" if notify_bots_cfg.get("order_token") else "⭕ មិនទាន់ setup"
+    bot.send_message(message.chat.id,
+        f"🤖 <b>Setup Order Notify Bot</b>\n"
+        f"ស្ថានភាពបច្ចុប្បន្ន: {cur}\n\n"
+        f"1️⃣ បង្កើត Bot ថ្មីជាមួយ @BotFather (ឬប្រើ bot ចាស់ដែលមាន Token)\n"
+        f"2️⃣ <b>/start</b> bot ថ្មីនោះជាមួយ account Admin ដដែល "
+        f"(user id: <code>{ADMIN_ID}</code>) — ធានាថាបានផ្ញើសារមកអ្នក\n"
+        f"3️⃣ ចម្លង Token មកដាក់ទីនេះ\n\n"
+        f"ចាប់ពីពេលនេះ ការជូនដំណឹង Order ថ្មី/Done/Reject/Refund នឹងផ្ញើទៅ bot នេះ "
+        f"<b>ជំនួសបំពេញនៅ bot service ផ្ទាល់</b>។",
+        parse_mode="HTML", reply_markup=cancel_kb())
+
+def _show_setup_pay_bot(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    waiting[ADMIN_ID] = "await_pay_bot_token"
+    cur = "✅ Setup រួច" if notify_bots_cfg.get("pay_token") else "⭕ មិនទាន់ setup"
+    bot.send_message(message.chat.id,
+        f"🤖 <b>Setup Payment Notify Bot</b>\n"
+        f"ស្ថានភាពបច្ចុប្បន្ន: {cur}\n\n"
+        f"1️⃣ បង្កើត Bot ថ្មីជាមួយ @BotFather (ឬប្រើ bot ចាស់ដែលមាន Token)\n"
+        f"2️⃣ <b>/start</b> bot ថ្មីនោះជាមួយ account Admin ដដែល "
+        f"(user id: <code>{ADMIN_ID}</code>) — ធានាថាបានផ្ញើសារមកអ្នក\n"
+        f"3️⃣ ចម្លង Token មកដាក់ទីនេះ\n\n"
+        f"ចាប់ពីពេលនេះ ការជូនដំណឹង ដាក់លុយ/QR/Payment ថ្មីៗ នឹងផ្ញើទៅ bot នេះ "
+        f"<b>ជំនួសបំពេញនៅ bot service ផ្ទាល់</b>។",
+        parse_mode="HTML", reply_markup=cancel_kb())
+
+@bot.message_handler(commands=["setup_order_bot"])
+def cmd_setup_order_bot(message):
+    _show_setup_order_bot(message)
+
+@bot.message_handler(commands=["setup_pay_bot"])
+def cmd_setup_pay_bot(message):
+    _show_setup_pay_bot(message)
+
+@bot.message_handler(func=lambda m: m.text in ("🤖 Setup Order Bot", "💳 Setup Payment Bot") and m.from_user.id == ADMIN_ID)
+def handle_setup_bot_buttons(message):
+    if message.text == "🤖 Setup Order Bot":
+        _show_setup_order_bot(message)
+    else:
+        _show_setup_pay_bot(message)
+
+@bot.message_handler(func=lambda m: (m.chat.id == ADMIN_ID
+                      and waiting.get(m.chat.id) in ("await_order_bot_token", "await_pay_bot_token")))
+def handle_notify_bot_token(message):
+    uid  = message.chat.id
+    kind = waiting.get(uid)
+    tok  = (message.text or "").strip()
+    waiting.pop(uid, None)
+    if not tok or ":" not in tok:
+        bot.send_message(uid, "❌ Token មើលទៅមិនត្រឹមត្រូវទេ។ សូមព្យាយាមម្តងទៀត (/setup_order_bot ឬ /setup_pay_bot)។",
+                          parse_mode="HTML", reply_markup=admin_kb())
+        return
+    tb = _make_notify_bot(tok)
+    if not tb:
+        bot.send_message(uid, "❌ Token ខុស ឬ bot មិនអាច connect បានទេ។ ពិនិត្យម្តងទៀត។",
+                          parse_mode="HTML", reply_markup=admin_kb())
+        return
+    me = tb.get_me()
+    if kind == "await_order_bot_token":
+        notify_bots_cfg["order_token"] = tok
+        _save(NOTIFY_BOTS_FILE, notify_bots_cfg)
+        _start_order_bot(tok)
+        bot.send_message(uid,
+            f"✅ <b>Order Bot ភ្ជាប់ជោគជ័យ!</b> (@{me.username})\n"
+            f"ត្រូវប្រាកដថាបាន /start bot នេះជាមួយ account Admin រួចហើយ "
+            f"បើមិនទាន់ សូម /start វាឥឡូវ។",
+            parse_mode="HTML", reply_markup=admin_kb())
+    else:
+        notify_bots_cfg["pay_token"] = tok
+        _save(NOTIFY_BOTS_FILE, notify_bots_cfg)
+        _start_pay_bot(tok)
+        bot.send_message(uid,
+            f"✅ <b>Payment Bot ភ្ជាប់ជោគជ័យ!</b> (@{me.username})\n"
+            f"ត្រូវប្រាកដថាបាន /start bot នេះជាមួយ account Admin រួចហើយ "
+            f"បើមិនទាន់ សូម /start វាឥឡូវ។",
+            parse_mode="HTML", reply_markup=admin_kb())
+
 @bot.message_handler(content_types=["document"])
+
 def handle_document(message):
     uid = message.chat.id
     if uid != ADMIN_ID:
@@ -1645,14 +1734,13 @@ def _smm_sync_order(oid):
                 parse_mode="HTML")
         except Exception as _e: logger.debug(f"[silent] {_e}")
         try:
-            bot.send_message(ADMIN_ID,
+            onotify(
                 f"✅ <b>Order បានគ្រប់ចំនួន 100%!</b>\n"
                 f"🆔 <code>{oid}</code>\n"
                 f"👤 {_user_display(o.get('uid',''))}\n"
                 f"📦 {o.get('label','?')}\n"
                 f"🔢 {o.get('qty',0):,} | 💰 ${float(o.get('price',0)):.4f}\n"
-                f"🔗 <code>{o.get('link','')}</code>",
-                parse_mode="HTML")
+                f"🔗 <code>{o.get('link','')}</code>")
         except Exception as _e: logger.debug(f"[silent] {_e}")
         return "completed"
     elif st in ("canceled", "cancelled"):
@@ -1675,14 +1763,13 @@ def _smm_sync_order(oid):
                 parse_mode="HTML")
         except Exception as _e: logger.debug(f"[silent] {_e}")
         try:
-            bot.send_message(ADMIN_ID,
+            onotify(
                 f"⚠️ <b>Order ត្រូវបានលុបចោល (Auto-Refunded)</b>\n"
                 f"🆔 <code>{oid}</code>\n"
                 f"👤 {_user_display(o.get('uid',''))}\n"
                 f"📊 {o.get('label','?')} | {o.get('qty',0):,} | ${price:.4f}\n"
                 f"🔗 <code>{o.get('link','')}</code>\n"
-                f"💰 លុយបានសងវិញស្វ័យប្រវត្តិទៅ User",
-                parse_mode="HTML")
+                f"💰 លុយបានសងវិញស្វ័យប្រវត្តិទៅ User")
         except Exception as _e: logger.debug(f"[silent] {_e}")
         return "canceled"
     elif st == "partial":
@@ -1711,12 +1798,11 @@ def _smm_sync_order(oid):
                         parse_mode="HTML")
                 except Exception as _e: logger.debug(f"[silent] {_e}")
                 try:
-                    bot.send_message(ADMIN_ID,
+                    onotify(
                         f"🔄 <b>Order Partial → សុំ Refill ស្វ័យប្រវត្តិ</b>\n"
                         f"🆔 <code>{oid}</code> | Refill ID: <code>{rf_id}</code>\n"
                         f"👤 {_user_display(o.get('uid',''))}\n"
-                        f"📊 {o.get('label','?')}",
-                        parse_mode="HTML")
+                        f"📊 {o.get('label','?')}")
                 except Exception as _e: logger.debug(f"[silent] {_e}")
                 return "refilling"
             _save(SMM_ORD_FILE, smm_orders)
@@ -1745,14 +1831,13 @@ def _smm_sync_order(oid):
                 parse_mode="HTML")
         except Exception as _e: logger.debug(f"[silent] {_e}")
         try:
-            bot.send_message(ADMIN_ID,
+            onotify(
                 f"⚠️ <b>Order ប្រគល់មិនគ្រប់ (Partial, Auto-Refunded)</b>\n"
                 f"🆔 <code>{oid}</code>\n"
                 f"👤 {_user_display(o.get('uid',''))}\n"
                 f"📊 {o.get('label','?')} | ប្រគល់ {delivered:,}/{int(qty_orig):,}\n"
                 f"🔗 <code>{o.get('link','')}</code>\n"
-                f"💰 សងវិញ: ${refund:.4f}",
-                parse_mode="HTML")
+                f"💰 សងវិញ: ${refund:.4f}")
         except Exception as _e: logger.debug(f"[silent] {_e}")
         return "partial"
     return o.get("status")
@@ -1784,9 +1869,8 @@ def _smm_sync_refill(oid):
                 parse_mode="HTML")
         except Exception as _e: logger.debug(f"[silent] {_e}")
         try:
-            bot.send_message(ADMIN_ID,
-                f"✅ <b>Refill ជោគជ័យ</b>\n🆔 <code>{oid}</code> | 👤 {_user_display(o.get('uid',''))}",
-                parse_mode="HTML")
+            onotify(
+                f"✅ <b>Refill ជោគជ័យ</b>\n🆔 <code>{oid}</code> | 👤 {_user_display(o.get('uid',''))}")
         except Exception as _e: logger.debug(f"[silent] {_e}")
         return "completed"
     if st in ("rejected", "canceled", "cancelled", "error"):
@@ -1815,11 +1899,10 @@ def _smm_sync_refill(oid):
                 parse_mode="HTML")
         except Exception as _e: logger.debug(f"[silent] {_e}")
         try:
-            bot.send_message(ADMIN_ID,
+            onotify(
                 f"⚠️ <b>Refill បដិសេធ → Auto-Refunded</b>\n"
                 f"🆔 <code>{oid}</code> | 👤 {_user_display(o.get('uid',''))}\n"
-                f"💰 សងវិញ: ${refund:.4f}",
-                parse_mode="HTML")
+                f"💰 សងវិញ: ${refund:.4f}")
         except Exception as _e: logger.debug(f"[silent] {_e}")
         return "partial"
     return "refilling"
@@ -1937,6 +2020,117 @@ def _get_notify_cfg():
         cfg = {"channel_id": str(NOTIFY_CHANNEL_ID_DEFAULT), "enabled": True}
     cfg["enabled"] = True
     return cfg
+
+# ═══════════════════════════════════════════════════════════
+#  ORDER BOT / PAYMENT BOT — bot ដាច់ដោយឡែកសម្រាប់ផ្ញើ Notification
+#  Order និង Payment ជំនួសបំពេញនៅ bot service ផ្ទាល់ ។ Admin setup token
+#  តាម /setup_order_bot និង /setup_pay_bot — Notification នឹងផ្ញើទៅ bot
+#  ថ្មីនេះជំនួស (admin ត្រូវ /start bot ថ្មីនោះជាមួយ account ដដែលជាមុនសិន)។
+# ═══════════════════════════════════════════════════════════
+order_bot = None   # telebot.TeleBot instance សម្រាប់ Order notify (None = មិនទាន់ setup)
+pay_bot   = None   # telebot.TeleBot instance សម្រាប់ Payment notify (None = មិនទាន់ setup)
+
+def _make_notify_bot(token):
+    """បង្កើត + validate TeleBot instance ថ្មីពី token (ហៅ getMe() ដើម្បីប្រាកដថា
+    token ត្រឹមត្រូវ)។ Return None បើ token ទទេ ឬខុស។"""
+    if not token:
+        return None
+    try:
+        tb = telebot.TeleBot(token, parse_mode=None)
+        tb.get_me()
+        return tb
+    except Exception as e:
+        logger.warning(f"[notify_bot init] failed: {e}")
+        return None
+
+def _notify_bot_polling(tb, label):
+    """រត់ជា background thread — polling loop ដាច់ដោយឡែកសម្រាប់ Order/Payment
+    Bot ដើម្បីឲ្យប៊ូតុង (✅/❌) ចុចបានពិតប្រាកដ (មិនមែនផ្ញើសារឲ្យមើលតែម្នាក់ឯង)។"""
+    while True:
+        try:
+            logger.info(f"🤖 [{label}] Notify Bot polling ចាប់ផ្ដើម...")
+            tb.infinity_polling(timeout=20, long_polling_timeout=15)
+        except Exception as e:
+            logger.warning(f"⚠️ [{label}] Notify Bot polling error: {e} — Retry in 10s...")
+            time.sleep(10)
+
+def _start_order_bot(token):
+    """Init order_bot ជាសកល, register callback/step handlers ដដែលនឹង bot service,
+    រួចចាប់ផ្តើម polling thread ដាច់ដោយឡែក។"""
+    global order_bot
+    tb = _make_notify_bot(token)
+    if not tb:
+        return False
+    order_bot = tb
+    _register_order_bot_handlers(order_bot)
+    threading.Thread(target=_notify_bot_polling, args=(order_bot, "Order Bot"), daemon=True).start()
+    return True
+
+def _start_pay_bot(token):
+    global pay_bot
+    tb = _make_notify_bot(token)
+    if not tb:
+        return False
+    pay_bot = tb
+    _register_pay_bot_handlers(pay_bot)
+    threading.Thread(target=_notify_bot_polling, args=(pay_bot, "Payment Bot"), daemon=True).start()
+    return True
+
+def _notify_target_chat_id():
+    """Chat ID ដែល Order/Payment Bot ត្រូវផ្ញើទៅ — ប្រើ ADMIN_ID ដដែល ព្រោះ
+    Telegram user ID ជា global (admin គ្រាន់តែត្រូវ /start bot ថ្មីម្តង)។"""
+    return ADMIN_ID
+
+def _bot_tag(tb):
+    """កំណត់ tag សម្រាប់ bot instance មួយ ដើម្បីរក្សាទុកក្នុង waiting[uid] state
+    (JSON-safe) ហើយអាច lookup ត្រឡប់ vិញនៅជំហានបន្ទាប់ (ឧ. វាយ Note អ្វីមួយ)។"""
+    if tb is order_bot: return "order"
+    if tb is pay_bot:   return "pay"
+    return "main"
+
+def _bot_by_tag(tag):
+    if tag == "order" and order_bot: return order_bot
+    if tag == "pay" and pay_bot:     return pay_bot
+    return bot
+
+
+def onotify(text, reply_markup=None, parse_mode="HTML"):
+    """ផ្ញើ Order-notification។ បើ Order Bot setup រួច → ផ្ញើតាម Order Bot ហើយ
+    *ឈប់* ផ្ញើនៅ bot service ទាំងស្រុង។ បើមិនទាន់ setup → fallback ទៅ bot service
+    ជាបណ្តោះអាសន្ន ដើម្បីកុំឲ្យបាត់ Notification (setup /setup_order_bot ដើម្បីផ្លាស់)។"""
+    try:
+        if order_bot:
+            order_bot.send_message(_notify_target_chat_id(), text, parse_mode=parse_mode, reply_markup=reply_markup)
+        else:
+            bot.send_message(ADMIN_ID, text, parse_mode=parse_mode, reply_markup=reply_markup)
+    except Exception as e:
+        logger.warning(f"[onotify] failed: {e}")
+
+def pnotify(text, reply_markup=None, parse_mode="HTML"):
+    """ដូច onotify() ប៉ុន្តែសម្រាប់ Payment/Deposit — ប្រើ Payment Bot ដាច់ដោយឡែក។"""
+    try:
+        if pay_bot:
+            pay_bot.send_message(_notify_target_chat_id(), text, parse_mode=parse_mode, reply_markup=reply_markup)
+        else:
+            bot.send_message(ADMIN_ID, text, parse_mode=parse_mode, reply_markup=reply_markup)
+    except Exception as e:
+        logger.warning(f"[pnotify] failed: {e}")
+
+def pnotify_photo(file_id, caption, reply_markup=None):
+    """ផ្ញើរូបភាព (ឧ. Proof ដាក់លុយ) ទៅ Payment Bot។ file_id មិនអាចប្រើឆ្លង bot
+    គ្នាបានទេ ដូច្នេះត្រូវ download bytes ពី bot service ជាមុន រួច upload ថ្មីទៅ
+    Payment Bot ។"""
+    try:
+        if pay_bot:
+            finfo = bot.get_file(file_id)
+            raw = bot.download_file(finfo.file_path)
+            pay_bot.send_photo(_notify_target_chat_id(), raw, caption=caption,
+                                parse_mode="HTML", reply_markup=reply_markup)
+        else:
+            bot.send_photo(ADMIN_ID, file_id, caption=caption,
+                            parse_mode="HTML", reply_markup=reply_markup)
+    except Exception as e:
+        logger.warning(f"[pnotify_photo] failed: {e}")
 
 def _make_order_id():
     return f"KZ{int(time.time())%100000:05d}"
@@ -2445,12 +2639,11 @@ def _watch_deposit(uid, uid_str, dep_id, amount, reference, checker=None):
             try: bot.send_message(uid, msg, parse_mode="HTML", reply_markup=main_kb(uid))
             except Exception as _e: logger.debug(f"[silent] {_e}")
             try:
-                bot.send_message(ADMIN_ID,
+                pnotify(
                     f"💰 <b>ដាក់លុយ ✅</b>\n👤 <code>{uid_str}</code>\n"
                     f"📌 Ref: <code>{reference}</code>\n"
                     f"💰 ${amount:.2f}" + (f" + Bonus ${bonus:.2f}" if bonus > 0 else "") +
-                    (f" (Promo ${promo_bonus:.2f} / Auto ${auto_bonus:.2f})" if (promo_bonus > 0 and auto_bonus > 0) else ""),
-                    parse_mode="HTML")
+                    (f" (Promo ${promo_bonus:.2f} / Auto ${auto_bonus:.2f})" if (promo_bonus > 0 and auto_bonus > 0) else ""))
             except Exception as _e: logger.debug(f"[silent] {_e}")
             # Notify channel — call _notify directly to avoid any config issues
             try:
@@ -2675,9 +2868,9 @@ def _send_deposit_qr_aba(uid, amount, promo_code_name=None, bonus=0.0, promo_bon
         bot.send_message(uid, "⚠️ <b>មានបញ្ហា Generate QR (ABA PayWay)!</b>\nសូមព្យាយាមម្តងទៀត ឬ ទំនាក់ Admin",
                          parse_mode="HTML")
         try:
-            bot.send_message(ADMIN_ID,
+            pnotify(
                 f"⚠️ <b>ABA PayWay បរាជ័យ (aba_generate_qr)</b>\n👤 <code>{uid_str}</code> — ${amount:.2f}\n"
-                f"🔎 <code>{_last_aba_error[:500]}</code>", parse_mode="HTML")
+                f"🔎 <code>{_last_aba_error[:500]}</code>")
         except Exception as _e: logger.debug(f"[silent] {_e}")
         return
 
@@ -2770,9 +2963,9 @@ def _send_deposit_qr_aba(uid, amount, promo_code_name=None, bonus=0.0, promo_bon
         return
 
     try:
-        bot.send_message(ADMIN_ID,
+        pnotify(
             f"🆕 <b>QR ត្រូវបានបង្កើត (ABA PayWay)</b>\n👤 <code>{uid_str}</code>\n"
-            f"💵 ${amount:.2f}\n🔖 <code>{payment_id}</code>", parse_mode="HTML")
+            f"💵 ${amount:.2f}\n🔖 <code>{payment_id}</code>")
     except Exception as _e: logger.debug(f"[silent] {_e}")
 
     threading.Thread(target=_watch_deposit,
@@ -2812,10 +3005,9 @@ def _process_deposit(uid, uid_str, amount, promo_code=None, method=None):
                 "⚠️ <b>No automatic payment method is available right now.</b>\nPlease contact Admin for help",
                 parse_mode="HTML")
             try:
-                bot.send_message(ADMIN_ID,
+                pnotify(
                     f"🚨 <b>User ព្យាយាមដាក់លុយ ${amount:.2f} តែវិធីទូទាត់ទាំងអស់ត្រូវបានបិទ/មិនទាន់កំណត់!</b>\n"
-                    f"👤 <code>{uid_str}</code>\nសូមចុច 🔀 វិធីទូទាត់ ដើម្បីពិនិត្យ",
-                    parse_mode="HTML")
+                    f"👤 <code>{uid_str}</code>\nសូមចុច 🔀 វិធីទូទាត់ ដើម្បីពិនិត្យ")
             except Exception as _e: logger.debug(f"[silent] {_e}")
             return
         method = "aba" if aba_ok else "camrapid"
@@ -2934,6 +3126,10 @@ def admin_kb():
     kb.row(KeyboardButton("🔄 ធ្វើឱ្យទាន់សម័យ", color="progress"))
     kb.row(KeyboardButton("🔔 Notify Channel", color="progress"),
            KeyboardButton("🧪 តេស្ត Notify",   color="active"))
+    # ── Order Bot / Payment Bot — token រក្សាទុកតាម DATA_DIR ខ្លួនឯង (មិនមែន
+    #    ចែក share ជាមួយ Master ទេ) ដូច្នេះបង្ហាញបាននៅគ្រប់ bot (Master + Sub Bot)
+    kb.row(KeyboardButton("🤖 Setup Order Bot", color="progress"),
+           KeyboardButton("💳 Setup Payment Bot", color="progress"))
     # ── ⚙️ Settings — Bot Clone (INSTANCE_NAME set / IS_MASTER=False) មិនបង្ហាញ
     #    ប៊ូតុងទាំងនេះទេ ព្រោះជា credential/config ដែលគ្រប់គ្រងតាមម្ចាស់ (Master Bot)
     #    តាមរយៈ /newbot wizard និង /mybots → 🔁 ប្តូរ Step ទូទាត់ / 👤 ប្តូរ Admin
@@ -3711,18 +3907,22 @@ def cb_dep(call):
             bot.send_message(uid, caption, parse_mode="HTML", reply_markup=cancel_kb())
         return
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("mdep:"))
-def cb_mdep_admin(call):
+def _process_mdep_action(call, tb):
+    """ដំណើរការ mdep: callback (អនុម័ត/បដិសេធ ការដាក់លុយដោយដៃ)។ `tb` គឺ bot
+    instance ដែលទទួល callback នេះ (bot service ឬ Payment Bot ដាច់ដោយឡែក) —
+    ប្រើ `tb` សម្រាប់ answer/edit សារ notify, ប៉ុន្តែប្រើ `bot` (service bot)
+    ជានិច្ចសម្រាប់ផ្ញើសារទៅកាន់ User ព្រោះ User មាន chat ជាមួយ service bot
+    ប៉ុណ្ណោះ មិនមែនជាមួយ Payment Bot ទេ។"""
     uid = call.message.chat.id
     if uid != ADMIN_ID:
-        bot.answer_callback_query(call.id); return
+        tb.answer_callback_query(call.id); return
     _, action, dep_id = call.data.split(":", 2)
     dep = manual_deps.get(dep_id)
     if not dep:
-        bot.answer_callback_query(call.id, "❌ រកមិនឃើញសំណើនេះទេ (ប្រហែលត្រូវបានធ្វើរួច)។", show_alert=True)
+        tb.answer_callback_query(call.id, "❌ រកមិនឃើញសំណើនេះទេ (ប្រហែលត្រូវបានធ្វើរួច)។", show_alert=True)
         return
     if dep.get("status") != "pending":
-        bot.answer_callback_query(call.id, f"⚠️ សំណើនេះត្រូវបានធ្វើរួច ({dep.get('status')})", show_alert=True)
+        tb.answer_callback_query(call.id, f"⚠️ សំណើនេះត្រូវបានធ្វើរួច ({dep.get('status')})", show_alert=True)
         return
     target_uid = int(dep["uid"])
     amount = float(dep["amount"])
@@ -3732,7 +3932,7 @@ def cb_mdep_admin(call):
         add_bal(target_uid, total)
         dep["status"] = "approved"; dep["approved_amount"] = total
         _save(MANUAL_DEP_FILE, manual_deps)
-        bot.answer_callback_query(call.id, "✅ អនុម័តរួច")
+        tb.answer_callback_query(call.id, "✅ អនុម័តរួច")
         new_b = bal(target_uid)
         msg = (f"✅ <b>ដាក់លុយបានជោគជ័យ!</b> 🎉\n━━━━━━━━━━━━━━━━━━\n"
                f"💰 បានទទួល: <b>${amount:.2f}</b>")
@@ -3742,22 +3942,26 @@ def cb_mdep_admin(call):
         try: bot.send_message(target_uid, msg, parse_mode="HTML", reply_markup=main_kb(target_uid))
         except Exception as _e: logger.debug(f"[silent] {_e}")
         try:
-            bot.edit_message_caption(f"✅ <b>អនុម័តរួច</b> — ${amount:.2f} (+${bonus:.2f} bonus)\n👤 <code>{dep['uid']}</code>",
+            tb.edit_message_caption(f"✅ <b>អនុម័តរួច</b> — ${amount:.2f} (+${bonus:.2f} bonus)\n👤 <code>{dep['uid']}</code>",
                 chat_id=uid, message_id=call.message.message_id, parse_mode="HTML")
         except Exception as _e: logger.debug(f"[silent] {_e}")
     else:
         dep["status"] = "rejected"
         _save(MANUAL_DEP_FILE, manual_deps)
-        bot.answer_callback_query(call.id, "❌ បដិសេធរួច")
+        tb.answer_callback_query(call.id, "❌ បដិសេធរួច")
         try:
             bot.send_message(target_uid,
                 f"❌ <b>សំណើដាក់លុយត្រូវបានបដិសេធ</b>\n💰 ${amount:.2f}\n\nសូមទាក់ទង Admin បើមានចម្ងល់។",
                 parse_mode="HTML", reply_markup=main_kb(target_uid))
         except Exception as _e: logger.debug(f"[silent] {_e}")
         try:
-            bot.edit_message_caption(f"❌ <b>បដិសេធរួច</b> — ${amount:.2f}\n👤 <code>{dep['uid']}</code>",
+            tb.edit_message_caption(f"❌ <b>បដិសេធរួច</b> — ${amount:.2f}\n👤 <code>{dep['uid']}</code>",
                 chat_id=uid, message_id=call.message.message_id, parse_mode="HTML")
         except Exception as _e: logger.debug(f"[silent] {_e}")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("mdep:"))
+def cb_mdep_admin(call):
+    _process_mdep_action(call, bot)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("back:"))
 def cb_back(call):
@@ -4061,27 +4265,28 @@ def cb_editprice(call):
         f"វាយ <b>តម្លៃថ្មី</b> (លេខទទេ):",
         parse_mode="HTML", reply_markup=cancel_kb())
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("manord:"))
-def cb_manord(call):
-    """Admin: mark manual order as completed"""
+def _process_manord_action(call, tb):
+    """ដំណើរការ manord: callback (Done/Reject manual order)។ `tb` = bot instance
+    ដែលទទួល callback (service bot ឬ Order Bot ដាច់ដោយឡែក)។ សារទៅ User (customer)
+    តែងតែប្រើ `bot` (service bot) ព្រោះ User មិនមាន chat ជាមួយ Order Bot ទេ។"""
     uid = call.message.chat.id
-    if uid != ADMIN_ID: bot.answer_callback_query(call.id); return
+    if uid != ADMIN_ID: tb.answer_callback_query(call.id); return
     parts = call.data.split(":")
     action = parts[1]
     oid    = parts[2] if len(parts) > 2 else ""
-    bot.answer_callback_query(call.id)
+    tb.answer_callback_query(call.id)
     o = smm_orders.get(oid)
     if not o:
-        bot.send_message(uid, f"❌ Order <code>{oid}</code> រកមិនឃើញ",
+        tb.send_message(uid, f"❌ Order <code>{oid}</code> រកមិនឃើញ",
                          parse_mode="HTML"); return
     # ការពារចុច Done/Reject ដដែលៗ (ឧ. Admin ចុចលឿនពីរដង) ដែលអាចធ្វើឲ្យសងលុយ/Complete ២ដង
     if o.get("status") in ("completed", "rejected", "canceled", "partial"):
-        bot.send_message(uid,
+        tb.send_message(uid,
             f"⚠️ Order <code>{oid}</code> ត្រូវបានដំណើរការរួចហើយ (ស្ថានភាព: <b>{o.get('status')}</b>)",
             parse_mode="HTML"); return
     if action == "done":
-        waiting[uid] = {"step": "manual_order_done", "oid": oid, "user_uid": o["uid"]}
-        bot.send_message(uid,
+        waiting[uid] = {"step": "manual_order_done", "oid": oid, "user_uid": o["uid"], "via_bot": _bot_tag(tb)}
+        tb.send_message(uid,
             f"✅ <b>Complete Order</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"🆔 <code>{oid}</code>\n"
@@ -4096,7 +4301,7 @@ def cb_manord(call):
         smm_orders[oid]["refunded"] = float(o.get("price") or 0)
         _save(SMM_ORD_FILE, smm_orders)
         try:
-            bot.edit_message_reply_markup(uid, call.message.message_id, reply_markup=None)
+            tb.edit_message_reply_markup(uid, call.message.message_id, reply_markup=None)
         except Exception as _e: logger.debug(f"[silent] {_e}")
         # Refund — ដាច់ដោយឡែកពី Notify, ដើម្បីកុំឲ្យ User ខាតលុយបើផ្ញើសារទៅគាត់មិនចេញ (ឧ. Block Bot)
         add_bal(int(o["uid"]), float(o.get("price") or 0))
@@ -4108,9 +4313,68 @@ def cb_manord(call):
                 f"ទំនាក់ Admin ប្រសិនបើចង់ដឹង: {_admin_contact()}",
                 parse_mode="HTML")
         except Exception as _e: logger.debug(f"[silent] {_e}")
-        bot.send_message(uid,
+        tb.send_message(uid,
             f"❌ <b>Rejected & Refunded</b>\n🆔 <code>{oid}</code>",
             parse_mode="HTML", reply_markup=admin_kb())
+
+def _finish_manual_order(uid, tb, step, text):
+    """បញ្ចប់ Manual Order (វាយ Note រួច Complete) — ហៅពី bot service ឬ Order Bot
+    ដាច់ដោយឡែក (`tb`)។ សារទៅ User (customer) ប្រើ `bot` service ជានិច្ច។"""
+    oid      = step.get("oid")
+    user_uid = step.get("user_uid")
+    o        = smm_orders.get(oid)
+    if not o:
+        tb.send_message(uid, "❌ Order រកមិនឃើញ", reply_markup=admin_kb())
+        waiting.pop(uid, None); return
+    note = text.strip()
+    smm_orders[oid]["status"]   = "completed"
+    smm_orders[oid]["note"]     = note
+    _save(SMM_ORD_FILE, smm_orders)
+    waiting.pop(uid, None)
+    try:
+        bot.send_message(int(user_uid),
+            f"✅ <b>Order បានដំណើរការហើយ!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 <code>{oid}</code>\n"
+            f"📊 {o.get('label','?')}\n"
+            f"🔢 ចំនួន: <b>{o.get('qty',0):,}</b>\n"
+            + (f"📝 Note: {note}\n" if note and note != "-" else "") +
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🙏 អរគុណ!",
+            parse_mode="HTML")
+    except Exception as _e: logger.debug(f"[silent] {_e}")
+    tb.send_message(uid,
+        f"✅ <b>Order Completed!</b>\n🆔 <code>{oid}</code>",
+        parse_mode="HTML", reply_markup=admin_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("manord:"))
+def cb_manord(call):
+    """Admin: mark manual order as completed"""
+    _process_manord_action(call, bot)
+
+def _register_order_bot_handlers(tb):
+    """ចុះឈ្មោះ callback (manord:) + follow-up text step (វាយ Note) លើ Order
+    Bot instance ដាច់ដោយឡែក ដូច្នេះប៊ូតុង ✅ Done / ❌ Reject ចុចដំណើរការបានពិត
+    មិនមែនគ្រាន់តែសារឲ្យមើលទេ។"""
+    @tb.callback_query_handler(func=lambda c: c.data.startswith("manord:"))
+    def _ob_cb_manord(call):
+        _process_manord_action(call, tb)
+
+    @tb.message_handler(func=lambda m: (m.chat.id == ADMIN_ID
+                         and isinstance(waiting.get(m.chat.id), dict)
+                         and waiting.get(m.chat.id, {}).get("step") == "manual_order_done"
+                         and waiting.get(m.chat.id, {}).get("via_bot") == "order"))
+    def _ob_finish_order(message):
+        uid = message.chat.id
+        step = waiting.get(uid)
+        _finish_manual_order(uid, tb, step, message.text or "")
+
+def _register_pay_bot_handlers(tb):
+    """ចុះឈ្មោះ callback (mdep:) លើ Payment Bot instance ដាច់ដោយឡែក ដូច្នេះ
+    ប៊ូតុង ✅ អនុម័ត / ❌ បដិសេធ ចុចដំណើរការបានពិត។"""
+    @tb.callback_query_handler(func=lambda c: c.data.startswith("mdep:"))
+    def _pb_cb_mdep(call):
+        _process_mdep_action(call, tb)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("editsvc:"))
@@ -5231,12 +5495,12 @@ def handle_photo(message):
                 InlineKeyboardButton("✅ អនុម័ត", callback_data=f"mdep:ok:{dep_id}", color="success"),
                 InlineKeyboardButton("❌ បដិសេធ", callback_data=f"mdep:no:{dep_id}", color="danger"),
             )
-            bot.send_photo(ADMIN_ID, proof_id,
+            pnotify_photo(proof_id,
                 caption=f"🧾 <b>សំណើដាក់លុយដោយដៃ ថ្មី!</b>\n"
                         f"👤 {name} (<code>{uid_str}</code>)\n"
                         f"💰 ចំនួន: <b>${amount:.2f}</b>\n"
                         f"📌 Ref: <code>{dep_id}</code>",
-                parse_mode="HTML", reply_markup=kb)
+                reply_markup=kb)
         except Exception as _e:
             logger.debug(f"[silent] {_e}")
         return
@@ -6174,32 +6438,8 @@ def handle_msg(message):
 
         # ── Admin: Update manual order status ──
         if isinstance(step, dict) and step.get("step") == "manual_order_done" and uid == ADMIN_ID:
-            oid      = step.get("oid")
-            user_uid = step.get("user_uid")
-            o        = smm_orders.get(oid)
-            if not o:
-                bot.send_message(uid, "❌ Order រកមិនឃើញ", reply_markup=admin_kb())
-                waiting.pop(uid, None); return
-            note = text.strip()
-            smm_orders[oid]["status"]   = "completed"
-            smm_orders[oid]["note"]     = note
-            _save(SMM_ORD_FILE, smm_orders)
-            waiting.pop(uid, None)
-            try:
-                bot.send_message(int(user_uid),
-                    f"✅ <b>Order បានដំណើរការហើយ!</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━\n"
-                    f"🆔 <code>{oid}</code>\n"
-                    f"📊 {o.get('label','?')}\n"
-                    f"🔢 ចំនួន: <b>{o.get('qty',0):,}</b>\n"
-                    + (f"📝 Note: {note}\n" if note and note != "-" else "") +
-                    f"━━━━━━━━━━━━━━━━━━\n"
-                    f"🙏 អរគុណ!",
-                    parse_mode="HTML")
-            except Exception as _e: logger.debug(f"[silent] {_e}")
-            bot.send_message(uid,
-                f"✅ <b>Order Completed!</b>\n🆔 <code>{oid}</code>",
-                parse_mode="HTML", reply_markup=admin_kb()); return
+            _finish_manual_order(uid, _bot_by_tag(step.get("via_bot", "main")), step, text)
+            return
 
         if text == "✍️ Manual SMM":
             waiting[uid] = {"step": "manual_svc_label"}
@@ -7055,13 +7295,12 @@ def handle_msg(message):
                 parse_mode="HTML", reply_markup=main_kb(uid))
             # ជូនដំណឹង Admin ថា User ចង់ Order ប៉ុន្តែលុយមិនគ្រប់ — ជា lead ល្អ
             # សម្រាប់ Admin ទាក់ទងទៅ User ដើម្បីលើកទឹកចិត្តឲ្យបញ្ចូលលុយ
-            try: bot.send_message(ADMIN_ID,
+            try: onotify(
                 f"💸 <b>User ចង់ Order ប៉ុន្តែ Balance មិនគ្រប់!</b>\n"
                 f"👤 {_user_display(uid_str)}\n"
                 f"📦 {s.get('label',slug)}\n"
                 f"🔢 {qty:,} | 💰 ត្រូវការ: ${price:.4f}\n"
-                f"💳 Balance បច្ចុប្បន្ន: ${bal(uid):.2f}",
-                parse_mode="HTML")
+                f"💳 Balance បច្ចុប្បន្ន: ${bal(uid):.2f}")
             except Exception as _e: logger.debug(f"[silent] {_e}")
             return
         ded_bal(uid, price)
@@ -7087,13 +7326,12 @@ def handle_msg(message):
                 f"💳 Balance: <b>${bal(uid):.2f}</b>\n"
                 f"សូមព្យាយាមម្ដងទៀត ឬទាក់ទង Admin។",
                 parse_mode="HTML", reply_markup=main_kb(uid))
-            try: bot.send_message(ADMIN_ID,
+            try: onotify(
                 f"⚠️ <b>SMM Order បរាជ័យ (Auto-Refunded)</b>\n"
                 f"👤 {_user_display(uid_str)}\n"
                 f"📊 {s.get('label',slug)} | {qty:,} | ${price:.4f}\n"
                 f"🔗 <code>{link}</code>\n"
-                f"⚠️ {api_err_msg}",
-                parse_mode="HTML")
+                f"⚠️ {api_err_msg}")
             except Exception as _e: logger.debug(f"[silent] {_e}")
             return
         api_oid = str(res.get("order","")) if res else ""
@@ -7157,7 +7395,7 @@ def handle_msg(message):
                 InlineKeyboardButton("✅ Done",   callback_data=f"manord:done:{oid}", color="active"),
                 InlineKeyboardButton("❌ Reject", callback_data=f"manord:reject:{oid}", color="inactive"),
             ]])
-            try: bot.send_message(ADMIN_ID, admin_msg, parse_mode="HTML", reply_markup=kb_adm)
+            try: onotify(admin_msg, reply_markup=kb_adm)
             except Exception as _e: logger.debug(f"[silent] {_e}")
         elif is_manual:
             admin_msg = (
@@ -7173,17 +7411,16 @@ def handle_msg(message):
                 InlineKeyboardButton("✅ Done",   callback_data=f"manord:done:{oid}", color="active"),
                 InlineKeyboardButton("❌ Reject", callback_data=f"manord:reject:{oid}", color="inactive"),
             ]])
-            try: bot.send_message(ADMIN_ID, admin_msg, parse_mode="HTML", reply_markup=kb_adm)
+            try: onotify(admin_msg, reply_markup=kb_adm)
             except Exception as _e: logger.debug(f"[silent] {_e}")
         else:
-            try: bot.send_message(ADMIN_ID,
+            try: onotify(
                 f"📊 <b>SMM Order</b>\n"
                 f"🆔 <code>{oid}</code>\n"
                 f"👤 {udisp}\n"
                 f"📦 {s.get('label',slug)}\n"
                 f"🔢 {qty:,} | 💰 ${price:.4f}\n"
-                f"🔗 <code>{link}</code>",
-                parse_mode="HTML")
+                f"🔗 <code>{link}</code>")
             except Exception as _e: logger.debug(f"[silent] {_e}")
         return
 
@@ -7493,6 +7730,17 @@ if __name__ == "__main__":
     threading.Thread(target=_self_ping, daemon=True).start()
     threading.Thread(target=_smm_order_watcher, daemon=True).start()
     threading.Thread(target=_daily_report_scheduler, daemon=True).start()
+    # ── Reconnect Order Bot / Payment Bot បើធ្លាប់ setup ទុករួច (persist ឆ្លងកាត់ restart) ──
+    if notify_bots_cfg.get("order_token"):
+        if _start_order_bot(notify_bots_cfg["order_token"]):
+            logger.info("🤖 Order Bot reconnected")
+        else:
+            logger.warning("⚠️ Order Bot reconnect failed (token ចាស់អាចខូច)")
+    if notify_bots_cfg.get("pay_token"):
+        if _start_pay_bot(notify_bots_cfg["pay_token"]):
+            logger.info("🤖 Payment Bot reconnected")
+        else:
+            logger.warning("⚠️ Payment Bot reconnect failed (token ចាស់អាចខូច)")
     if IS_MASTER:
         for _cln_name, _cln_cfg in clone_registry.items():
             try:
