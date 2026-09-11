@@ -359,6 +359,7 @@ SMM_PROFIT_FILE = _dpath("smm_profit.json")
 SMM_POLL_FILE   = _dpath("smm_poll.json")
 SMM_DEP_FILE    = _dpath("smm_deposits.json")
 DEP_BONUS_FILE  = _dpath("smm_deposit_bonus.json")
+USER_DISCOUNT_FILE = _dpath("smm_user_discounts.json")  # uid -> {pct, note} — បញ្ចុះតម្លៃសម្រាប់តែ TikTok Khmer
 SUB_ADMIN_FILE  = _dpath("smm_sub_admins.json")
 SUPPORT_CFG_FILE= _dpath("smm_support.json")
 CAMRAPID_CFG_FILE= _dpath("smm_camrapid.json")
@@ -408,6 +409,10 @@ smm_deps     = _load(SMM_DEP_FILE,   {})
 # enabled: បើក/បិទ Auto Bonus, min_amount: ចំនួនអប្បបរមាដែលទទួលបាន Bonus,
 # pct: ភាគរយ Bonus (គិតលើចំនួនប្រាក់ដែលដាក់)។ កែបានពី Admin Menu → 🎁 Bonus ដាក់លុយ
 dep_bonus_cfg = _load(DEP_BONUS_FILE, {"enabled": True, "min_amount": 1.0, "pct": 5.0})
+
+# ── User Discount (TikTok Khmer only) — Admin កំណត់ User ណាដែលបានបញ្ចុះតម្លៃ ──
+# structure: { "uid_str": {"pct": 10.0, "note": "VIP"} }
+user_discounts = _load(USER_DISCOUNT_FILE, {})
 
 # ── QR Anti-Spam Cooldown — កែបានពី Admin Menu → ⏳ QR Cooldown (persist ថេរ) ──
 DEP_QR_COOLDOWN_FILE = _dpath("dep_qr_cooldown.json")
@@ -1179,6 +1184,37 @@ def _dep_qr_cooldown_status_text():
             f"👉 User ម្នាក់ៗត្រូវរង់ចាំ {sec} វិនាទី មុននឹងបង្កើត QR ថ្មីម្តងទៀត "
             f"(ការពារ Spam ចុច 💸 បញ្ចូលលុយ ជាប់ៗគ្នា)។ Admin មិនកំណត់ទេ។")
 
+def _user_discount_admin_text():
+    lines = [
+        "🏷️ <b>បញ្ចុះតម្លៃ User — TikTok Khmer តែប៉ុណ្ណោះ</b>",
+        "━━━━━━━━━━━━━━━━━━",
+        "User ដែលកំណត់នៅទីនេះនឹងទទួលបានបញ្ចុះតម្លៃ <b>តែលើ Package 🇰🇭 TikTok Khmer</b> ប៉ុណ្ណោះ "
+        "(មិនអនុវត្តលើ Platform ផ្សេងទេ)។",
+        "",
+    ]
+    if not user_discounts:
+        lines.append("<i>មិនទាន់មាន User ណាទទួលបញ្ចុះតម្លៃទេ</i>")
+    else:
+        lines.append(f"📋 <b>បញ្ជី ({len(user_discounts)} នាក់):</b>")
+        for u_id, cfg in list(user_discounts.items())[:30]:
+            pct = float(cfg.get("pct", 0) or 0)
+            note = cfg.get("note") or ""
+            u = users_db.get(str(u_id), {})
+            name = u.get("name") or u.get("username") or "?"
+            note_txt = f" — {note}" if note else ""
+            lines.append(f"• <code>{u_id}</code> {name} → <b>{pct:.0f}%</b>{note_txt}")
+        if len(user_discounts) > 30:
+            lines.append(f"<i>... និង {len(user_discounts)-30} នាក់ទៀត</i>")
+    return "\n".join(lines)
+
+def _user_discount_admin_kb():
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("➕ បន្ថែម / កែ User", callback_data="udisc:add", color="active"))
+    if user_discounts:
+        kb.add(InlineKeyboardButton("🗑️ លុប User", callback_data="udisc:del", color="danger"))
+    kb.add(InlineKeyboardButton("🔄 Refresh", callback_data="udisc:list", color="progress"))
+    return kb
+
 def _smm_profit_pct(): return float(smm_profit.get("pct", 20))
 
 def _smm_sell_rate(cost, slug=None):
@@ -1211,6 +1247,46 @@ def _smm_price_for_order(slug, qty):
                                         # ចង់ឲ្យជាក់លាក់ តម្លៃប្រភេទនេះមិនមែនគណនាចេញទេ
     sr = _smm_sell_rate(s.get("cost_rate", 0), slug)
     return _round_price_01(round(sr * qty / 1000, 4))
+
+def _is_tiktok_khmer_service(slug, s=None):
+    """True បើ Service នេះជា TikTok Khmer (category ឬ slug) — សម្រាប់ User Discount"""
+    if s is None:
+        s = smm_services.get(slug, {})
+    cat = (s.get("category") or "").lower()
+    if "tiktok khmer" in cat or "🇰🇭" in (s.get("category") or ""):
+        return True
+    if slug and "tiktok_promote" in slug.lower():
+        return True
+    return False
+
+def _user_discount_pct(uid, slug):
+    """ត្រឡប់ % បញ្ចុះតម្លៃសម្រាប់ User នេះ លើ Service នេះ (0 បើគ្មាន ឬមិនមែន TikTok Khmer)"""
+    if not _is_tiktok_khmer_service(slug):
+        return 0.0
+    cfg = user_discounts.get(str(uid))
+    if not cfg:
+        return 0.0
+    try:
+        pct = float(cfg.get("pct", 0) or 0)
+        return max(0.0, min(100.0, pct))
+    except (TypeError, ValueError):
+        return 0.0
+
+def _apply_user_discount(uid, slug, base_price):
+    """អនុវត្តបញ្ចុះតម្លៃ User (TikTok Khmer តែប៉ុណ្ណោះ)។
+    ត្រឡប់ (final_price, discount_amount, pct)"""
+    pct = _user_discount_pct(uid, slug)
+    if pct <= 0:
+        return float(base_price), 0.0, 0.0
+    disc = round(float(base_price) * pct / 100.0, 2)
+    final = max(0.0, round(float(base_price) - disc, 2))
+    return final, disc, pct
+
+def _smm_price_for_user(uid, slug, qty):
+    """តម្លៃ Order បន្ទាប់ពីអនុវត្ត User Discount (បើមាន)"""
+    base = _smm_price_for_order(slug, qty)
+    final, _, _ = _apply_user_discount(uid, slug, base)
+    return final
 
 def _smm_cost_for_order(slug, qty):
     """គណនាតម្លៃដើម (Provider cost) របស់ Order មួយ — ប្រើ cost_rate បច្ចុប្បន្ន
@@ -3119,7 +3195,8 @@ def admin_kb():
            KeyboardButton("💳 ប្រាក់បញ្ញើ", color="active"))
     kb.row(KeyboardButton("💸 បន្ថែមប្រាក់", color="active"),
            KeyboardButton("💔 កាត់ប្រាក់",  color="danger"))
-    kb.row(KeyboardButton("🎁 Bonus ដាក់លុយ", color="progress"))
+    kb.row(KeyboardButton("🎁 Bonus ដាក់លុយ", color="progress"),
+           KeyboardButton("🏷️ បញ្ចុះតម្លៃ User", color="progress"))
     kb.row("━━━ 👥 អ្នកប្រើ ━━━")
     kb.row(KeyboardButton("👥 អ្នកប្រើប្រាស់", color="active"),
            KeyboardButton("📊 ស្ថិតិ",       color="active"))
@@ -3317,7 +3394,7 @@ def smm_svc_kb(cat):
     btns.append([InlineKeyboardButton("🔙 Back", callback_data="back:smmcats", color="inactive")])
     return InlineKeyboardMarkup(btns)
 
-def smm_qty_kb(slug, s):
+def smm_qty_kb(slug, s, uid=None):
     sr    = _smm_sell_rate(s["cost_rate"], slug)
     mn    = s.get("min", 10)
     mx    = s.get("max", 100000)
@@ -3326,8 +3403,15 @@ def smm_qty_kb(slug, s):
     # Flat price service — only 1 option
     if s.get("flat_price"):
         flat = float(s["flat_price"])
-        btns = [[InlineKeyboardButton(
-            f"✅ Order — ${flat:.2f}", callback_data=f"smmqty:{slug}:1", color="active")]]
+        if uid is not None:
+            flat, disc, pct = _apply_user_discount(uid, slug, flat)
+            if pct > 0:
+                btn_txt = f"✅ Order — ${flat:.2f} (បញ្ចុះ {pct:.0f}%)"
+            else:
+                btn_txt = f"✅ Order — ${flat:.2f}"
+        else:
+            btn_txt = f"✅ Order — ${flat:.2f}"
+        btns = [[InlineKeyboardButton(btn_txt, callback_data=f"smmqty:{slug}:1", color="active")]]
         btns.append([InlineKeyboardButton("🔙 Back", callback_data="back:smmcats", color="inactive")])
         return InlineKeyboardMarkup(btns)
     preset = s.get("preset_qtys")
@@ -3344,8 +3428,13 @@ def smm_qty_kb(slug, s):
         price = _round_price_01(sr * q / 1000)  # ត្រូវតែដូចគ្នានឹងតម្លៃពិត _smm_price_for_order()
                                                   # ដែលនឹងគិតលុយ ដើម្បីកុំឲ្យតម្លៃលើប៊ូតុងខុសពី
                                                   # តម្លៃពិតដែលគិតលុយពេលបញ្ជាទិញ (bug ចាស់)
+        if uid is not None:
+            price, _, pct = _apply_user_discount(uid, slug, price)
+            suffix = f" (−{pct:.0f}%)" if pct > 0 else ""
+        else:
+            suffix = ""
         btns.append([InlineKeyboardButton(
-            f"{q:,} {first} — ${price:.2f}", callback_data=f"smmqty:{slug}:{q}", color="active")])
+            f"{q:,} {first} — ${price:.2f}{suffix}", callback_data=f"smmqty:{slug}:{q}", color="active")])
     btns.append([InlineKeyboardButton("🔙 Back", callback_data="back:smmcats", color="inactive")])
     return InlineKeyboardMarkup(btns)
 
@@ -3843,6 +3932,67 @@ def cb_depbonus(call):
             parse_mode="HTML", reply_markup=cancel_kb())
         return
 
+@bot.callback_query_handler(func=lambda c: c.data.startswith("udisc:"))
+def cb_udisc(call):
+    """🏷️ User Discount — បញ្ចុះតម្លៃសម្រាប់តែ TikTok Khmer"""
+    uid = call.message.chat.id
+    if uid != ADMIN_ID and uid not in sub_admins:
+        bot.answer_callback_query(call.id); return
+    parts = call.data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+    if action == "list":
+        bot.answer_callback_query(call.id)
+        try:
+            bot.edit_message_text(_user_discount_admin_text(),
+                                  chat_id=uid, message_id=call.message.message_id,
+                                  parse_mode="HTML", reply_markup=_user_discount_admin_kb())
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        return
+    if action == "add":
+        bot.answer_callback_query(call.id)
+        waiting[uid] = {"step": "udisc_add"}
+        bot.send_message(uid,
+            "➕ <b>បន្ថែម / កែ បញ្ចុះតម្លៃ User</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "ផ្ញើជា: <code>TelegramID,ភាគរយ</code>\n"
+            "ឧ: <code>123456789,10</code> = User នេះបាន 10% លើ TikTok Khmer\n"
+            "ឧ: <code>123456789,15,VIP</code> = 15% + note VIP\n\n"
+            "💡 បើ User មានរួចហើយ នឹងកែ % ថ្មីជំនួស។",
+            parse_mode="HTML", reply_markup=cancel_kb())
+        return
+    if action == "del":
+        bot.answer_callback_query(call.id)
+        if not user_discounts:
+            bot.send_message(uid, "❌ គ្មាន User ក្នុងបញ្ជី", reply_markup=admin_kb()); return
+        kb = InlineKeyboardMarkup()
+        for u_id, cfg in list(user_discounts.items())[:25]:
+            pct = float(cfg.get("pct", 0) or 0)
+            u = users_db.get(str(u_id), {})
+            name = (u.get("name") or "?")[:12]
+            kb.add(InlineKeyboardButton(
+                f"🗑️ {name} ({u_id}) {pct:.0f}%",
+                callback_data=f"udisc:rm:{u_id}", color="danger"))
+        kb.add(InlineKeyboardButton("🔙 ត្រឡប់", callback_data="udisc:list", color="inactive"))
+        bot.send_message(uid, "🗑️ ចុច User ដែលចង់លុបចេញពីបញ្ជីបញ្ចុះតម្លៃ:",
+                         reply_markup=kb)
+        return
+    if action == "rm" and len(parts) >= 3:
+        target = parts[2]
+        if target in user_discounts:
+            user_discounts.pop(target)
+            _save(USER_DISCOUNT_FILE, user_discounts)
+            bot.answer_callback_query(call.id, f"✅ លុប {target}")
+        else:
+            bot.answer_callback_query(call.id, "❌ រកមិនឃើញ")
+        try:
+            bot.edit_message_text(_user_discount_admin_text(),
+                                  chat_id=uid, message_id=call.message.message_id,
+                                  parse_mode="HTML", reply_markup=_user_discount_admin_kb())
+        except Exception:
+            bot.send_message(uid, _user_discount_admin_text(), parse_mode="HTML",
+                             reply_markup=_user_discount_admin_kb())
+        return
+
 @bot.callback_query_handler(func=lambda c: c.data.startswith("qrcd:"))
 def cb_qrcooldown(call):
     """⏳ QR Cooldown — ការពារ Spam បង្កើត QR ។ Admin/Sub-admin កែបានតែម្នាក់ (v14)"""
@@ -4024,23 +4174,35 @@ def cb_smmsvc(call):
     if not s: return
     sr   = _smm_sell_rate(s["cost_rate"], slug)
     lang = get_lang(uid)
-    # Price display
+    # Price display (+ User Discount for TikTok Khmer បើមាន)
+    disc_note = ""
     if s.get("flat_price"):
-        price_line = f"💰 តម្លៃ: <b>${float(s['flat_price']):.2f} / order</b>"
+        base_p = float(s["flat_price"])
+        final_p, disc_amt, pct = _apply_user_discount(uid, slug, base_p)
+        if pct > 0:
+            price_line = (f"💰 តម្លៃ: <s>${base_p:.2f}</s> → <b>${final_p:.2f} / order</b>\n"
+                          f"🏷️ បញ្ចុះតម្លៃ <b>{pct:.0f}%</b> (−${disc_amt:.2f})")
+            disc_note = f"\n🏷️ <i>អ្នកទទួលបានបញ្ចុះតម្លៃ {pct:.0f}% (TikTok Khmer)</i>"
+        else:
+            price_line = f"💰 តម្លៃ: <b>${base_p:.2f} / order</b>"
     else:
         price_line = f"💰 {'តម្លៃ' if lang=='kh' else 'Price'}: <b>${sr:.2f}/1K</b>\n📏 Min: {s.get('min',10):,}  ·  Max: {s.get('max',100000):,}"
+        pct = _user_discount_pct(uid, slug)
+        if pct > 0:
+            disc_note = f"\n🏷️ <i>អ្នកទទួលបានបញ្ចុះតម្លៃ {pct:.0f}% (TikTok Khmer)</i>"
     desc_line = f"\n📋 {s['description']}" if s.get("description") else ""
     txt  = (f"⚡ <b>{s.get('label',slug)}</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"{price_line}"
-            f"{desc_line}\n"
+            f"{desc_line}"
+            f"{disc_note}\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"{'ជ្រើស Quantity:' if lang=='kh' else 'Choose Quantity:'}")
     try:
         bot.edit_message_text(txt, chat_id=uid, message_id=call.message.message_id,
-                              parse_mode="HTML", reply_markup=smm_qty_kb(slug, s))
+                              parse_mode="HTML", reply_markup=smm_qty_kb(slug, s, uid=uid))
     except:
-        bot.send_message(uid, txt, parse_mode="HTML", reply_markup=smm_qty_kb(slug, s))
+        bot.send_message(uid, txt, parse_mode="HTML", reply_markup=smm_qty_kb(slug, s, uid=uid))
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("smmqty:"))
 def cb_smmqty(call):
@@ -4050,15 +4212,19 @@ def cb_smmqty(call):
     slug  = parts[1]; qty = int(parts[2])
     s     = smm_services.get(slug)
     if not s: return
-    price = _smm_price_for_order(slug, qty)
+    base_price = _smm_price_for_order(slug, qty)
+    price, disc_amt, pct = _apply_user_discount(uid, slug, base_price)
     lang  = get_lang(uid)
     is_tiktok_promote = s.get("flat_price") and "tiktok" in slug.lower()
+    disc_line = ""
+    if pct > 0:
+        disc_line = f"\n🏷️ បញ្ចុះ {pct:.0f}%: <s>${base_price:.2f}</s> → <b>${price:.2f}</b> (−${disc_amt:.2f})"
     if is_tiktok_promote:
         link_prompt = (
             f"🔗 <b>ផ្ញើ Link វីដេអូ TikTok:</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"📊 {s.get('label',slug)}\n"
-            f"💰 តម្លៃ: <b>${price:.2f}</b>\n"
+            f"💰 តម្លៃ: <b>${price:.2f}</b>{disc_line}\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"⚠️ <b>សំខាន់!</b> បន្ទាប់ពី order:\n"
             f"1️⃣ ចូល TikTok Inbox\n"
@@ -4068,13 +4234,17 @@ def cb_smmqty(call):
             f"📎 ឧ: <code>https://www.tiktok.com/@user/video/123</code>"
         )
     else:
+        price_txt = f"${price:.4f}"
+        if pct > 0:
+            price_txt = f"<s>${base_price:.4f}</s> → <b>${price:.4f}</b> (−{pct:.0f}%)"
         link_prompt = (
             f"🔗 <b>{'ផ្ញើ Link:' if lang=='kh' else 'Send Link:'}</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"📊 {s.get('label',slug)}\n"
-            f"💰 {qty:,} — <b>${price:.4f}</b>"
+            f"💰 {qty:,} — {price_txt}"
         )
-    waiting[uid] = {"step": "smm_link", "slug": slug, "qty": qty, "price": price}
+    waiting[uid] = {"step": "smm_link", "slug": slug, "qty": qty, "price": price,
+                    "base_price": base_price, "discount_pct": pct, "discount_amt": disc_amt}
     try:
         bot.edit_message_text(
             link_prompt,
@@ -6322,6 +6492,37 @@ def handle_msg(message):
                     parse_mode="HTML", reply_markup=cancel_kb())
             return
 
+        if isinstance(step, dict) and step.get("step") == "udisc_add":
+            try:
+                parts = [p.strip() for p in text.split(",")]
+                if len(parts) < 2:
+                    raise ValueError
+                target_id = parts[0].lstrip("@")
+                if not target_id.isdigit():
+                    raise ValueError("id")
+                pct = float(parts[1])
+                if pct < 0 or pct > 100:
+                    raise ValueError("pct")
+                note = parts[2] if len(parts) >= 3 else ""
+                user_discounts[str(target_id)] = {"pct": pct, "note": note}
+                _save(USER_DISCOUNT_FILE, user_discounts)
+                waiting.pop(uid, None)
+                u = users_db.get(str(target_id), {})
+                name = u.get("name") or u.get("username") or "?"
+                bot.send_message(uid,
+                    f"✅ <b>បានកំណត់បញ្ចុះតម្លៃ!</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"👤 <code>{target_id}</code> {name}\n"
+                    f"🏷️ បញ្ចុះ <b>{pct:.0f}%</b> លើ <b>🇰🇭 TikTok Khmer</b> តែប៉ុណ្ណោះ\n"
+                    f"{('📝 Note: ' + note) if note else ''}",
+                    parse_mode="HTML", reply_markup=admin_kb())
+            except Exception:
+                bot.send_message(uid,
+                    "❌ ទម្រង់ខុស! ផ្ញើជា <code>TelegramID,ភាគរយ</code>\n"
+                    "ឧ: <code>123456789,10</code> ឬ <code>123456789,15,VIP</code>",
+                    parse_mode="HTML", reply_markup=cancel_kb())
+            return
+
         if isinstance(step, dict) and step.get("step") == "smm_set_profit":
             try:
                 pct = float(text)
@@ -6726,6 +6927,10 @@ def handle_msg(message):
                 f"នឹងទទួល Bonus <b>{float(dep_bonus_cfg.get('pct',5.0)):.0f}%</b> បញ្ចូល Balance ដោយស្វ័យប្រវត្តិ "
                 f"(បូកបន្ថែមលើ Promo Code ប្រសិនបើមាន)។",
                 parse_mode="HTML", reply_markup=btns); return
+
+        if text == "🏷️ បញ្ចុះតម្លៃ User":
+            bot.send_message(uid, _user_discount_admin_text(), parse_mode="HTML",
+                             reply_markup=_user_discount_admin_kb()); return
 
         if text == "⏳ QR Cooldown":
             btns = InlineKeyboardMarkup()
@@ -7289,7 +7494,9 @@ def handle_msg(message):
     if isinstance(step, dict) and step.get("step") == "smm_link":
         slug  = step["slug"]
         qty   = step["qty"]
-        price = step["price"]
+        # Re-apply discount at order time (safety — in case admin changed discount after qty select)
+        base_price = _smm_price_for_order(slug, qty)
+        price, disc_amt, disc_pct = _apply_user_discount(uid, slug, base_price)
         link  = text.strip()
         s = smm_services.get(slug)
         if not s:
@@ -7348,15 +7555,23 @@ def handle_msg(message):
             return
         api_oid = str(res.get("order","")) if res else ""
         oid = _make_order_id()
-        smm_orders[oid] = {
+        order_rec = {
             "uid":uid_str,"slug":slug,"label":s.get("label",slug),
             "qty":qty,"price":price,"link":link,"api_order_id":api_oid,
             "status":"pending","ts":int(time.time())
         }
+        if disc_pct > 0:
+            order_rec["base_price"] = base_price
+            order_rec["discount_pct"] = disc_pct
+            order_rec["discount_amt"] = disc_amt
+        smm_orders[oid] = order_rec
         _save(SMM_ORD_FILE, smm_orders)
 
         is_tiktok_promote = s.get("flat_price") and "tiktok" in slug.lower()
         is_manual = s.get("manual", False)
+        disc_line = ""
+        if disc_pct > 0:
+            disc_line = f"\n🏷️ បញ្ចុះ {disc_pct:.0f}%: <s>${base_price:.2f}</s> → <b>${price:.2f}</b>"
 
         if is_tiktok_promote:
             bot.send_message(uid,
@@ -7364,7 +7579,7 @@ def handle_msg(message):
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"🆔 <code>{oid}</code>\n"
                 f"🎵 {s.get('label',slug)}\n"
-                f"💰 <b>${price:.2f}</b>\n"
+                f"💰 <b>${price:.2f}</b>{disc_line}\n"
                 f"🔗 <code>{link}</code>\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"⏳ <b>ចាំ Admin ដំណើរការ 5-15 នាទី</b>\n\n"
@@ -7381,7 +7596,7 @@ def handle_msg(message):
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"🆔 <code>{oid}</code>\n"
                 f"📊 {s.get('label',slug)}\n"
-                f"🔢 ចំនួន: <b>{qty:,}</b> | 💰 <b>${price:.4f}</b>\n"
+                f"🔢 ចំនួន: <b>{qty:,}</b> | 💰 <b>${price:.4f}</b>{disc_line}\n"
                 f"🔗 <code>{link}</code>\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"💳 Balance: <b>${bal(uid):.2f}</b>",
@@ -7389,13 +7604,14 @@ def handle_msg(message):
 
         # ── Notify Admin ──
         udisp = _user_display(uid_str)
+        admin_disc = f"\n🏷️ Discount {disc_pct:.0f}% (−${disc_amt:.2f})" if disc_pct > 0 else ""
         if is_tiktok_promote:
             admin_msg = (
                 f"🎵 <b>TikTok Promote Order!</b>\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"🆔 <code>{oid}</code>\n"
                 f"👤 {udisp}\n"
-                f"💰 <b>${price:.2f}</b>\n"
+                f"💰 <b>${price:.2f}</b>{admin_disc}\n"
                 f"🔗 <code>{link}</code>\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"📋 <b>Admin Steps:</b>\n"
