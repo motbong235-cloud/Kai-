@@ -3205,6 +3205,7 @@ def admin_kb():
            KeyboardButton("💰 ឆែកលុយ API", color="active"))
     kb.row(KeyboardButton("🖼️ Welcome Photo", color="progress"),
            KeyboardButton("🎬 វីដេអូបង្រៀន", color="progress"))
+    kb.row(KeyboardButton("🎵 វីដេអូ TikTok ជោគជ័យ", color="progress"))
     kb.row(KeyboardButton("🔄 ធ្វើឱ្យទាន់សម័យ", color="progress"))
     kb.row(KeyboardButton("🔔 Notify Channel", color="progress"),
            KeyboardButton("🧪 តេស្ត Notify",   color="active"))
@@ -3696,6 +3697,11 @@ welcome_cfg = _load(WELCOME_SETTINGS_FILE, {"photo_id": ""})
 TUTORIAL_VIDEO_FILE = _dpath("smm_tutorial.json")
 tutorial_cfg = _load(TUTORIAL_VIDEO_FILE, {"file_id": ""})
 
+# ── វីដេអូ TikTok Khmer ជោគជ័យ — ផ្ញើទៅ User ភ្លាមៗពេលទិញ Package
+#    🇰🇭 TikTok Khmer ជោគជ័យ (បង្ហាញរបៀប Accept Promote Assistant) ──
+TIKTOK_SUCCESS_VIDEO_FILE = _dpath("smm_tiktok_success_video.json")
+tiktok_success_video_cfg = _load(TIKTOK_SUCCESS_VIDEO_FILE, {"file_id": ""})
+
 # ═══════════════════════════════════════════════════════════
 #  MANUAL DEPOSIT (ដាក់លុយដោយដៃ) — User ស្កេន QR ថេរដែល Admin កំណត់ផ្ទាល់
 #  ផ្ញើភស្តុតាង (Screenshot) មក Admin ត្រួតពិនិត្យ + អនុម័តដោយដៃ
@@ -3823,6 +3829,22 @@ def _save_welcome_photo(file_id):
 def _save_tutorial_video(file_id):
     tutorial_cfg["file_id"] = file_id
     _save(TUTORIAL_VIDEO_FILE, tutorial_cfg)
+
+def _save_tiktok_success_video(file_id):
+    tiktok_success_video_cfg["file_id"] = file_id
+    _save(TIKTOK_SUCCESS_VIDEO_FILE, tiktok_success_video_cfg)
+
+def _tiktok_success_video_caption():
+    """Caption ដូចក្នុងវីដេអូគំរូ (Admin @rsbooster_bot) — ប្រើតែ emoji ដែលមាន
+    ស្រាប់ក្នុងបញ្ជី EMOJI_MAP (📢 💰 ✅ 🤖) ដូច្នេះបើ Admin បានកំណត់ Premium
+    Emoji សម្រាប់វារួចហើយ វានឹងបង្ហាញជា Premium icon ភ្លាមៗ (មើល
+    _entities_for_emoji_text)។ @username ប្តូរស្វ័យប្រវត្តិទៅតាម Bot ខ្លួនឯង
+    (Master ឬ Sub Bot នីមួយៗ) ដូច _tutorial_caption()"""
+    return (f"📢 ពេលបងប្អូនដាក់ Like ខ្មែរ រូចសូមចាំ tiktok លោត notification "
+            f"បែបនេះរូចបងប្អូនធ្វើតាមនឹងមក វានឹងដំណើរការ 💰\n\n"
+            f"សម្រាប់តែបងប្អូនអត់ដែរដាក់ពីមុនប៉ុណ្ណោះ បើបងប្អូនធ្លាប់ហើយ"
+            f"មិនបាច់ចាំចុចទៀតទេ ✅\n\n"
+            f"🤖 លីង BOT SMM : @{_bot_username()}")
 
 def _tutorial_caption():
     """Caption ខ្លីៗសម្រាប់វីដេអូបង្រៀន — ប្រើតែ emoji ដែលមានស្រាប់ក្នុងបញ្ជី
@@ -5801,6 +5823,15 @@ def handle_video(message):
             "✅ <b>វីដេអូបង្រៀនបានរក្សា!</b>\n"
             "វីដេអូនេះនឹងបង្ហាញពេល User ចុច 💡 របៀបប្រើប្រាស់",
             parse_mode="HTML", reply_markup=admin_kb())
+    elif step == "set_tiktok_success_video":
+        file_id = message.video.file_id
+        _save_tiktok_success_video(file_id)
+        waiting.pop(uid, None)
+        bot.send_message(uid,
+            "✅ <b>វីដេអូ TikTok ជោគជ័យ បានរក្សា!</b>\n"
+            "វីដេអូនេះនឹងផ្ញើទៅ User ភ្លាមៗ ក្រោយពេលទិញ Package "
+            "🇰🇭 TikTok Khmer ជោគជ័យ",
+            parse_mode="HTML", reply_markup=admin_kb())
 
 # ═══════════════════════════════════════════════════════════
 #  STICKER HANDLER — ចាំបាច់សម្រាប់ Premium Emoji ដែលផ្ញើមកជា
@@ -7092,6 +7123,19 @@ def handle_msg(message):
                 parse_mode="HTML", reply_markup=cancel_kb())
             return
 
+        if text == "🎵 វីដេអូ TikTok ជោគជ័យ":
+            cur = "✅ មានវីដេអូហើយ" if tiktok_success_video_cfg.get("file_id") else "❌ មិនទាន់មានវីដេអូ"
+            waiting[uid] = "set_tiktok_success_video"
+            bot.send_message(uid,
+                f"🎵 <b>វីដេអូ TikTok Khmer ជោគជ័យ</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"ស្ថានភាព: <b>{cur}</b>\n\n"
+                f"📤 ផ្ញើ វីដេអូ ដែលបង្ហាញរបៀប Accept Promote Assistant\n"
+                f"<i>(វីដេអូនេះនឹងផ្ញើទៅ User ភ្លាមៗ ក្រោយពេលទិញ Package "
+                f"🇰🇭 TikTok Khmer ជោគជ័យ)</i>",
+                parse_mode="HTML", reply_markup=cancel_kb())
+            return
+
         if step == "set_notify_channel":
             waiting.pop(uid, None)
             val = text.strip()
@@ -7590,6 +7634,20 @@ def handle_msg(message):
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"💳 Balance: <b>${bal(uid):.2f}</b>",
                 parse_mode="HTML", reply_markup=main_kb(uid))
+            # ── វីដេអូបង្ហាញរបៀប Accept Promote — ផ្ញើភ្លាមៗបន្ទាប់ពី Order ជោគជ័យ ──
+            tk_video_id = tiktok_success_video_cfg.get("file_id")
+            if tk_video_id:
+                try:
+                    _tk_cap = _tiktok_success_video_caption()
+                    bot.send_video(
+                        uid,
+                        tk_video_id,
+                        caption=_tk_cap,
+                        caption_entities=_entities_for_emoji_text(_tk_cap),
+                        parse_mode="HTML"
+                    )
+                except Exception as e:
+                    logger.warning(f"⚠️ send tiktok success video failed: {e}")
         else:
             bot.send_message(uid,
                 f"✅ <b>បញ្ជា SMM បានជោគជ័យ!</b>\n"
