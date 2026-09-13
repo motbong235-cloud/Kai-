@@ -12,6 +12,7 @@
 """
 
 import json, logging, time, re, threading, io, os, sys, subprocess, datetime, base64
+import shutil
 import zipfile
 from decimal import Decimal as _Decimal, ROUND_HALF_UP as _ROUND_HALF_UP
 import requests as http_req
@@ -370,15 +371,82 @@ PAYTOGGLE_CFG_FILE = _dpath("smm_paytoggle.json")   # បិទ/បើក វិ
 EMOJI_FILE      = _mdpath("smm_emoji.json")   # ចែក share រួមគ្នារវាង bot ដើម និង clone ទាំងអស់ (មិនញែកតាម DATA_DIR ទេ)
 
 def _load(path, default):
+    """ដោះស្រាយ Data Loss ស្ងាត់ៗ (root cause ដែលធ្លាប់កើត Sep 2026)៖
+    - File រកមិនឃើញ (ធម្មតា លើកដំបូង) → return default
+    - File ខូច (disk full mid-write ។ល។) → កុំ silently return default ដែល
+      នឹងត្រូវ _save() សរសេរជាន់លុប Data ចាស់ជារៀងរហូត។ ព្យាយាម restore ពី
+      .bak (កូពីល្អចុងក្រោយ) ជាមុនសិន, ហើយបើគ្មាន .bak — ទុក file ខូចនោះ
+      ជា .corrupted_<ts> សម្រាប់ investigate/manual-repair វិញ, ព្រមទាំង
+      ជូនដំណឹង Admin ភ្លាមៗ (បើ bot object រួចរាល់ហើយ)។"""
     try:
-        with open(path, "r", encoding="utf-8") as f: return json.load(f)
-    except: return default
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return default
+    except Exception as e:
+        bak = path + ".bak"
+        if os.path.exists(bak):
+            try:
+                with open(bak, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                logger.error(f"⚠️ {path} ខូច ({e}) — restored ពី {bak}")
+                _alert_admin_corruption(path, e, recovered_from_bak=True)
+                return data
+            except Exception:
+                pass
+        try:
+            corrupt_copy = f"{path}.corrupted_{int(time.time())}"
+            os.replace(path, corrupt_copy)
+            logger.error(f"🚨 {path} ខូច ({e}) — គ្មាន .bak, ទុកទុកជា {corrupt_copy}")
+        except Exception:
+            logger.error(f"🚨 {path} ខូច ({e}) — មិនអាចរក្សា copy ខូចបានទេ")
+        _alert_admin_corruption(path, e, recovered_from_bak=False)
+        return default
+
+def _alert_admin_corruption(path, err, recovered_from_bak):
+    """ជូនដំណឹង Admin ភ្លាមៗពេល file ណាមួយខូច — ដើម្បីដឹងលឿន កុំឲ្យរកឃើញ
+    Data បាត់ក្រោយពី User រាយការណ៍ដូចលើកមុន។ Safe ក្នុងករណី bot មិនទាន់
+    បង្កើត (startup ដំបូង) ព្រោះ _load() អាចត្រូវហៅមុន bot = telebot.TeleBot(...)។"""
+    try:
+        b = globals().get("bot")
+        admin_id = globals().get("ADMIN_ID")
+        if not b or not admin_id:
+            return
+        fname = os.path.basename(path)
+        if recovered_from_bak:
+            txt = (f"⚠️ <b>File ខូច ប៉ុន្តែសង្គ្រោះស្វ័យប្រវត្តិបានហើយ!</b>\n"
+                   f"File: <code>{fname}</code>\nError: <code>{err}</code>\n"
+                   f"→ បានស្តារពី backup (.bak) ចុងក្រោយស្វ័យប្រវត្តិ ✅")
+        else:
+            txt = (f"🚨 <b>File Data ខូច! ត្រូវការជួសជុលដោយដៃ</b>\n"
+                   f"File: <code>{fname}</code>\nError: <code>{err}</code>\n\n"
+                   f"គ្មាន Backup (.bak) ស្វ័យប្រវត្តិសល់ទេ — File ខូចត្រូវបានរក្សាទុក "
+                   f"ជា <code>{fname}.corrupted_...</code> សម្រាប់ជួសជុលនៅពេលក្រោយ។\n"
+                   f"Data ថ្មីនឹងចាប់ផ្តើមពីទទេសម្រាប់ file នេះ។")
+        b.send_message(admin_id, txt, parse_mode="HTML")
+    except Exception:
+        pass
 
 def _save(path, data):
+    """សរសេរបែប Atomic (tmp file → os.replace) ដើម្បីកុំឲ្យ file ដាច់ពាក់
+    កណ្ដាល ពេល Disk ជិតពេញ ឬ Bot crash/restart កណ្ដាលការសរសេរ (root cause
+    នៃ Data Loss ដែលកើតឡើងពីមុន)។ ទុក .bak ជា copy ល្អចុងក្រោយ ដើម្បីឲ្យ
+    _load() អាច fallback បើ file ថ្មីខូច។"""
     try:
-        with open(path, "w", encoding="utf-8") as f:
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as e: logger.error(f"Save {path}: {e}")
+            f.flush()
+            os.fsync(f.fileno())
+        if os.path.exists(path):
+            try:
+                os.replace(path, path + ".bak")
+            except Exception:
+                pass
+        os.replace(tmp, path)
+    except Exception as e:
+        logger.error(f"Save {path}: {e}")
+        _alert_admin_corruption(path, e, recovered_from_bak=False)
 
 # ─── Load all state ───
 # EMOJI_MAP ត្រូវបានកំណត់ default (None) ខាងលើ — ឥឡូវ merge ជាមួយតម្លៃ
@@ -1481,25 +1549,33 @@ def cmd_top(message):
 #  (users, wallets, orders, services, emoji, config ។ល។ — គ្រប់ file
 #  JSON ក្នុង DATA_DIR)
 # ═══════════════════════════════════════════════════════════
+def _build_backup_zip():
+    """បង្កើត Backup Zip (ប្រើរួមគ្នាទាំង /backup ដោយដៃ និង Auto-backup
+    ស្វ័យប្រវត្តិខាងក្រោម) — return (BytesIO buf, file_count) ឬ (None, 0)"""
+    files = [f for f in os.listdir(DATA_DIR) if f.endswith(".json")]
+    if not files:
+        return None, 0
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in files:
+            zf.write(os.path.join(DATA_DIR, f), arcname=f)
+    buf.seek(0)
+    return buf, len(files)
+
 @bot.message_handler(commands=["backup"])
 def cmd_backup(message):
     if message.from_user.id != ADMIN_ID:
         return
     bot.send_chat_action(ADMIN_ID, "upload_document")
     try:
-        files = [f for f in os.listdir(DATA_DIR) if f.endswith(".json")]
-        if not files:
+        buf, n = _build_backup_zip()
+        if not buf:
             bot.reply_to(message, "❌ រកមិនឃើញ file .json ណាមួយក្នុង DATA_DIR ទេ។")
             return
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            for f in files:
-                zf.write(os.path.join(DATA_DIR, f), arcname=f)
-        buf.seek(0)
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         buf.name = f"kaijaklike_backup_{ts}.zip"
         bot.send_document(ADMIN_ID, buf,
-            caption=f"💾 <b>Backup ទិន្នន័យ</b> — {len(files)} files\n"
+            caption=f"💾 <b>Backup ទិន្នន័យ</b> — {n} files\n"
                     f"🗓️ {ts}\n\n"
                     f"👉 រក្សាទុក file នេះឲ្យបានល្អ។ ដើម្បីយកទៅប្រើលើ Server ថ្មី "
                     f"ផ្ញើ file នេះមកវិញ ព្រម <code>/restore</code>",
@@ -8005,6 +8081,67 @@ def _daily_report_scheduler():
             logger.warning(f"⚠️ Daily report scheduler error: {e}")
 
 # ═══════════════════════════════════════════════════════════
+#  DISK WATCHDOG — ជូនដំណឹង Admin មុន Disk ជិតពេញ (root cause ចាស់
+#  ដែលធ្លាប់ធ្វើឲ្យ file .json ដាច់កណ្ដាល និង Data User/Order បាត់)
+# ═══════════════════════════════════════════════════════════
+DISK_WATCH_FILE = _dpath("disk_watch_cfg.json")
+disk_watch_cfg  = _load(DISK_WATCH_FILE, {"last_alert_date": ""})
+
+def _disk_watchdog():
+    """រត់ background — ពិនិត្យរាល់ 30 នាទី។ ជូនដំណឹង Admin (១ដងក្នុងមួយថ្ងៃ
+    ដើម្បីកុំឲ្យ spam) ពេល Disk ប្រើលើស 85%, ហើយផ្ញើ Backup បន្ថែមជាបន្ទាន់
+    ពេលដល់ 95% ដើម្បីការពារ Data មុនពេល Disk ពេញទាំងស្រុង។"""
+    while True:
+        try:
+            time.sleep(1800)  # 30 នាទី
+            usage = shutil.disk_usage(DATA_DIR)
+            pct = usage.used / usage.total * 100
+            today = datetime.datetime.now(_KH_TZ).strftime("%Y-%m-%d")
+            if pct >= 85 and disk_watch_cfg.get("last_alert_date") != today:
+                disk_watch_cfg["last_alert_date"] = today
+                _save(DISK_WATCH_FILE, disk_watch_cfg)
+                free_gb = usage.free / (1024**3)
+                txt = (f"⚠️ <b>Disk ជិតពេញ! ({pct:.0f}%)</b>\n"
+                       f"នៅសល់ត្រឹមតែ {free_gb:.2f} GB\n\n"
+                       f"👉 សូម Resize Disk ក្នុង Render Dashboard ជាបន្ទាន់ "
+                       f"(Disks → Resize) មុនពេល Data ខូច/បាត់ ដូចធ្លាប់កើត។")
+                bot.send_message(ADMIN_ID, txt, parse_mode="HTML")
+                if pct >= 95:
+                    buf, n = _build_backup_zip()
+                    if buf:
+                        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                        buf.name = f"kaijaklike_EMERGENCY_backup_{ts}.zip"
+                        bot.send_document(ADMIN_ID, buf,
+                            caption=f"🚨 <b>Emergency Backup</b> (Disk {pct:.0f}%) — {n} files")
+        except Exception as e:
+            logger.warning(f"⚠️ Disk watchdog error: {e}")
+
+# ═══════════════════════════════════════════════════════════
+#  AUTO DAILY BACKUP — ផ្ញើ Backup ទៅ Admin ស្វ័យប្រវត្តិរៀងរាល់ថ្ងៃ
+#  ដើម្បីកុំឲ្យ Recovery យឺត ដូចលើកមុនដែលគ្មាន Backup ថ្មីៗសល់ (.bak
+#  ដែល _save() ថ្មីរក្សាទុកជួយបានតែ ១ជំហានចុងក្រោយ មិនមែនប្រវត្តិវែងទេ)
+# ═══════════════════════════════════════════════════════════
+def _auto_backup_scheduler():
+    while True:
+        try:
+            time.sleep(60)
+            if not daily_report_cfg.get("enabled", True):
+                continue
+            now_kh = datetime.datetime.now(_KH_TZ)
+            today  = now_kh.strftime("%Y-%m-%d")
+            if now_kh.hour != 3 or disk_watch_cfg.get("last_backup_date") == today:
+                continue
+            disk_watch_cfg["last_backup_date"] = today
+            _save(DISK_WATCH_FILE, disk_watch_cfg)
+            buf, n = _build_backup_zip()
+            if buf:
+                buf.name = f"kaijaklike_auto_backup_{today}.zip"
+                bot.send_document(ADMIN_ID, buf,
+                    caption=f"🕒 <b>Auto Backup ប្រចាំថ្ងៃ</b> — {n} files — {today}")
+        except Exception as e:
+            logger.warning(f"⚠️ Auto-backup scheduler error: {e}")
+
+# ═══════════════════════════════════════════════════════════
 #  MAIN
 # ═══════════════════════════════════════════════════════════
 if __name__ == "__main__":
@@ -8016,6 +8153,8 @@ if __name__ == "__main__":
     threading.Thread(target=_self_ping, daemon=True).start()
     threading.Thread(target=_smm_order_watcher, daemon=True).start()
     threading.Thread(target=_daily_report_scheduler, daemon=True).start()
+    threading.Thread(target=_disk_watchdog, daemon=True).start()
+    threading.Thread(target=_auto_backup_scheduler, daemon=True).start()
     # ── Reconnect Order Bot / Payment Bot បើធ្លាប់ setup ទុករួច (persist ឆ្លងកាត់ restart) ──
     if notify_bots_cfg.get("order_token"):
         if _start_order_bot(notify_bots_cfg["order_token"]):
