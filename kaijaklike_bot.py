@@ -1,7 +1,7 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
 ║     Kaijaklike Bot — カイロゼン SMM  [v11]                ║
-║     SMM Panel · ដាក់លុយ CamRapidPay KHQR + ABA PayWay       ║
+║     SMM Panel · ដាក់លុយ KaiPay KHQR + ABA PayWay       ║
 ║     Panel Admin · បន្ថែម/កាត់ Balance                       ║
 ║     Compatible: Python 3.10+ · Termux / Render / VPS       ║
 ║     v10: /newbot — បង្កើត Bot ថ្មីដោយផ្ទាល់ខាងក្នុង Telegram  ║
@@ -275,10 +275,13 @@ DEP_QR_COOLDOWN_SEC = int(os.getenv("DEP_QR_COOLDOWN_SEC", "15"))
 _dep_qr_cooldown    = {}   # uid_str -> unix timestamp នៃ QR generation ចុងក្រោយ
 
 # ── CamRapidPay — Create KHQR + Check transaction ──
-CAMRAPID_API_KEY   = os.getenv("CAMRAPID_API_KEY", "")   # 👈 CamRapidPay API Key — កំណត់ជា Environment Variable ប៉ុណ្ណោះ
-CAMRAPID_CREATE    = "https://pay.camrapidpay.com/api/v1/khqr/create-payments"
-CAMRAPID_CHECK     = "https://pay.camrapidpay.com/check-transaction-api"
-WEBHOOK_URL        = os.getenv("WEBHOOK_URL", "")          # ដាក់ URL webhook (optional)
+# KaiPay (ជំនួស CamRapidPay) — set KAIPAY_URL + KAIPAY_API_KEY
+KAIPAY_URL         = (os.getenv("KAIPAY_URL") or "").rstrip("/")
+KAIPAY_API_KEY     = os.getenv("KAIPAY_API_KEY") or os.getenv("CAMRAPID_API_KEY", "")
+CAMRAPID_API_KEY   = KAIPAY_API_KEY  # alias for old settings UI
+CAMRAPID_CREATE    = (KAIPAY_URL + "/api/v1/payment/create") if KAIPAY_URL else "https://pay.camrapidpay.com/api/v1/khqr/create-payments"
+CAMRAPID_CHECK     = (KAIPAY_URL + "/api/v1/payment/check") if KAIPAY_URL else "https://pay.camrapidpay.com/check-transaction-api"
+WEBHOOK_URL        = os.getenv("WEBHOOK_URL", "")
 
 # ── ABA PayWay (តាម KHMER SYSTEM — khmer-system.com) — ជម្រើសទូទាត់ស្វ័យប្រវត្តិទី ២ ──
 # (v12: បន្ថែម ABA PayWay ស្របជាមួយ CamRapidPay ដែលមានស្រាប់ — មិនលុប/មិនប៉ះពាល់ CamRapidPay ទេ។
@@ -311,7 +314,8 @@ if not _CONTROL_KEY_ENV:
         "→ សូមកំណត់ CONTROL_KEY ជា env var នៅ Render ដើម្បីឲ្យ key ថេរ។", CONTROL_KEY)
 else:
     CONTROL_KEY = _CONTROL_KEY_ENV
-CONTROL_PORT       = int(os.getenv("CONTROL_PORT", "5056"))   # 👈 ប្តូរ port នេះបើដំណើរការ bot ច្រើនច្បាប់ក្នុងម៉ាស៊ីនតែមួយ (5056, 5057, 5058...)
+# Render sets PORT; prefer it, else CONTROL_PORT, else 5056
+CONTROL_PORT       = int(os.getenv("PORT") or os.getenv("CONTROL_PORT") or "5056")
 
 # ── Startup guard — ការពារកុំឲ្យ deploy ដោយគ្មាន credential សំខាន់ៗ ──────────
 if __name__ == "__main__" and not INSTANCE_NAME:
@@ -821,7 +825,7 @@ def _effective_aba_merchant():
     """Return runtime ABA PayWay (KHMER SYSTEM) Merchant ID if set, else fall back to env/default"""
     return aba_cfg.get("merchant_id") or ABA_MERCHANT_ID
 
-PAY_METHOD_LABELS = {"camrapid": "🔄 CamRapidPay KHQR", "aba": "💳 ABA PayWay"}
+PAY_METHOD_LABELS = {"camrapid": "🔄 KaiPay KHQR", "aba": "💳 ABA PayWay"}
 
 def is_pay_method_enabled(method):
     """True បើ admin មិនទាន់បិទវិធីទូទាត់នេះទេ (default = True បើមិនទាន់កំណត់អ្វីសោះ) — v13.
@@ -2582,47 +2586,89 @@ def _effective_webhook_url():
     return "https://example.com/webhook/camrapid"
 
 def _camrapid_create(uid, amount, reference):
-    """Create KHQR payment via CamRapidPay API — returns response dict or None"""
-    payload = {
-        "api_key":     _effective_camrapid_key(),
-        "amount":      round(float(amount), 2),
-        "reference":   reference,
-        "webhook_url": _effective_webhook_url(),
-    }
-
-    logger.info(f"[camrapid_create] uid={uid} ref={reference} amount={payload['amount']} "
-                f"webhook={payload['webhook_url']}")
-    try:
-        r = http.post(CAMRAPID_CREATE,
-                      json=payload,
-                      headers={"Content-Type": "application/json",
-                               "Accept": "application/json"},
-                      timeout=15)
-        logger.info(f"[camrapid_create] HTTP {r.status_code}")
-        data = r.json()
-        logger.info(f"[camrapid_create] resp={data}")
-        if data.get("success"):
-            return data   # keys: qr_code, payment_url, bill_number, amount, expires_in
-        logger.error(f"[camrapid_create] failed: {data}")
+    """Create KHQR via KaiPay API (legacy name kept). Returns normalized dict or None."""
+    key = _effective_camrapid_key()
+    if not key:
+        logger.error("[kaipay_create] missing KAIPAY_API_KEY")
         return None
+    payload = {
+        "key": key,
+        "amount": round(float(amount), 2),
+        "external_id": str(reference),
+        "description": f"TG{uid}",
+    }
+    cb = _effective_webhook_url()
+    if cb and "example.com" not in cb:
+        payload["callback_url"] = cb
+    logger.info(f"[kaipay_create] uid={uid} ref={reference} amount={payload['amount']} url={CAMRAPID_CREATE}")
+    try:
+        r = http.post(
+            CAMRAPID_CREATE,
+            json=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "X-API-Key": key,
+            },
+            timeout=20,
+        )
+        logger.info(f"[kaipay_create] HTTP {r.status_code}")
+        data = r.json()
+        logger.info(f"[kaipay_create] resp={data}")
+        if not isinstance(data, dict) or data.get("success") is False:
+            logger.error(f"[kaipay_create] failed: {data}")
+            return None
+        if data.get("error") and not data.get("payment_id"):
+            logger.error(f"[kaipay_create] error: {data}")
+            return None
+        qr_string = data.get("qr_string") or data.get("qr_code") or ""
+        payment_id = data.get("payment_id") or data.get("id")
+        # Normalize to CamRapid-like keys used by deposit flow
+        return {
+            "success": True,
+            "qr_code": qr_string,
+            "qr_string": qr_string,
+            "qr_image": data.get("qr_image") or "",
+            "payment_url": data.get("payment_url") or "",
+            "payment_id": payment_id,
+            "bill_number": data.get("reference") or (f"KP{payment_id}" if payment_id else reference),
+            "amount": data.get("amount", amount),
+            "demo": bool(data.get("demo")),
+        }
     except Exception as e:
-        logger.error(f"[camrapid_create] exception: {e}")
+        logger.error(f"[kaipay_create] exception: {e}")
         return None
 
 def _camrapid_check(reference) -> bool:
-    """Check payment status via CamRapidPay API — returns True if paid"""
+    """Check payment via KaiPay API — reference = payment_id or external_id."""
+    key = _effective_camrapid_key()
+    if not key:
+        return False
+    ref = str(reference)
+    payload = {"key": key}
+    if ref.startswith("KP"):
+        payload["payment_id"] = ref[2:]
+    else:
+        payload["payment_id"] = ref
     try:
-        r = http.get(
+        r = http.post(
             CAMRAPID_CHECK,
-            params={"api_key": _effective_camrapid_key(), "reference": reference},
-            headers={"Accept": "application/json"},
-            timeout=10,
+            json=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "X-API-Key": key,
+            },
+            timeout=15,
         )
         data = r.json()
-        logger.info(f"[camrapid_check] ref={reference} resp={data}")
-        return data.get("success") and data.get("status") in ("Success", "success", "PAID", "paid")
+        logger.info(f"[kaipay_check] ref={reference} resp={data}")
+        if not isinstance(data, dict):
+            return False
+        st = str(data.get("status") or "").lower()
+        return st in ("paid", "success")
     except Exception as e:
-        logger.error(f"[camrapid_check] {e}")
+        logger.error(f"[kaipay_check] {e}")
         return False
 
 # ═══════════════════════════════════════════════════════════
@@ -2907,7 +2953,7 @@ def _send_deposit_qr(uid, amount, promo_code=None, label="💸 ដាក់ល�
                                     parse_mode="HTML")
     except Exception as _e: logger.debug(f"[silent] {_e}")
 
-    # Call CamRapidPay API to create KHQR
+    # Call KaiPay API to create KHQR
     resp = _camrapid_create(uid, amount, reference)
     if not resp:
         if _gen_msg:
@@ -2917,8 +2963,11 @@ def _send_deposit_qr(uid, amount, promo_code=None, label="💸 ដាក់ល�
                          parse_mode="HTML")
         return
 
-    qr_str      = resp.get("qr_code", "")
+    qr_str      = resp.get("qr_string") or resp.get("qr_code") or ""
     payment_url = resp.get("payment_url", "")
+    pay_id      = resp.get("payment_id")
+    # KaiPay check uses payment_id
+    check_ref   = str(pay_id) if pay_id is not None else reference
 
     dep_id = f"dep_{uid}_{int(time.time())}"
     smm_deps[dep_id] = {
@@ -2929,9 +2978,13 @@ def _send_deposit_qr(uid, amount, promo_code=None, label="💸 ដាក់ល�
         "promo_bonus": promo_bonus,
         "auto_bonus":  auto_bonus,
         "promo":       promo_applied or "",
-        "reference":   reference,
+        "reference":   check_ref,
+        "external_id": reference,
+        "payment_id":  pay_id,
         "payment_url": payment_url,
+        "qr_image":    resp.get("qr_image") or "",
         "created_ts":  time.time(),
+        "provider":    "kaipay",
     }
     _save(SMM_DEP_FILE, smm_deps)
 
@@ -3148,7 +3201,7 @@ def _process_deposit(uid, uid_str, amount, promo_code=None, method=None):
             _pending_dep_choice[uid] = {"amount": amount, "promo_code": promo_code}
             lang = get_lang(uid)
             kb = InlineKeyboardMarkup()
-            kb.add(InlineKeyboardButton("🔄 CamRapidPay KHQR", callback_data="depm:camrapid", color="active"))
+            kb.add(InlineKeyboardButton("🔄 KaiPay KHQR", callback_data="depm:camrapid", color="active"))
             kb.add(InlineKeyboardButton("💳 ABA PayWay", callback_data="depm:aba", color="primary"))
             bot.send_message(uid,
                 f"💳 <b>{'ជ្រើសរើសវិធីទូទាត់' if lang=='kh' else 'Choose payment method'}</b> — ${amount:.2f}",
@@ -3299,7 +3352,7 @@ def admin_kb():
         kb.row("━━━ ⚙️ Settings ━━━")
         kb.row(KeyboardButton("✏️ កែ Support",      color="progress"),
                KeyboardButton("👥 Sub Admins",      color="progress"))
-        kb.row(KeyboardButton("🔑 CamRapidPay Key", color="progress"),
+        kb.row(KeyboardButton("🔑 KaiPay API Key", color="progress"),
                KeyboardButton("💳 ABA PayWay Key", color="progress"))
         kb.row(KeyboardButton("🔀 វិធីទូទាត់", color="progress"),
                KeyboardButton("🏦 Bakong Deep Link", color="progress"))
@@ -5003,7 +5056,7 @@ def _clone_pay_txt(pay_method):
         return "🖼 Manual QR (Step 2)"
     if pay_method == "aba":
         return "🏦 ABA PayWay Auto (Step 3)"
-    return "🔄 CamRapidPay Auto (Step 1)"
+    return "🔄 KaiPay Auto (Step 1)"
 
 _STEP_EMOJI = ["0️⃣","1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣"]
 def _step_label(n, total=None):
@@ -5025,7 +5078,7 @@ def cb_newbot_paymethod(call):
     bot.answer_callback_query(call.id)
     if method == "auto":
         waiting[uid] = {**step, "step": "newbot_key", "pay_method": "auto"}
-        bot.send_message(uid, f"{_step_label(5, 6)} — វាយ <b>CamRapidPay API Key</b> សម្រាប់ bot នេះ:",
+        bot.send_message(uid, f"{_step_label(5, 6)} — វាយ <b>KaiPay API Key</b> សម្រាប់ bot នេះ:",
                           parse_mode="HTML", reply_markup=cancel_kb())
     elif method == "aba":
         waiting[uid] = {**step, "step": "newbot_aba_key", "pay_method": "aba", "camrapid_key": ""}
@@ -5081,13 +5134,13 @@ def cb_cln_pay(call):
         bot.answer_callback_query(call.id, "រកមិនឃើញ"); return
     bot.answer_callback_query(call.id)
     kb = InlineKeyboardMarkup(row_width=1)
-    kb.add(InlineKeyboardButton("1️⃣ Step 1 — CamRapidPay QR ស្វ័យប្រវត្តិ", callback_data=f"cln_paysel|auto|{name}", color="active"))
+    kb.add(InlineKeyboardButton("1️⃣ Step 1 — KaiPay QR ស្វ័យប្រវត្តិ", callback_data=f"cln_paysel|auto|{name}", color="active"))
     kb.add(InlineKeyboardButton("3️⃣ Step 3 — ABA PayWay ស្វ័យប្រវត្តិ", callback_data=f"cln_paysel|aba|{name}", color="active"))
     kb.add(InlineKeyboardButton("2️⃣ Step 2 — QR ដាក់ដោយដៃ (Manual)", callback_data=f"cln_paysel|manual|{name}", color="progress"))
     kb.add(InlineKeyboardButton("⬅️ ត្រឡប់", callback_data=f"cln_view|{name}", color="inactive"))
     bot.send_message(uid,
         f"🔁 <b>ប្តូរ Step ទូទាត់ — {name}</b>\n\n"
-        "1️⃣ <b>Step 1</b> — CamRapidPay API Key → QR ស្វ័យប្រវត្តិ\n"
+        "1️⃣ <b>Step 1</b> — KaiPay API Key → QR ស្វ័យប្រវត្តិ\n"
         "3️⃣ <b>Step 3</b> — ABA PayWay Profile Key + Merchant ID → QR ស្វ័យប្រវត្តិ\n"
         "2️⃣ <b>Step 2</b> — Upload រូប QR ដាក់ដោយដៃ",
         parse_mode="HTML", reply_markup=kb)
@@ -5103,7 +5156,7 @@ def cb_cln_paysel(call):
     bot.answer_callback_query(call.id)
     if method == "auto":
         waiting[uid] = {"step": "cln_pay_key", "clone": name}
-        bot.send_message(uid, f"វាយ <b>CamRapidPay API Key</b> ថ្មីសម្រាប់ '{name}':",
+        bot.send_message(uid, f"វាយ <b>KaiPay API Key</b> ថ្មីសម្រាប់ '{name}':",
                           parse_mode="HTML", reply_markup=cancel_kb())
     elif method == "aba":
         waiting[uid] = {"step": "cln_pay_aba_key", "clone": name}
@@ -5485,7 +5538,7 @@ def cb_set_camrapid(call):
     if action == "edit":
         waiting[uid] = "set_camrapid_key"
         bot.send_message(uid,
-            "🔑 <b>ផ្ញើ CamRapidPay API Key ថ្មី:</b>\n"
+            "🔑 <b>ផ្ញើ KaiPay API Key ថ្មី:</b>\n"
             "ឬផ្ញើ <code>-</code> ដើម្បី reset ទៅ env/default",
             parse_mode="HTML", reply_markup=cancel_kb())
     elif action == "webhook":
@@ -5505,7 +5558,7 @@ def cb_set_camrapid(call):
             d = r.json()
             ok = r.status_code < 500
             bot.send_message(uid,
-                f"{'✅' if ok else '❌'} <b>CamRapidPay Test (Check Endpoint)</b>\n"
+                f"{'✅' if ok else '❌'} <b>KaiPay Test (Check)</b>\n"
                 f"Status: <b>{r.status_code}</b>\n"
                 f"Response: <code>{str(d)[:200]}</code>\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
@@ -5519,20 +5572,19 @@ def cb_set_camrapid(call):
     elif action == "testcreate":
         key = _effective_camrapid_key()
         test_ref = f"TEST{uid}_{int(time.time())}"[:50]
-        bot.send_message(uid, "⏳ កំពុង Test ការ Generate QR ជាមួយ CAMRAPID_CREATE endpoint ($0.10)...")
+        bot.send_message(uid, "⏳ កំពុង Test ការ Generate QR ជាមួយ KaiPay endpoint ($0.10)...")
         try:
-            payload = {"api_key": key, "amount": 0.10, "reference": test_ref,
-                       "webhook_url": _effective_webhook_url()}
+            payload = {"key": key, "amount": 0.10, "external_id": test_ref}
             r = http.post(CAMRAPID_CREATE, json=payload,
-                          headers={"Content-Type": "application/json", "Accept": "application/json"},
-                          timeout=15)
+                          headers={"Content-Type": "application/json", "Accept": "application/json", "X-API-Key": key},
+                          timeout=20)
             try:
                 d = r.json()
             except Exception:
                 d = {"raw_text": r.text[:300]}
             ok = isinstance(d, dict) and d.get("success")
             bot.send_message(uid,
-                f"{'✅' if ok else '❌'} <b>CamRapidPay Test (Create Endpoint — QR ពិតប្រាកដ)</b>\n"
+                f"{'✅' if ok else '❌'} <b>KaiPay Test (Create QR)</b>\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"🌐 URL: <code>{CAMRAPID_CREATE}</code>\n"
                 f"🔑 Key: <code>{key[:8]}...{key[-4:] if len(key)>12 else ''}</code>\n"
@@ -6167,12 +6219,12 @@ def handle_msg(message):
                 bot.send_message(uid, "⚠️ សូមផ្ញើជាលេខតែប៉ុណ្ណោះ:", reply_markup=cancel_kb()); return
             waiting[uid] = {**step, "step": "newbot_paymethod", "new_admin_id": int(text.strip())}
             kb = InlineKeyboardMarkup(row_width=1)
-            kb.add(InlineKeyboardButton("🔄 CamRapidPay QR ស្វ័យប្រវត្តិ (7 ជំហាន)", callback_data="newbot_pay|auto", color="active"))
+            kb.add(InlineKeyboardButton("🔄 KaiPay QR ស្វ័យប្រវត្តិ (7 ជំហាន)", callback_data="newbot_pay|auto", color="active"))
             kb.add(InlineKeyboardButton("🏦 ABA PayWay ស្វ័យប្រវត្តិ (8 ជំហាន)", callback_data="newbot_pay|aba", color="active"))
             kb.add(InlineKeyboardButton("🖼 QR ដាក់ដោយដៃ Manual (8 ជំហាន)", callback_data="newbot_pay|manual", color="progress"))
             bot.send_message(uid,
                 f"{_step_label(4)} — ជ្រើសរើស <b>របៀបទទួលទឹក</b> សម្រាប់ bot នេះ:\n\n"
-                "🔄 <b>CamRapidPay Auto</b> — ប្រើ API Key បង្កើត QR ស្វ័យប្រវត្តិ (ត្រូវការ API Key) — សរុប 7 ជំហាន\n"
+                "🔄 <b>KaiPay Auto</b> — ប្រើ API Key បង្កើត QR ស្វ័យប្រវត្តិ (ត្រូវការ API Key) — សរុប 7 ជំហាន\n"
                 "🏦 <b>ABA PayWay Auto</b> — ប្រើ Profile Key + Merchant ID (KHMER SYSTEM) បង្កើត QR ស្វ័យប្រវត្តិ — សរុប 8 ជំហាន\n"
                 "🖼 <b>Manual QR</b> — Upload រូប QR (Bakong KHQR) ដាក់ដោយដៃ គ្មានត្រូវការ API Key — សរុប 8 ជំហាន",
                 parse_mode="HTML", reply_markup=kb)
@@ -7296,7 +7348,7 @@ def handle_msg(message):
                 lines.append("(គ្មាន Sub Admin ទេ)")
             bot.send_message(uid, "\n".join(lines), parse_mode="HTML", reply_markup=kb2); return
 
-        if text == "🔑 CamRapidPay Key":
+        if text == "🔑 KaiPay API Key":
             if uid != ADMIN_ID:
                 bot.send_message(uid, "🚫 Master Admin only!", reply_markup=sub_admin_kb()); return
             cur = _effective_camrapid_key()
@@ -7312,7 +7364,7 @@ def handle_msg(message):
             kb2.add(InlineKeyboardButton("🧪 Test Key (Check Endpoint)", callback_data="set_camrapid:test", color="active"))
             kb2.add(InlineKeyboardButton("🧾 Test Generate QR (Create Endpoint)", callback_data="set_camrapid:testcreate", color="active"))
             bot.send_message(uid,
-                f"🔑 <b>CamRapidPay API Key</b>\n"
+                f"🔑 <b>KaiPay API Key</b>\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"Key: <code>{masked}</code>\n"
                 f"Source: {'📁 runtime' if camrapid_cfg.get('key') else '⚙️ env/default'}\n"
