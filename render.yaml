@@ -1,52 +1,71 @@
-# render.yaml — Blueprint សម្រាប់ deploy Kaijaklike Bot (CamRapidPay + ABA PayWay) លើ Render
-# របៀបប្រើ: Push ជាមួយ bot.py (ប្តូរឈ្មោះជា bot.py ឬកែ startCommand ខាងក្រោមឲ្យត្រូវ)
-# ព្រមទាំង requirements.txt ទៅ Git repo ដូចគ្នា ➜ Render Dashboard → New → Blueprint → ជ្រើស repo នេះ។
-#
-# ⚠️ Persistent Disk (DATA_DIR=/var/data) ត្រូវការ Plan បង់ប្រាក់ (starter ឡើងទៅ) —
-#    Render Free Plan មិន support disk ទេ។ បើប្រើ Free Plan សូមដក "disk:" ខាងក្រោមចេញ
-#    (code នឹង fallback ទៅ DATA_DIR="." ស្វ័យប្រវត្តិ ប៉ុន្តែទិន្នន័យនឹងបាត់ពេល redeploy)។
+# KaiJakLike Bot + KaiPay — Render Blueprint
+# Dashboard: New → Blueprint → connect repo containing this file
+# Or paste services manually.
 
 services:
+  # ── 1) KaiJakLike Telegram Bot ───────────────────────────
   - type: web
     name: kaijaklike-bot
     runtime: python
-    plan: starter          # 👈 ប្តូរជា "free" បាន ប៉ុន្តែត្រូវដក "disk:" ចេញ (មិន persist data)
-    region: singapore       # 👈 ប្តូរជា oregon / frankfurt / ohio / virginia តាមចង់បាន
-    branch: main
-    buildCommand: pip install -r requirements.txt --break-system-packages || pip install -r requirements.txt
-    startCommand: python3 bot.py
+    plan: free
+    region: singapore
+    buildCommand: pip install -r requirements-bot.txt
+    startCommand: python kaijaklike_bot.py
     healthCheckPath: /health
-    autoDeployTrigger: commit
     envVars:
-      - key: BOT_TOKEN            # 👈 Token ពី @BotFather — ចាំបាច់
+      - key: BOT_TOKEN
         sync: false
-      - key: ADMIN_ID              # 👈 Telegram ID របស់ Master Admin — ចាំបាច់
+      - key: ADMIN_ID
         sync: false
-      - key: CONTROL_KEY           # 👈 សម្ងាត់ការពារ /shutdown /restart /broadcast_web
+      - key: KAIPAY_URL
+        sync: false
+      - key: KAIPAY_API_KEY
+        sync: false
+      - key: CONTROL_KEY
         generateValue: true
-      - key: CONTROL_PORT          # ត្រូវតែស្មើ Port ដែល Render route ចូល (default 10000)
-        value: "10000"
-      - key: DATA_DIR
-        value: /var/data
-      # ── CamRapidPay (ជម្រើសទូទាត់ទី ១) ──
-      - key: CAMRAPID_API_KEY
-        sync: false
-      - key: WEBHOOK_URL           # ស្រេចចិត្ត — បើទទេ Bot auto-build ពី RENDER_EXTERNAL_URL
-        sync: false
-      # ── ABA PayWay តាម KHMER SYSTEM (ជម្រើសទូទាត់ទី ២) ──
+      - key: BOT_DISPLAY_NAME
+        value: KaiJakLike
+      - key: DEP_QR_COOLDOWN_SEC
+        value: "15"
+      # Optional ABA PayWay (KHMER SYSTEM)
       - key: ABA_API_KEY
         sync: false
       - key: ABA_MERCHANT_ID
         sync: false
-      # ── Bakong Deep Link (ស្រេចចិត្ត — បើក App ធនាគារស្វ័យប្រវត្តិក្រោម QR) ──
+      # Optional Bakong deep link
       - key: BAKONG_API_TOKEN
         sync: false
-      # ── ស្រេចចិត្តផ្សេងទៀត ──
-      - key: BOT_DISPLAY_NAME
+      - key: PYTHON_VERSION
+        value: "3.11.0"
+
+  # ── 2) KaiPay (payment API website) ──────────────────────
+  - type: web
+    name: kaipay
+    runtime: python
+    plan: free
+    region: singapore
+    rootDir: kaipay
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    healthCheckPath: /health
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: BAKONG_TOKEN
         sync: false
-      - key: BOT_WELCOME_MSG
+      - key: BAKONG_ACCOUNT_ID
         sync: false
-    disk:
-      name: kaijaklike-data
-      mountPath: /var/data
-      sizeGB: 1
+      - key: BAKONG_MERCHANT_NAME
+        value: KaiPay
+      - key: BAKONG_MERCHANT_CITY
+        value: Phnom Penh
+      - key: BAKONG_CURRENCY
+        value: USD
+      - key: QR_PER_USD
+        value: "300"
+      - key: MIN_TOPUP_USD
+        value: "1"
+      - key: FREE_QR_ON_SIGNUP
+        value: "0"
+      - key: PYTHON_VERSION
+        value: "3.11.0"
