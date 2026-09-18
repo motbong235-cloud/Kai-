@@ -1511,6 +1511,8 @@ def cb_dreport(call):
         logger.debug(f"[silent] {_e}")
 
 
+@bot.message_handler(commands=["dailyreport"])
+def cmd_dailyreport(message):
     """/dailyreport on|off|<hour 0-23> — គ្រប់គ្រង Auto Daily Report"""
     if message.from_user.id != ADMIN_ID:
         return
@@ -1541,6 +1543,7 @@ def cb_dreport(call):
         bot.reply_to(message, "❌ ប្រើ: /dailyreport on | off | <ម៉ោង 0-23>")
 
 
+@bot.message_handler(commands=["top"])
 def cmd_top(message):
     if message.from_user.id != ADMIN_ID:
         return
@@ -3309,7 +3312,8 @@ def admin_kb():
                KeyboardButton("💳 ABA PayWay Key", color="progress"))
         kb.row(KeyboardButton("🔀 វិធីទូទាត់", color="progress"),
                KeyboardButton("🏦 Bakong Deep Link", color="progress"))
-        kb.row(KeyboardButton("⏳ QR Cooldown", color="progress"))
+        kb.row(KeyboardButton("⏳ QR Cooldown", color="progress"),
+               KeyboardButton("📢 Force Subscribe", color="progress"))
         kb.row(KeyboardButton("📝 Welcome Msg",     color="progress"),
                KeyboardButton("😊 កំណត់ Emoji", color="progress"))
     return kb
@@ -3791,6 +3795,11 @@ def cmd_start(message):
             f"━━━━━━━━━━━━━━━━━━",
             parse_mode="HTML", reply_markup=sub_admin_kb())
         return
+    # ── Force-Subscribe gate (User ធម្មតាតែប៉ុណ្ណោះ) ──
+    if not _is_channel_member(uid):
+        bot.send_message(uid, _force_sub_gate_text(), parse_mode="HTML",
+                         reply_markup=_force_sub_kb())
+        return
     if str(uid) not in user_lang:
         bot.send_message(uid,
             "សួស្តី! 👋 ជ្រើសភាសាដែលអ្នកចូលចិត្តសិន\n"
@@ -3911,6 +3920,36 @@ def _force_sub_gate_text():
             "ដើម្បីការពារ User ក្លែងក្លាយ និងទទួលព័ត៌មានថ្មីៗ សូម Join Channel ខាងក្រោម "
             "រួចចុច ✅ ខ្ញុំចូលរួចហើយ")
 
+
+def _force_sub_status_text():
+    on = force_sub_cfg.get("enabled", False)
+    ch = force_sub_cfg.get("channel_id") or "(មិនទាន់កំណត់)"
+    link = force_sub_cfg.get("channel_link") or "(មិនទាន់កំណត់)"
+    return (
+        f"📢 <b>Force Subscribe</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"ស្ថានភាព: <b>{'🟢 បើក' if on else '🔴 បិទ'}</b>\n"
+        f"Channel ID: <code>{ch}</code>\n"
+        f"Link: <code>{link}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"👉 បើបើក — User ធម្មតាត្រូវ Join Channel មុននឹងប្រើ Bot បាន\n"
+        f"(Admin / Sub-admin មិនប៉ះពាល់)\n\n"
+        f"💡 Bot ត្រូវជា <b>Admin</b> នៃ Channel នោះ ដើម្បីពិនិត្យសមាជិកភាពបាន។"
+    )
+
+def _force_sub_admin_kb():
+    on = force_sub_cfg.get("enabled", False)
+    kb = InlineKeyboardMarkup()
+    kb.row(
+        InlineKeyboardButton("🟢 បើក" + (" ✅" if on else ""), callback_data="fsubcfg:on",
+                             color=("success" if on else "active")),
+        InlineKeyboardButton("🔴 បិទ" + (" ✅" if not on else ""), callback_data="fsubcfg:off",
+                             color=("danger" if not on else "active")),
+    )
+    kb.add(InlineKeyboardButton("✏️ កំណត់ Channel ID", callback_data="fsubcfg:setid", color="progress"))
+    kb.add(InlineKeyboardButton("🔗 កំណត់ Channel Link", callback_data="fsubcfg:setlink", color="progress"))
+    return kb
+
 @bot.callback_query_handler(func=lambda c: c.data == "fsub:check")
 def cb_fsub_check(call):
     uid = call.message.chat.id
@@ -3929,6 +3968,45 @@ def cb_fsub_check(call):
             _show_welcome(uid)
     else:
         bot.answer_callback_query(call.id, "❌ អ្នកមិនទាន់ចូល Channel ទេ! សូម Join រួចចុចម្តងទៀត។", show_alert=True)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("fsubcfg:"))
+def cb_fsubcfg(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID:
+        bot.answer_callback_query(call.id); return
+    action = call.data.split(":", 1)[1]
+    if action == "on":
+        force_sub_cfg["enabled"] = True
+        _save(FORCE_SUB_FILE, force_sub_cfg)
+        bot.answer_callback_query(call.id, "✅ បើក Force Subscribe")
+    elif action == "off":
+        force_sub_cfg["enabled"] = False
+        _save(FORCE_SUB_FILE, force_sub_cfg)
+        bot.answer_callback_query(call.id, "🔴 បិទ Force Subscribe")
+    elif action == "setid":
+        bot.answer_callback_query(call.id)
+        waiting[uid] = "await_fsub_channel_id"
+        bot.send_message(uid,
+            "📢 ផ្ញើ <b>Channel ID</b>\n"
+            "ឧ: <code>-1001234567890</code>\n"
+            "💡 Bot ត្រូវជា Admin នៃ Channel នោះ!",
+            parse_mode="HTML", reply_markup=cancel_kb())
+        return
+    elif action == "setlink":
+        bot.answer_callback_query(call.id)
+        waiting[uid] = "await_fsub_channel_link"
+        bot.send_message(uid,
+            "🔗 ផ្ញើ <b>Channel Link</b>\n"
+            "ឧ: <code>https://t.me/yourchannel</code>",
+            parse_mode="HTML", reply_markup=cancel_kb())
+        return
+    try:
+        bot.edit_message_text(_force_sub_status_text(),
+            chat_id=uid, message_id=call.message.message_id,
+            parse_mode="HTML", reply_markup=_force_sub_admin_kb())
+    except Exception as _e:
+        logger.debug(f"[silent] {_e}")
+
 
 def _save_welcome_photo(file_id):
     welcome_cfg["photo_id"] = file_id
@@ -6052,6 +6130,12 @@ def handle_msg(message):
     if is_banned(uid) and uid != ADMIN_ID:
         bot.send_message(uid, t(uid, "banned")); return
 
+    # ── Force-Subscribe gate — User ធម្មតាត្រូវ Join Channel មុនប្រើ Bot ──
+    if uid != ADMIN_ID and uid not in sub_admins and not _is_channel_member(uid):
+        bot.send_message(uid, _force_sub_gate_text(), parse_mode="HTML",
+                         reply_markup=_force_sub_kb())
+        return
+
     # ── Cancel ──
     if text == "✕ Cancel":
         waiting.pop(uid, None)
@@ -7087,6 +7171,12 @@ def handle_msg(message):
             bot.send_message(uid, _user_discount_admin_text(), parse_mode="HTML",
                              reply_markup=_user_discount_admin_kb()); return
 
+        if text == "📢 Force Subscribe":
+            if uid != ADMIN_ID:
+                bot.send_message(uid, "🚫 Master Admin only!", reply_markup=sub_admin_kb()); return
+            bot.send_message(uid, _force_sub_status_text(), parse_mode="HTML",
+                             reply_markup=_force_sub_admin_kb()); return
+
         if text == "⏳ QR Cooldown":
             btns = InlineKeyboardMarkup()
             btns.add(InlineKeyboardButton("✏️ កែ Cooldown (វិនាទី)", callback_data="qrcd:edit", color="progress"))
@@ -7544,6 +7634,33 @@ def handle_msg(message):
                 _save(ABA_CFG_FILE, aba_cfg)
                 bot.send_message(uid, f"✅ ABA PayWay Merchant ID ថ្មីបានរក្សា!\n🏪 <code>{text.strip()}</code>",
                                  parse_mode="HTML", reply_markup=admin_kb())
+            return
+
+        if step == "await_fsub_channel_id":
+            waiting.pop(uid, None)
+            val = text.strip()
+            if not val:
+                bot.send_message(uid, "❌ Channel ID ទទេ!", reply_markup=admin_kb()); return
+            force_sub_cfg["channel_id"] = val
+            _save(FORCE_SUB_FILE, force_sub_cfg)
+            bot.send_message(uid,
+                f"✅ Channel ID បានរក្សា: <code>{val}</code>",
+                parse_mode="HTML", reply_markup=admin_kb())
+            return
+
+        if step == "await_fsub_channel_link":
+            waiting.pop(uid, None)
+            val = text.strip()
+            if not (val.startswith("http://") or val.startswith("https://") or val.startswith("t.me/")):
+                bot.send_message(uid, "❌ Link មិនត្រឹមត្រូវ! ឧ: https://t.me/yourchannel",
+                                 reply_markup=admin_kb()); return
+            if val.startswith("t.me/"):
+                val = "https://" + val
+            force_sub_cfg["channel_link"] = val
+            _save(FORCE_SUB_FILE, force_sub_cfg)
+            bot.send_message(uid,
+                f"✅ Channel Link បានរក្សា: <code>{val}</code>",
+                parse_mode="HTML", reply_markup=admin_kb())
             return
 
         if step == "set_webhook_url":
