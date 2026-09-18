@@ -100,7 +100,7 @@ _EMOJI_CHAR_LIST = [
     # ដែលប្រើក្នុង UI ប៉ុន្តែមិនទាន់ស្ថិតក្នុងបញ្ជី (មិនអាចកំណត់ Premium Emoji):
     # 🏷️ (បញ្ចុះតម្លៃ User), 🕒 (Auto Backup), និង keycap 0️⃣–9️⃣ (ជំហាន wizard /
     # how-to / payment steps)។
-    '🏷️', '🕒',
+    '🏷️', '🕒', '🆕',
     '0️⃣', '1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣',
 ]
 EMOJI_MAP = {ch: None for ch in _EMOJI_CHAR_LIST}
@@ -3531,12 +3531,18 @@ def _track_user(message):
     u = message.from_user
     is_new = uid_str not in users_db
     prev = users_db.get(uid_str, {})
+    # joined: កំណត់តែពេល User ថ្មីពិតប្រាកដ — User ចាស់ដែលមិនទាន់មាន field
+    # នេះ (data មុន update) មិនត្រូវទទួល timestamp "ឥឡូវ" ទេ បើមិនដូច្នេះ
+    # ស្ថិតិ "User ថ្មី 1 ខែ" នឹងហួសកំណត់ខុសឆ្គង។
+    joined_ts = prev.get("joined")
+    if is_new:
+        joined_ts = int(time.time())
     users_db[uid_str] = {
         "name":     u.first_name or "",
         "username": u.username or "",
         "last":     int(time.time()),
         "banned":   prev.get("banned", False),
-        "joined":   prev.get("joined", int(time.time())),
+        "joined":   joined_ts,
     }
     _save(USERS_FILE, users_db)
     wallets.setdefault(uid_str, 0.0)
@@ -7192,14 +7198,31 @@ def handle_msg(message):
             total_orders = len(smm_orders)
             total_users  = len(users_db)
             total_rev    = sum(float(o.get("price") or 0) for o in smm_orders.values())
+            now_ts = int(time.time())
+            # User ថ្មី — គិតតែអ្នកដែលមាន field "joined" (កំណត់ពេលចូលលើកដំបូង)
+            def _count_new(days):
+                cutoff = now_ts - days * 86400
+                return sum(1 for u in users_db.values()
+                           if u.get("joined") and int(u["joined"]) >= cutoff)
+            new_today = _count_new(1)
+            new_7d    = _count_new(7)
+            new_30d   = _count_new(30)
+            _kb = admin_kb() if uid == ADMIN_ID else sub_admin_kb()
             bot.send_message(uid,
                 f"📊 <b>ស្ថិតិ</b>\n━━━━━━━━━━━━━━━━━━\n"
-                f"👥 អ្នកប្រើ: <b>{total_users}</b>\n"
+                f"👥 អ្នកប្រើសរុប: <b>{total_users}</b>\n"
+                f"🆕 User ថ្មី (ថ្ងៃនេះ): <b>{new_today}</b>\n"
+                f"🆕 User ថ្មី (7 ថ្ងៃ): <b>{new_7d}</b>\n"
+                f"🆕 User ថ្មី (1 ខែ): <b>{new_30d}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
                 f"📊 SMM Orders: <b>{total_orders}</b>\n"
                 f"💰 ចំណូលសរុប: <b>${total_rev:.2f}</b>\n"
                 f"📋 Services: <b>{len(smm_services)}</b>\n"
-                f"🎟️ Promos: <b>{len(promos)}</b>",
-                parse_mode="HTML", reply_markup=admin_kb()); return
+                f"🎟️ Promos: <b>{len(promos)}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"<i>💡 User ថ្មី = អ្នកដែល /start លើកដំបូងបន្ទាប់ពី update នេះ "
+                f"(User ចាស់មុន update មិនគិតក្នុងចំនួននេះ)</i>",
+                parse_mode="HTML", reply_markup=_kb); return
 
         if text == "📢 ផ្សព្វផ្សាយ":
             waiting[uid] = "broadcast_msg"
