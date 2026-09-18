@@ -96,6 +96,12 @@ _EMOJI_CHAR_LIST = [
     # មិនអាចផ្តល់ជម្រើសកំណត់បាន ⇒ _emojify() រំលងវាជានិច្ច)។
     '⭕', '🎬', '🏪', '👉', '📅', '📆', '📡', '📥', '🔎', '🔒',
     '🔘', '🔧', '🕑', '👁', '🗓️', '🚨', '🥇', '🥈', '🥉', '✓', '⬜',
+    # ⚠️ បន្ថែម 2026-09-18 — ស្កេនប៊ូតុង/សារទាំងអស់ម្តងទៀត រកឃើញ emoji
+    # ដែលប្រើក្នុង UI ប៉ុន្តែមិនទាន់ស្ថិតក្នុងបញ្ជី (មិនអាចកំណត់ Premium Emoji):
+    # 🏷️ (បញ្ចុះតម្លៃ User), 🕒 (Auto Backup), និង keycap 0️⃣–9️⃣ (ជំហាន wizard /
+    # how-to / payment steps)។
+    '🏷️', '🕒',
+    '0️⃣', '1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣',
 ]
 EMOJI_MAP = {ch: None for ch in _EMOJI_CHAR_LIST}
 # ធ្វើ regex pattern មួយសម្រាប់ចាប់ emoji នៅដើម string (រួមទាំង variation
@@ -3519,17 +3525,37 @@ def smm_qty_kb(slug, s, uid=None):
 #  USER TRACKING
 # ═══════════════════════════════════════════════════════════
 def _track_user(message):
+    """តាមដាន User — បើ User ថ្មី (មិនទាន់មានក្នុង users_db) ជូនដំណឹង Admin ភ្លាមៗ។"""
     uid = message.chat.id
     uid_str = str(uid)
     u = message.from_user
+    is_new = uid_str not in users_db
+    prev = users_db.get(uid_str, {})
     users_db[uid_str] = {
         "name":     u.first_name or "",
         "username": u.username or "",
         "last":     int(time.time()),
-        "banned":   users_db.get(uid_str, {}).get("banned", False),
+        "banned":   prev.get("banned", False),
+        "joined":   prev.get("joined", int(time.time())),
     }
     _save(USERS_FILE, users_db)
     wallets.setdefault(uid_str, 0.0)
+    # ── ជូនដំណឹង Admin ពេល User ថ្មីចូលប្រើ Bot (មិនជូន Admin/Sub-admin ខ្លួនឯង) ──
+    if is_new and uid != ADMIN_ID and uid not in sub_admins:
+        try:
+            name = (u.first_name or "").strip() or "?"
+            uname = f"@{u.username}" if u.username else "—"
+            total = len(users_db)
+            bot.send_message(ADMIN_ID,
+                f"👋 <b>User ថ្មីចូលប្រើ Bot!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🙍 ឈ្មោះ: <b>{name}</b>\n"
+                f"🔗 Username: {uname}\n"
+                f"🆔 ID: <code>{uid_str}</code>\n"
+                f"👥 សរុប Users: <b>{total}</b>",
+                parse_mode="HTML")
+        except Exception as e:
+            logger.warning(f"[new_user notify] failed: {e}")
 
 def is_banned(uid):
     return bool(users_db.get(str(uid), {}).get("banned", False))
