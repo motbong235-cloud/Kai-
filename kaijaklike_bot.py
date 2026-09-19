@@ -808,6 +808,10 @@ clone_registry = _load(CLONES_REGISTRY, {})   # name -> {token, admin_id, camrap
 
 # ── Sub-admins, Support config, CamRapidPay config (editable at runtime) ──
 sub_admins   = _load(SUB_ADMIN_FILE,   [])          # list of int UIDs
+BAN_LOG_FILE = _dpath("smm_ban_log.json")
+ban_log      = _load(BAN_LOG_FILE, [])   # list of {uid, action, by, ts, name}
+BLOCK_LOG_FILE = _dpath("smm_block_log.json")
+block_log    = _load(BLOCK_LOG_FILE, [])  # list of {uid, action, ts, name, username}
 support_cfg  = _load(SUPPORT_CFG_FILE, {"kh": "", "en": ""})   # custom support text per lang
 camrapid_cfg = _load(CAMRAPID_CFG_FILE, {"key": ""})            # live-editable API key
 aba_cfg      = _load(ABA_CFG_FILE, {"key": "", "merchant_id": ""})  # live-editable ABA PayWay (KHMER SYSTEM) key/merchant
@@ -3541,15 +3545,29 @@ def _track_user(message):
     joined_ts = prev.get("joined")
     if is_new:
         joined_ts = int(time.time())
+    was_blocked = bool(prev.get("blocked"))
     users_db[uid_str] = {
         "name":     u.first_name or "",
         "username": u.username or "",
         "last":     int(time.time()),
         "banned":   prev.get("banned", False),
         "joined":   joined_ts,
+        # User ផ្ញើសារមកវិញ = unblock ហើយ — សម្អាត flag
+        "blocked":  False,
     }
+    # លុប blocked_at បើមាន
+    users_db[uid_str].pop("blocked_at", None)
+    if not was_blocked:
+        # កុំរក្សា key blocked=False ឥតប្រយោជន៍
+        users_db[uid_str].pop("blocked", None)
     _save(USERS_FILE, users_db)
     wallets.setdefault(uid_str, 0.0)
+    # បើពីមុន blocked ឥឡូវមកវិញ — ជូនដំណឹង Admin (optional, 1 ដង)
+    if was_blocked:
+        try:
+            _notify_admin_user_block(uid, blocked=False)
+        except Exception as _e:
+            logger.debug(f"[silent] {_e}")
     # ── ជូនដំណឹង Admin ពេល User ថ្មីចូលប្រើ Bot (មិនជូន Admin/Sub-admin ខ្លួនឯង) ──
     if is_new and uid != ADMIN_ID and uid not in sub_admins:
         try:
@@ -3570,9 +3588,187 @@ def _track_user(message):
 def is_banned(uid):
     return bool(users_db.get(str(uid), {}).get("banned", False))
 
+def _is_block_error(exc):
+    """True បើ Telegram បដិសេធព្រោះ User block bot / deactivate / chat លុប"""
+    msg = str(exc).lower()
+    hints = (
+        "bot was blocked",
+        "user is deactivated",
+        "chat not found",
+        "forbidden: bot was blocked",
+        "forbidden: user is deactivated",
+        "peer_id_invalid",
+        "can't initiate conversation",
+        "bot can't initiate",
+    )
+    return any(h in msg for h in hints)
+
+def _mark_user_blocked(uid, blocked=True):
+    """កត់ត្រា User ថា block/unblock bot"""
+    uid_str = str(uid)
+    if uid_str not in users_db:
+        users_db[uid_str] = {"name": "", "username": "", "last": int(time.time()), "banned": False}
+    u = users_db[uid_str]
+    prev = bool(u.get("blocked"))
+    if blocked:
+        u["blocked"] = True
+        u["blocked_at"] = int(time.time())
+    else:
+        u.pop("blocked", None)
+        u.pop("blocked_at", None)
+    changed = prev != bool(blocked)
+    if changed:
+        _save(USERS_FILE, users_db)
+        block_log.append({
+            "uid": uid_str,
+            "action": "block" if blocked else "unblock",
+            "ts": int(time.time()),
+            "name": (u.get("name") or "")[:40],
+            "username": u.get("username") or "",
+        })
+        if len(block_log) > 300:
+            del block_log[:-300]
+        _save(BLOCK_LOG_FILE, block_log)
+    return changed
+
+def is_blocked(uid):
+    return bool(users_db.get(str(uid), {}).get("blocked", False))
+
+def _notify_admin_user_block(uid, blocked=True):
+    """ជូនដំណឹង Admin ពេល User block ឬ unblock bot"""
+    try:
+        u = users_db.get(str(uid), {})
+        name = (u.get("name") or "?").strip()
+        uname = f"@{u['username']}" if u.get("username") else "—"
+        if blocked:
+            txt = (
+                f"🚫 <b>User បាន Block Bot!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🙍 ឈ្មោះ: <b>{name}</b>\n"
+                f"🔗 Username: {uname}\n"
+                f"🆔 ID: <code>{uid}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"<i>User នេះនឹងត្រូវ skip ពេល Broadcast</i>"
+            )
+        else:
+            txt = (
+                f"✅ <b>User បាន Unblock Bot វិញ!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🙍 ឈ្មោះ: <b>{name}</b>\n"
+                f"🔗 Username: {uname}\n"
+                f"🆔 ID: <code>{uid}</code>"
+            )
+        bot.send_message(ADMIN_ID, txt, parse_mode="HTML")
+    except Exception as e:
+        logger.warning(f"[block_notify] failed: {e}")
+
+def _log_ban(target_uid, action, by_uid):
+    """រក្សាប្រវត្តិ ban/unban — action = 'ban' | 'unban'"""
+    u = users_db.get(str(target_uid), {})
+    ban_log.append({
+        "uid": str(target_uid),
+        "action": action,
+        "by": str(by_uid),
+        "ts": int(time.time()),
+        "name": (u.get("name") or "")[:40],
+        "username": u.get("username") or "",
+    })
+    if len(ban_log) > 200:
+        del ban_log[:-200]
+    _save(BAN_LOG_FILE, ban_log)
+
+def _list_new_users(days=30, limit=50):
+    """ត្រឡប់ list of (uid, user_dict) ដែល joined ក្នុង days ថ្ងៃចុងក្រោយ រៀងពីថ្មី→ចាស់"""
+    cutoff = int(time.time()) - days * 86400
+    items = []
+    for uid_str, u in users_db.items():
+        j = u.get("joined")
+        if j and int(j) >= cutoff:
+            items.append((uid_str, u))
+    items.sort(key=lambda x: int(x[1].get("joined") or 0), reverse=True)
+    return items[:limit]
+
+def _new_users_report_text(days=30, limit=40):
+    items = _list_new_users(days, limit)
+    cutoff = int(time.time()) - days * 86400
+    total = sum(1 for u in users_db.values() if u.get("joined") and int(u["joined"]) >= cutoff)
+    lines = [
+        f"🆕 <b>User ថ្មី — {days} ថ្ងៃចុងក្រោយ</b>",
+        f"សរុប: <b>{total}</b> នាក់" + (f" (បង្ហាញ {len(items)})" if total > len(items) else ""),
+        "━━━━━━━━━━━━━━━━━━",
+    ]
+    if not items:
+        lines.append("<i>មិនទាន់មាន User ថ្មីក្នុងរយៈពេលនេះទេ</i>")
+    else:
+        for i, (uid_str, u) in enumerate(items, 1):
+            name = (u.get("name") or "?")[:16]
+            uname = f"@{u['username']}" if u.get("username") else "—"
+            ts = int(u.get("joined") or 0)
+            dt = datetime.datetime.fromtimestamp(ts, _KH_TZ).strftime("%d/%m %H:%M") if ts else "?"
+            lines.append(f"{i}. <b>{name}</b> {uname}\n   <code>{uid_str}</code> · {dt}")
+    return "\n".join(lines)
+
+def _ban_log_text(limit=20):
+    lines = [f"🚫 <b>ប្រវត្តិ Ban/Unban</b> (ចុងក្រោយ {min(limit, len(ban_log))})", "━━━━━━━━━━━━━━━━━━"]
+    if not ban_log:
+        lines.append("<i>មិនទាន់មានកំណត់ត្រា</i>")
+    else:
+        for rec in reversed(ban_log[-limit:]):
+            act = "🚫 Ban" if rec.get("action") == "ban" else "🔓 Unban"
+            name = rec.get("name") or "?"
+            uname = f"@{rec['username']}" if rec.get("username") else ""
+            ts = int(rec.get("ts") or 0)
+            dt = datetime.datetime.fromtimestamp(ts, _KH_TZ).strftime("%d/%m %H:%M") if ts else "?"
+            lines.append(f"{act} <code>{rec.get('uid')}</code> {name} {uname}\n   ដោយ <code>{rec.get('by')}</code> · {dt}")
+    return "\n".join(lines)
+
+
 # ═══════════════════════════════════════════════════════════
 #  ADMIN PROMO HELPERS
 # ═══════════════════════════════════════════════════════════
+
+def _blocked_users_list_text(limit=50):
+    """បញ្ជី User ដែលកំពុង Block Bot បច្ចុប្បន្ន"""
+    items = [(uid_str, u) for uid_str, u in users_db.items() if u.get("blocked")]
+    items.sort(key=lambda x: int(x[1].get("blocked_at") or 0), reverse=True)
+    total = len(items)
+    show = items[:limit]
+    lines = [
+        "🔇 <b>User កំពុង Block Bot</b>",
+        "សរុប: <b>%d</b> នាក់%s" % (total, (" (បង្ហាញ %d)" % len(show)) if total > len(show) else ""),
+        "━━━━━━━━━━━━━━━━━━",
+    ]
+    if not show:
+        lines.append("<i>មិនមាន User ណា block bot បច្ចុប្បន្នទេ</i>")
+    else:
+        for i, (uid_str, u) in enumerate(show, 1):
+            name = (u.get("name") or "?")[:16]
+            uname = ("@" + u["username"]) if u.get("username") else "—"
+            ts = int(u.get("blocked_at") or 0)
+            dt = datetime.datetime.fromtimestamp(ts, _KH_TZ).strftime("%d/%m %H:%M") if ts else "?"
+            lines.append("%d. <b>%s</b> %s" % (i, name, uname))
+            lines.append("   <code>%s</code> · %s" % (uid_str, dt))
+    return "\n".join(lines)
+
+def _block_log_text(limit=40):
+    """ប្រវត្តិ Block/Unblock ពីមុន"""
+    lines = [
+        "🔇 <b>ប្រវត្តិ Block Bot</b> (ចុងក្រោយ %d)" % min(limit, len(block_log)),
+        "━━━━━━━━━━━━━━━━━━",
+    ]
+    if not block_log:
+        lines.append("<i>មិនទាន់មានកំណត់ត្រា — នឹងចាប់ផ្តើមកត់ត្រាពេល User block បន្ទាប់ពី update នេះ</i>")
+    else:
+        for rec in reversed(block_log[-limit:]):
+            act = "🚫 Block" if rec.get("action") == "block" else "✅ Unblock"
+            name = rec.get("name") or "?"
+            uname = ("@" + rec["username"]) if rec.get("username") else ""
+            ts = int(rec.get("ts") or 0)
+            dt = datetime.datetime.fromtimestamp(ts, _KH_TZ).strftime("%d/%m %H:%M") if ts else "?"
+            lines.append("%s <code>%s</code> %s %s" % (act, rec.get("uid"), name, uname))
+            lines.append("   %s" % dt)
+    return "\n".join(lines)
+
 def _show_promos(uid):
     if not promos:
         bot.send_message(uid, "🎟️ <b>គ្មាន Promo Code ទេ</b>", parse_mode="HTML",
@@ -3651,6 +3847,49 @@ def _emojiid_text(src_msg):
         known = "✅ មានក្នុង EMOJI_MAP" if ch in EMOJI_MAP else "⚠️ មិននៅក្នុង EMOJI_MAP"
         lines.append(f"{i}. {ch} → <code>{eid}</code> ({known})")
     return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════
+#  USER BLOCK / UNBLOCK BOT — Telegram my_chat_member update
+#  ពេល User ចុច Stop/Block bot → status = "kicked"
+#  ពេល User Restart/Unblock → status = "member"
+# ═══════════════════════════════════════════════════════════
+@bot.my_chat_member_handler()
+def on_my_chat_member(update):
+    try:
+        chat = update.chat
+        if getattr(chat, "type", None) != "private":
+            return  # មិនចាប់ group/channel
+        uid = chat.id
+        if uid == ADMIN_ID or uid in sub_admins:
+            return
+        new_status = (update.new_chat_member.status or "").lower()
+        old_status = (update.old_chat_member.status or "").lower() if update.old_chat_member else ""
+        # blocked / stopped bot
+        if new_status in ("kicked", "left"):
+            changed = _mark_user_blocked(uid, True)
+            # រក្សា name ពី Telegram បើមាន
+            try:
+                fu = update.from_user
+                if fu and str(uid) in users_db:
+                    if fu.first_name:
+                        users_db[str(uid)]["name"] = fu.first_name
+                    if fu.username:
+                        users_db[str(uid)]["username"] = fu.username
+                    _save(USERS_FILE, users_db)
+            except Exception:
+                pass
+            if changed:
+                _notify_admin_user_block(uid, blocked=True)
+                logger.info(f"[block] user {uid} blocked the bot")
+        # unblocked / restarted
+        elif new_status in ("member", "restricted") and old_status in ("kicked", "left"):
+            changed = _mark_user_blocked(uid, False)
+            if changed:
+                _notify_admin_user_block(uid, blocked=False)
+                logger.info(f"[block] user {uid} unblocked the bot")
+    except Exception as e:
+        logger.warning(f"[my_chat_member] error: {e}")
 
 @bot.message_handler(commands=["emojiid"])
 def cmd_emojiid(message):
@@ -4969,14 +5208,28 @@ def cb_useraction(call):
             parse_mode="HTML", reply_markup=admin_bal_amt_kb(target, "ded"))
 
     elif action == "ban":
+        if target not in users_db:
+            users_db[target] = {"name": "", "username": "", "last": int(time.time()), "banned": True}
         users_db[target]["banned"] = True; _save(USERS_FILE, users_db)
+        _log_ban(target, "ban", uid)
         bot.send_message(uid, f"🚫 Banned <code>{target}</code>",
                          parse_mode="HTML", reply_markup=admin_kb())
+        try:
+            bot.send_message(int(target), t(int(target), "banned"))
+        except Exception as _e:
+            logger.debug(f"[silent] {_e}")
 
     elif action == "unban":
+        if target not in users_db:
+            users_db[target] = {"name": "", "username": "", "last": int(time.time()), "banned": False}
         users_db[target]["banned"] = False; _save(USERS_FILE, users_db)
+        _log_ban(target, "unban", uid)
         bot.send_message(uid, f"🔓 Unbanned <code>{target}</code>",
                          parse_mode="HTML", reply_markup=admin_kb())
+        try:
+            bot.send_message(int(target), "✅ គណនីរបស់អ្នកត្រូវបាន unban ហើយ! សូម /start ម្ដងទៀត។")
+        except Exception as _e:
+            logger.debug(f"[silent] {_e}")
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("balamt:"))
 def cb_balamt(call):
@@ -5834,9 +6087,20 @@ def cb_emojipick(call):
         parse_mode="HTML", reply_markup=cancel_kb())
 
 def _do_broadcast(admin_uid, message):
+    """ផ្សព្វផ្សាយទៅ User — skip banned + blocked, rate-limit, រាយការណ៍ progress"""
     waiting.pop(admin_uid, None)
-    sent = failed = 0
-    for u_id in list(users_db.keys()):
+    targets = [
+        u for u in users_db.keys()
+        if not users_db[u].get("banned") and not users_db[u].get("blocked")
+    ]
+    total = len(targets)
+    bot.send_message(admin_uid,
+        f"📢 កំពុងផ្សព្វផ្សាយទៅ <b>{total}</b> users\n"
+        f"<i>(skip banned + blocked)</i>\n"
+        f"⏱ ~{max(1, total // 20)} វិនាទី",
+        parse_mode="HTML")
+    sent = failed = blocked_n = 0
+    for i, u_id in enumerate(targets, 1):
         try:
             if message.photo:
                 bot.send_photo(int(u_id), message.photo[-1].file_id, caption=message.caption or "")
@@ -5847,11 +6111,29 @@ def _do_broadcast(admin_uid, message):
             else:
                 bot.send_message(int(u_id), message.text or "", parse_mode="HTML")
             sent += 1
-        except: failed += 1
+        except Exception as e:
+            if _is_block_error(e):
+                _mark_user_blocked(u_id, True)
+                blocked_n += 1
+            else:
+                failed += 1
         time.sleep(0.05)
+        if i % 100 == 0 and i < total:
+            try:
+                bot.send_message(admin_uid,
+                    f"⏳ Progress: {i}/{total} (✅{sent} 🚫{blocked_n} ❌{failed})")
+            except Exception:
+                pass
     bot.send_message(admin_uid,
-        f"📢 <b>ផ្សព្វផ្សាយរួចរាល់!</b>\n✅ បានផ្ញើ: {sent} | ❌ បរាជ័យ: {failed}",
-        parse_mode="HTML", reply_markup=admin_kb())
+        f"📢 <b>ផ្សព្វផ្សាយរួចរាល់!</b>\n━━━━━━━━━━━━━━━━━━\n"
+        f"✅ ជោគជ័យ: <b>{sent}</b>\n"
+        f"🚫 Blocked (ថ្មី): <b>{blocked_n}</b>\n"
+        f"❌ បរាជ័យផ្សេង: <b>{failed}</b>\n"
+        f"👥 គោលដៅ: <b>{total}</b>",
+        parse_mode="HTML",
+        reply_markup=admin_kb() if admin_uid == ADMIN_ID else sub_admin_kb())
+
+
 
 # ═══════════════════════════════════════════════════════════
 #  PHOTO HANDLER
@@ -6109,6 +6391,34 @@ def handle_sticker(message):
 # ═══════════════════════════════════════════════════════════
 #  MAIN MESSAGE HANDLER
 # ═══════════════════════════════════════════════════════════
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("stats:"))
+def cb_stats(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID and uid not in sub_admins:
+        bot.answer_callback_query(call.id); return
+    bot.answer_callback_query(call.id)
+    action = call.data.split(":", 1)[1]
+    if action == "newusers30":
+        txt = _new_users_report_text(30)
+    elif action == "newusers7":
+        txt = _new_users_report_text(7)
+    elif action == "banlog":
+        txt = _ban_log_text(25)
+    elif action == "blockednow":
+        txt = _blocked_users_list_text(50)
+    elif action == "blocklog":
+        txt = _block_log_text(40)
+    else:
+        return
+    # split if too long
+    if len(txt) > 4000:
+        parts = [txt[i:i+3900] for i in range(0, len(txt), 3900)]
+        for p in parts:
+            bot.send_message(uid, p, parse_mode="HTML")
+    else:
+        bot.send_message(uid, txt, parse_mode="HTML")
+
 @bot.message_handler(func=lambda m: True)
 def handle_msg(message):
     uid     = message.chat.id
@@ -7289,7 +7599,6 @@ def handle_msg(message):
             total_users  = len(users_db)
             total_rev    = sum(float(o.get("price") or 0) for o in smm_orders.values())
             now_ts = int(time.time())
-            # User ថ្មី — គិតតែអ្នកដែលមាន field "joined" (កំណត់ពេលចូលលើកដំបូង)
             def _count_new(days):
                 cutoff = now_ts - days * 86400
                 return sum(1 for u in users_db.values()
@@ -7297,10 +7606,25 @@ def handle_msg(message):
             new_today = _count_new(1)
             new_7d    = _count_new(7)
             new_30d   = _count_new(30)
-            _kb = admin_kb() if uid == ADMIN_ID else sub_admin_kb()
+            banned_n  = sum(1 for u in users_db.values() if u.get("banned"))
+            blocked_n = sum(1 for u in users_db.values() if u.get("blocked"))
+            _kb_stats = InlineKeyboardMarkup()
+            _kb_stats.row(
+                InlineKeyboardButton("🆕 បញ្ជី User ថ្មី (1 ខែ)", callback_data="stats:newusers30", color="active"),
+                InlineKeyboardButton("🆕 7 ថ្ងៃ", callback_data="stats:newusers7", color="progress"),
+            )
+            _kb_stats.row(
+                InlineKeyboardButton("🚫 ប្រវត្តិ Ban", callback_data="stats:banlog", color="danger"),
+            )
+            _kb_stats.row(
+                InlineKeyboardButton("🔇 កំពុង Block", callback_data="stats:blockednow", color="danger"),
+                InlineKeyboardButton("📜 ប្រវត្តិ Block", callback_data="stats:blocklog", color="progress"),
+            )
             bot.send_message(uid,
                 f"📊 <b>ស្ថិតិ</b>\n━━━━━━━━━━━━━━━━━━\n"
                 f"👥 អ្នកប្រើសរុប: <b>{total_users}</b>\n"
+                f"🚫 Banned: <b>{banned_n}</b>\n"
+                f"🔇 Blocked Bot: <b>{blocked_n}</b>\n"
                 f"🆕 User ថ្មី (ថ្ងៃនេះ): <b>{new_today}</b>\n"
                 f"🆕 User ថ្មី (7 ថ្ងៃ): <b>{new_7d}</b>\n"
                 f"🆕 User ថ្មី (1 ខែ): <b>{new_30d}</b>\n"
@@ -7310,9 +7634,10 @@ def handle_msg(message):
                 f"📋 Services: <b>{len(smm_services)}</b>\n"
                 f"🎟️ Promos: <b>{len(promos)}</b>\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
-                f"<i>💡 User ថ្មី = អ្នកដែល /start លើកដំបូងបន្ទាប់ពី update នេះ "
-                f"(User ចាស់មុន update មិនគិតក្នុងចំនួននេះ)</i>",
-                parse_mode="HTML", reply_markup=_kb); return
+                f"<i>💡 ចុចប៊ូតុងខាងក្រោមដើម្បីមើលបញ្ជី User ថ្មី / ប្រវត្តិ Ban</i>",
+                parse_mode="HTML", reply_markup=_kb_stats)
+            return
+
 
         if text == "📢 ផ្សព្វផ្សាយ":
             waiting[uid] = "broadcast_msg"
@@ -8197,14 +8522,21 @@ def broadcast_web():
     text = data.get("text", "").strip()
     if not text:
         return jsonify({"error": "No text provided"}), 400
-    sent = failed = 0
+    sent = failed = blocked_n = 0
     for u_id in list(users_db.keys()):
+        if users_db.get(u_id, {}).get("banned") or users_db.get(u_id, {}).get("blocked"):
+            continue
         try:
             bot.send_message(int(u_id), text, parse_mode="HTML")
             sent += 1
-        except: failed += 1
+        except Exception as e:
+            if _is_block_error(e):
+                _mark_user_blocked(u_id, True)
+                blocked_n += 1
+            else:
+                failed += 1
         time.sleep(0.05)
-    return jsonify({"sent": sent, "failed": failed})
+    return jsonify({"sent": sent, "failed": failed, "blocked": blocked_n})
 
 def run_flask():
     logger.info(f"🌐 Control Server running on port {CONTROL_PORT}")
