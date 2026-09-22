@@ -5881,7 +5881,7 @@ def cb_cln_cooldown(call):
         parse_mode="HTML", reply_markup=cancel_kb())
 
 def _apply_clone_pay_update(uid, name, pay_method, camrapid_key="", manual_photo_id="", manual_info="",
-                             aba_key="", aba_merchant=""):
+                             aba_key="", aba_merchant="", khpay_key="", khpay_merchant=""):
     """កែប្រែ payment method របស់ clone ដែលមានស្រាប់ ហើយ restart វា"""
     cfg = clone_registry.get(name)
     if not cfg:
@@ -5894,18 +5894,32 @@ def _apply_clone_pay_update(uid, name, pay_method, camrapid_key="", manual_photo
         cfg["manual_qr_info"] = ""
         cfg["aba_key"] = ""
         cfg["aba_merchant"] = ""
+        cfg["khpay_key"] = ""
+        cfg["khpay_merchant"] = ""
     elif pay_method == "aba":
         cfg["aba_key"] = aba_key
         cfg["aba_merchant"] = aba_merchant
         cfg["manual_qr_photo_id"] = ""
         cfg["manual_qr_info"] = ""
         cfg["camrapid_key"] = ""
+        cfg["khpay_key"] = ""
+        cfg["khpay_merchant"] = ""
+    elif pay_method == "khpay":
+        cfg["khpay_key"] = khpay_key
+        cfg["khpay_merchant"] = khpay_merchant
+        cfg["camrapid_key"] = ""
+        cfg["aba_key"] = ""
+        cfg["aba_merchant"] = ""
+        cfg["manual_qr_photo_id"] = ""
+        cfg["manual_qr_info"] = ""
     else:
         cfg["manual_qr_photo_id"] = manual_photo_id
         cfg["manual_qr_info"] = manual_info
         cfg["camrapid_key"] = ""
         cfg["aba_key"] = ""
         cfg["aba_merchant"] = ""
+        cfg["khpay_key"] = ""
+        cfg["khpay_merchant"] = ""
     clone_registry[name] = cfg
     _save(CLONES_REGISTRY, clone_registry)
     try:
