@@ -5657,9 +5657,10 @@ def cb_cln_pay(call):
     kb.add(InlineKeyboardButton("⬅️ ត្រឡប់", callback_data=f"cln_view|{name}", color="inactive"))
     bot.send_message(uid,
         f"🔁 <b>ប្តូរ Step ទូទាត់ — {name}</b>\n\n"
-        "1️⃣ <b>Step 1</b> — CamRapidPay API Key → QR ស្វ័យប្រវត្តិ\n"
-        "3️⃣ <b>Step 3</b> — ABA PayWay Profile Key + Merchant ID → QR ស្វ័យប្រវត្តិ\n"
-        "2️⃣ <b>Step 2</b> — Upload រូប QR ដាក់ដោយដៃ",
+        "1️⃣ <b>CamRapidPay</b> — API Key → QR ស្វ័យប្រវត្តិ\n"
+        "3️⃣ <b>ABA PayWay</b> — Profile Key + Merchant ID → QR ស្វ័យប្រវត្តិ\n"
+        "💠 <b>KHPAY</b> — API Key + Merchant ID (mch_...) → QR ស្វ័យប្រវត្តិ\n"
+        "2️⃣ <b>Manual</b> — Upload រូប QR ដាក់ដោយដៃ",
         parse_mode="HTML", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cln_paysel|"))
@@ -5679,10 +5680,17 @@ def cb_cln_paysel(call):
         waiting[uid] = {"step": "cln_pay_aba_key", "clone": name}
         bot.send_message(uid, f"វាយ <b>ABA PayWay Profile Key</b> ថ្មីសម្រាប់ '{name}':",
                           parse_mode="HTML", reply_markup=cancel_kb())
-    else:
+    elif method == "khpay":
+        waiting[uid] = {"step": "cln_pay_khpay_key", "clone": name}
+        bot.send_message(uid, f"វាយ <b>KHPAY API Key</b> ថ្មីសម្រាប់ '{name}'\n"
+                          f"(ពី https://khpay.site/dashboard/settings):",
+                          parse_mode="HTML", reply_markup=cancel_kb())
+    elif method == "manual":
         waiting[uid] = {"step": "cln_pay_qr_photo", "clone": name}
         bot.send_message(uid, f"ផ្ញើ <b>រូបភាព QR</b> (Bakong KHQR) ថ្មីសម្រាប់ '{name}':",
                           parse_mode="HTML", reply_markup=cancel_kb())
+    else:
+        bot.send_message(uid, f"⚠️ វិធីទូទាត់មិនស្គាល់: <code>{method}</code>", parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cln_admin|"))
 def cb_cln_admin(call):
