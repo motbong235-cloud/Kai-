@@ -851,6 +851,43 @@ def _effective_khpay_merchant():
 def has_khpay():
     return bool(_effective_khpay_key())
 
+def _log_payment_startup():
+    """Log + (clone) ជូនដំណឹង Admin ពី payment config ពេល start — ជួយ debug QR មិនចេញ"""
+    try:
+        lines = [
+            f"instance={INSTANCE_NAME or 'MASTER'}",
+            f"PAY_METHOD={os.getenv('PAY_METHOD') or 'auto'}",
+            f"camrapid={'YES' if _effective_camrapid_key() else 'NO'} enabled={is_pay_method_enabled('camrapid')}",
+            f"aba={'YES' if has_aba_payway() else 'NO'} enabled={is_pay_method_enabled('aba')}",
+            f"khpay={'YES' if has_khpay() else 'NO'} enabled={is_pay_method_enabled('khpay')} "
+            f"merchant={_effective_khpay_merchant() or '-'}",
+        ]
+        msg = " | ".join(lines)
+        logger.info(f"[payment_startup] {msg}")
+        # បើ clone និងគ្មាន method ណាមួយ — ជូនដំណឹង admin
+        if not IS_MASTER:
+            any_ok = (
+                (bool(_effective_camrapid_key()) and is_pay_method_enabled("camrapid"))
+                or (has_aba_payway() and is_pay_method_enabled("aba"))
+                or (has_khpay() and is_pay_method_enabled("khpay"))
+            )
+            if not any_ok:
+                try:
+                    bot.send_message(
+                        ADMIN_ID,
+                        "🚨 <b>Clone payment មិនទាន់ ready</b>\n"
+                        f"Bot: <code>{INSTANCE_NAME or '?'}</code>\n"
+                        f"<code>{msg}</code>\n\n"
+                        "→ Master: /mybots → ប្តូរ Step ទូទាត់ ឬ\n"
+                        "→ ក្នុង clone: 💠 KHPAY Key / 🔀 វិធីទូទាត់",
+                        parse_mode="HTML",
+                    )
+                except Exception as e:
+                    logger.warning(f"[payment_startup] notify failed: {e}")
+    except Exception as e:
+        logger.warning(f"[payment_startup] {e}")
+
+
 
 PAY_METHOD_LABELS = {"camrapid": "🔄 CamRapidPay KHQR", "aba": "💳 ABA PayWay", "khpay": "💠 KHPAY"}
 
@@ -902,6 +939,45 @@ def _clone_dir(name):
     os.makedirs(d, exist_ok=True)
     return d
 
+
+def _seed_clone_payment_files(wdir, cfg):
+    """សរសេរ payment keys ចូល DATA_DIR របស់ clone មុន spawn —
+    ធានាថា _effective_* ក្នុង clone រកឃើញ key (មិនពឹងតែលើ env តែម្នាក់ឯង)"""
+    try:
+        pay = cfg.get("pay_method", "auto")
+        # CamRapid
+        _save(os.path.join(wdir, "smm_camrapid.json"), {
+            "key": cfg.get("camrapid_key", "") if pay == "auto" else "",
+        })
+        # ABA
+        _save(os.path.join(wdir, "smm_aba.json"), {
+            "key": cfg.get("aba_key", "") if pay == "aba" else "",
+            "merchant_id": cfg.get("aba_merchant", "") if pay == "aba" else "",
+        })
+        # KHPAY
+        _save(os.path.join(wdir, "smm_khpay.json"), {
+            "key": cfg.get("khpay_key", "") if pay == "khpay" else "",
+            "merchant_id": cfg.get("khpay_merchant", "") if pay == "khpay" else "",
+        })
+        # Toggle — បើកតែ method ដែលកំណត់ (បិទផ្សេង)
+        _save(os.path.join(wdir, "smm_paytoggle.json"), {
+            "camrapid_enabled": pay == "auto",
+            "aba_enabled": pay == "aba",
+            "khpay_enabled": pay == "khpay",
+        })
+        # Manual QR
+        _save(os.path.join(wdir, "manual_qr.json"), {
+            "enabled": pay == "manual",
+            "photo_id": cfg.get("manual_qr_photo_id", "") if pay == "manual" else "",
+            "info": cfg.get("manual_qr_info", "") if pay == "manual" else "",
+        })
+        logger.info(f"[clone_seed] {os.path.basename(wdir)} pay={pay} "
+                    f"khpay_key={'yes' if cfg.get('khpay_key') else 'no'} "
+                    f"camrapid={'yes' if cfg.get('camrapid_key') else 'no'} "
+                    f"aba={'yes' if cfg.get('aba_key') else 'no'}")
+    except Exception as e:
+        logger.error(f"[clone_seed] failed: {e}")
+
 def _next_clone_port():
     used = {v.get("port") for v in clone_registry.values()}
     p = CLONE_BASE_PORT
@@ -931,6 +1007,7 @@ def _spawn_clone(name, cfg):
     env["BOT_WELCOME_MSG"]  = cfg.get("welcome_msg", "")
     env["DATA_DIR"]         = wdir   # ★ ធ្វើឲ្យ clone នីមួយៗសរសេរ/អាន data (users/wallets/orders/…) ដាច់ដោយឡែកក្នុង bot_clones/<name>/ មិនប៉ះពាល់ bot ដើម ឬ clone ផ្សេងទៀត
     env["MASTER_DATA_DIR"]  = MASTER_DATA_DIR   # ★ រក្សា smm_emoji.json ជាដើម ឲ្យចង្អុលទៅ data ដើមរួមគ្នា មិនប្រែប្រួលទៅតាម DATA_DIR របស់ clone
+    _seed_clone_payment_files(wdir, cfg)  # seed keys ចូល DATA_DIR មុន start
     logf = open(os.path.join(wdir, "bot.log"), "a", encoding="utf-8")
     proc = _subprocess.Popen(
         [sys.executable, os.path.abspath(__file__)],
@@ -3341,6 +3418,14 @@ def _process_deposit(uid, uid_str, amount, promo_code=None, method=None):
     camrapid_ok = bool(_effective_camrapid_key()) and is_pay_method_enabled("camrapid")
     aba_ok      = has_aba_payway() and is_pay_method_enabled("aba")
     khpay_ok    = has_khpay() and is_pay_method_enabled("khpay")
+    # Clone កំណត់ pay_method តែមួយ (env PAY_METHOD) → បង្ខំប្រើ method នោះ
+    _pref = (os.getenv("PAY_METHOD") or "auto").strip().lower()
+    if _pref == "khpay" and khpay_ok:
+        camrapid_ok = False; aba_ok = False
+    elif _pref == "aba" and aba_ok:
+        camrapid_ok = False; khpay_ok = False
+    elif _pref in ("auto", "camrapid") and camrapid_ok:
+        aba_ok = False; khpay_ok = False
     if method is None:
         available = []
         if camrapid_ok: available.append(("camrapid", "🔄 CamRapidPay KHQR", "active"))
@@ -3358,10 +3443,24 @@ def _process_deposit(uid, uid_str, amount, promo_code=None, method=None):
             return
         if not available:
             lang = get_lang(uid)
+            _dbg = (
+                f"pref={os.getenv('PAY_METHOD') or 'auto'} | "
+                f"camrapid_key={'Y' if _effective_camrapid_key() else 'N'} "
+                f"toggle={is_pay_method_enabled('camrapid')} | "
+                f"aba={'Y' if has_aba_payway() else 'N'} "
+                f"toggle={is_pay_method_enabled('aba')} | "
+                f"khpay={'Y' if has_khpay() else 'N'} "
+                f"toggle={is_pay_method_enabled('khpay')}"
+            )
+            logger.warning(f"[deposit] no method uid={uid} {_dbg}")
             bot.send_message(uid,
-                "⚠️ <b>មិនមានវិធីទូទាត់ស្វ័យប្រវត្តិណាមួយបើកនៅពេលនេះទេ។</b>\nសូមទំនាក់ Admin ដើម្បីជំនួយ"
+                ("⚠️ <b>មិនមានវិធីទូទាត់ស្វ័យប្រវត្តិណាមួយបើកនៅពេលនេះទេ។</b>\n"
+                 "សូមទំនាក់ Admin ដើម្បីជំនួយ\n\n"
+                 f"<code>{_dbg}</code>")
                 if lang == "kh" else
-                "⚠️ <b>No automatic payment method is available right now.</b>\nPlease contact Admin for help",
+                ("⚠️ <b>No automatic payment method is available right now.</b>\n"
+                 "Please contact Admin\n\n"
+                 f"<code>{_dbg}</code>"),
                 parse_mode="HTML")
             try:
                 pnotify(
@@ -4673,9 +4772,20 @@ def cb_dep(call):
 
     # ── ជ្រើស amount preset ──
     if val.startswith("amt:"):
-        amount = float(val.split(":")[1])
-        waiting.pop(uid, None)
-        _process_deposit(uid, uid_str, amount, None)
+        try:
+            amount = float(val.split(":")[1])
+            waiting.pop(uid, None)
+            _process_deposit(uid, uid_str, amount, None)
+        except Exception as e:
+            logger.exception(f"[cb_dep] amt failed uid={uid}: {e}")
+            try:
+                bot.send_message(uid,
+                    f"⚠️ <b>មិនអាចបង្កើត QR បានទេ</b>\n"
+                    f"<code>{type(e).__name__}: {e}</code>\n"
+                    f"សូមទំនាក់ Admin ឬព្យាយាមម្តងទៀត។",
+                    parse_mode="HTML")
+            except Exception:
+                pass
         return
 
     # ── custom amount ──
@@ -5924,13 +6034,9 @@ def _apply_clone_pay_update(uid, name, pay_method, camrapid_key="", manual_photo
     _save(CLONES_REGISTRY, clone_registry)
     try:
         wdir = _clone_dir(name)
-        _save(os.path.join(wdir, "manual_qr.json"), {
-            "enabled": pay_method == "manual",
-            "photo_id": cfg.get("manual_qr_photo_id", ""),
-            "info": cfg.get("manual_qr_info", ""),
-        })
+        _seed_clone_payment_files(wdir, cfg)
     except Exception as _e:
-        logger.error(f"Update manual_qr.json failed for clone '{name}': {_e}")
+        logger.error(f"Seed payment files failed for clone '{name}': {_e}")
     was_running = _clone_is_running(name)
     if was_running:
         _stop_clone(name); time.sleep(1); _spawn_clone(name, cfg)
@@ -9077,4 +9183,5 @@ if __name__ == "__main__":
             except Exception as _e:
                 logger.error(f"Autostart clone '{_cln_name}' failed: {_e}")
         threading.Thread(target=_clone_watchdog, daemon=True).start()
+    _log_payment_startup()
     _bot_polling_with_retry()
