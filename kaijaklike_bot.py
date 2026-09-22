@@ -296,6 +296,14 @@ ABA_BASE_URL       = os.getenv("ABA_BASE_URL", "https://khmer-system.com")
 ABA_CREATE_URL     = os.getenv("ABA_CREATE_URL", f"{ABA_BASE_URL}/aba-api/generate-qr")
 ABA_CHECK_URL      = os.getenv("ABA_CHECK_URL", f"{ABA_BASE_URL}/aba-api/check-payment")
 
+# ── KHPAY (khpay.site) — ជម្រើសទូទាត់ស្វ័យប្រវត្តិទី ៣ ──
+KHPAY_API_KEY      = os.getenv("KHPAY_API_KEY", "")
+KHPAY_BASE_URL     = os.getenv("KHPAY_BASE_URL", "https://khpay.site/api/v1")
+KHPAY_CREATE_URL   = os.getenv("KHPAY_CREATE_URL", f"{KHPAY_BASE_URL}/qr/generate")
+KHPAY_CHECK_URL    = os.getenv("KHPAY_CHECK_URL", f"{KHPAY_BASE_URL}/qr/check")
+KHPAY_EXPIRE_SEC   = int(os.getenv("KHPAY_EXPIRE_SEC", "180"))
+KHPAY_MERCHANT_ID  = os.getenv("KHPAY_MERCHANT_ID", "")  # optional mch_...
+
 # ── Bakong Open API — Generate Deep Link (បើក App ធនាគារស្វ័យប្រវត្តិ៖ ABA / ACLEDA / Bakong / Wing ...) ──
 BAKONG_API_TOKEN    = os.getenv("BAKONG_API_TOKEN", "")   # 👈 Bakong Developer Token ពី https://api-bakong.nbc.gov.kh/register/ — កំណត់ជា Environment Variable
 BAKONG_DEEPLINK_API = "https://api-bakong.nbc.gov.kh/v1/generate_deeplink_by_qr"
@@ -371,6 +379,7 @@ SUB_ADMIN_FILE  = _dpath("smm_sub_admins.json")
 SUPPORT_CFG_FILE= _dpath("smm_support.json")
 CAMRAPID_CFG_FILE= _dpath("smm_camrapid.json")
 ABA_CFG_FILE    = _dpath("smm_aba.json")
+KHPAY_CFG_FILE  = _dpath("smm_khpay.json")
 BAKONG_CFG_FILE = _dpath("smm_bakong.json")
 WEBHOOK_CFG_FILE = _dpath("smm_webhook.json")
 PAYTOGGLE_CFG_FILE = _dpath("smm_paytoggle.json")   # បិទ/បើក វិធីទូទាត់ម្តងៗ (v13)
@@ -815,9 +824,10 @@ block_log    = _load(BLOCK_LOG_FILE, [])  # list of {uid, action, ts, name, user
 support_cfg  = _load(SUPPORT_CFG_FILE, {"kh": "", "en": ""})   # custom support text per lang
 camrapid_cfg = _load(CAMRAPID_CFG_FILE, {"key": ""})            # live-editable API key
 aba_cfg      = _load(ABA_CFG_FILE, {"key": "", "merchant_id": ""})  # live-editable ABA PayWay (KHMER SYSTEM) key/merchant
+khpay_cfg    = _load(KHPAY_CFG_FILE, {"key": "", "merchant_id": ""})
 bakong_cfg   = _load(BAKONG_CFG_FILE, {"token": ""})            # live-editable Bakong Developer Token
 webhook_cfg  = _load(WEBHOOK_CFG_FILE, {"url": ""})              # live-editable CamRapidPay webhook URL
-paytoggle_cfg= _load(PAYTOGGLE_CFG_FILE, {"camrapid_enabled": True, "aba_enabled": True})  # បិទ/បើក វិធីទូទាត់ (v13)
+paytoggle_cfg= _load(PAYTOGGLE_CFG_FILE, {"camrapid_enabled": True, "aba_enabled": True, "khpay_enabled": True})  # បិទ/បើក វិធីទូទាត់ (v13)
 
 def _effective_camrapid_key():
     """Return runtime key if set, else fall back to env/default"""
@@ -831,7 +841,18 @@ def _effective_aba_merchant():
     """Return runtime ABA PayWay (KHMER SYSTEM) Merchant ID if set, else fall back to env/default"""
     return aba_cfg.get("merchant_id") or ABA_MERCHANT_ID
 
-PAY_METHOD_LABELS = {"camrapid": "🔄 CamRapidPay KHQR", "aba": "💳 ABA PayWay"}
+def _effective_khpay_key():
+    return khpay_cfg.get("key") or KHPAY_API_KEY
+
+def _effective_khpay_merchant():
+    """Optional KHPAY merchant_id (mch_...) — omit = default merchant in account"""
+    return (khpay_cfg.get("merchant_id") or KHPAY_MERCHANT_ID or "").strip()
+
+def has_khpay():
+    return bool(_effective_khpay_key())
+
+
+PAY_METHOD_LABELS = {"camrapid": "🔄 CamRapidPay KHQR", "aba": "💳 ABA PayWay", "khpay": "💠 KHPAY"}
 
 def is_pay_method_enabled(method):
     """True បើ admin មិនទាន់បិទវិធីទូទាត់នេះទេ (default = True បើមិនទាន់កំណត់អ្វីសោះ) — v13.
@@ -846,7 +867,12 @@ def set_pay_method_enabled(method, enabled):
 def _paytoggle_status_lines():
     lines = []
     for method, label in PAY_METHOD_LABELS.items():
-        configured = _effective_camrapid_key() if method == "camrapid" else has_aba_payway()
+        if method == "camrapid":
+            configured = bool(_effective_camrapid_key())
+        elif method == "aba":
+            configured = has_aba_payway()
+        else:
+            configured = has_khpay()
         on = is_pay_method_enabled(method)
         status = "🟢 បើក" if on else "🔴 បិទ"
         cfg_note = "" if configured else " ⚠️ (មិនទាន់កំណត់ Key)"
@@ -895,6 +921,8 @@ def _spawn_clone(name, cfg):
     env["CAMRAPID_API_KEY"] = cfg.get("camrapid_key", "")
     env["ABA_API_KEY"]      = cfg.get("aba_key", "")
     env["ABA_MERCHANT_ID"]  = cfg.get("aba_merchant", "")
+    env["KHPAY_API_KEY"]    = cfg.get("khpay_key", "")
+    env["KHPAY_MERCHANT_ID"]= cfg.get("khpay_merchant", "")
     env["PAY_METHOD"]       = cfg.get("pay_method", "auto")
     env["CONTROL_PORT"]     = str(cfg["port"])
     env["CONTROL_KEY"]      = f"ctrl_{name}"
@@ -2778,6 +2806,74 @@ def _bakong_deeplink(qr_str, uid=None):
         logger.warning(f"[bakong_deeplink] exception: {e}")
         return None
 
+
+# ═══════════════════════════════════════════════════════════
+#  KHPAY (khpay.site)
+# ═══════════════════════════════════════════════════════════
+_last_khpay_error = ""
+
+def _khpay_create(uid, amount, note=""):
+    global _last_khpay_error
+    api_key = _effective_khpay_key()
+    if not api_key:
+        _last_khpay_error = "KHPAY_API_KEY មិនបានកំណត់"
+        return None
+    try:
+        payload = {
+            "amount":   round(float(amount), 2),
+            "currency": "USD",
+            "note":     note or f"Deposit uid={uid}",
+        }
+        mid = _effective_khpay_merchant()
+        if mid:
+            payload["merchant_id"] = mid
+        r = http.post(
+            KHPAY_CREATE_URL,
+            json=payload,
+            headers={"Authorization": f"Bearer {api_key}",
+                     "Content-Type": "application/json", "Accept": "application/json"},
+            timeout=20,
+        )
+        logger.info(f"[khpay_create] uid={uid} HTTP {r.status_code}")
+        try:
+            data = r.json()
+        except Exception:
+            _last_khpay_error = f"HTTP {r.status_code}: {r.text[:300]}"
+            return None
+        if data.get("success") and isinstance(data.get("data"), dict):
+            return data["data"]
+        if data.get("transaction_id") or data.get("qr_image") or data.get("qr_string"):
+            return data
+        _last_khpay_error = str(data.get("error") or data.get("message") or data)[:500]
+        logger.error(f"[khpay_create] failed: {_last_khpay_error}")
+        return None
+    except Exception as e:
+        _last_khpay_error = f"{type(e).__name__}: {e}"
+        logger.error(f"[khpay_create] {e}")
+        return None
+
+def _khpay_check(transaction_id) -> bool:
+    api_key = _effective_khpay_key()
+    if not api_key or not transaction_id:
+        return False
+    try:
+        url = f"{KHPAY_CHECK_URL.rstrip('/')}/{transaction_id}"
+        r = http.get(url, headers={"Authorization": f"Bearer {api_key}",
+                                   "Accept": "application/json"}, timeout=10)
+        data = r.json()
+        logger.info(f"[khpay_check] {transaction_id} -> {data}")
+        d = data.get("data") if isinstance(data.get("data"), dict) else data
+        if d.get("paid") is True:
+            return True
+        if str(d.get("action", "")).lower() == "approved":
+            return True
+        if str(d.get("status", "")).lower() in ("paid", "success", "completed", "approved"):
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"[khpay_check] {e}")
+        return False
+
 def _watch_deposit(uid, uid_str, dep_id, amount, reference, checker=None):
     """Poll payment gateway until paid or expired (5 min). `checker` ជា function ទទួល
     reference/payment_id → True/False ថាបានទូទាត់ហើយឬនៅ — default ជា CamRapidPay (backward
@@ -2907,6 +3003,10 @@ def _send_deposit_qr(uid, amount, promo_code=None, label="💸 ដាក់ល�
     if method == "aba":
         _send_deposit_qr_aba(uid, amount, promo_code_name=promo_code_name, bonus=bonus,
                               promo_bonus=promo_bonus, auto_bonus=auto_bonus)
+        return
+    if method == "khpay":
+        _send_deposit_qr_khpay(uid, amount, promo_code_name=promo_code_name, bonus=bonus,
+                                promo_bonus=promo_bonus, auto_bonus=auto_bonus)
         return
 
     uid_str       = str(uid)
@@ -3142,6 +3242,90 @@ def _send_deposit_qr_aba(uid, amount, promo_code_name=None, bonus=0.0, promo_bon
                      args=(uid, uid_str, dep_id, amount, reference),
                      kwargs={"checker": _aba_check}, daemon=True).start()
 
+
+def _send_deposit_qr_khpay(uid, amount, promo_code_name=None, bonus=0.0, promo_bonus=0.0, auto_bonus=0.0):
+    uid_str = str(uid)
+    promo_applied = promo_code_name
+    _gen_msg = None
+    try:
+        _gen_msg = bot.send_message(uid, "⏳ <b>កំពុងបង្កើត QR (KHPAY)...</b>", parse_mode="HTML")
+    except Exception as _e:
+        logger.debug(f"[silent] {_e}")
+    data = _khpay_create(uid, amount, note=f"TopUp uid={uid}")
+    if not data:
+        if _gen_msg:
+            try: bot.delete_message(uid, _gen_msg.message_id)
+            except Exception: pass
+        bot.send_message(uid, "⚠️ <b>មានបញ្ហា Generate QR (KHPAY)!</b>\nសូមព្យាយាមម្តងទៀត ឬ ទំនាក់ Admin", parse_mode="HTML")
+        try:
+            pnotify(f"⚠️ <b>KHPAY បរាជ័យ</b>\n👤 <code>{uid_str}</code> — ${amount:.2f}\n🔎 <code>{_last_khpay_error[:500]}</code>")
+        except Exception: pass
+        return
+    txn_id = data.get("transaction_id") or data.get("id") or ""
+    qr_image = data.get("qr_image") or data.get("qrImage") or ""
+    qr_string = data.get("qr_string") or data.get("qrString") or ""
+    pay_url = data.get("payment_url") or data.get("pay_url") or ""
+    expires_in = int(data.get("expires_in") or KHPAY_EXPIRE_SEC)
+    dep_id = f"dep_{uid}_{int(time.time())}"
+    reference = txn_id or f"KHPAY{uid}_{int(time.time())}"[:50]
+    smm_deps[dep_id] = {
+        "uid": uid_str, "amount": amount, "status": "pending",
+        "bonus": bonus, "promo_bonus": promo_bonus, "auto_bonus": auto_bonus,
+        "promo": promo_applied or "", "reference": reference,
+        "payment_url": pay_url or "", "method": "khpay", "created_ts": time.time(),
+    }
+    _save(SMM_DEP_FILE, smm_deps)
+    if _gen_msg:
+        try: bot.delete_message(uid, _gen_msg.message_id)
+        except Exception: pass
+    bonus_bits = []
+    if promo_bonus > 0:
+        bonus_bits.append(f"🎟️ Promo Bonus: <b>+${promo_bonus:.2f}</b>")
+    if auto_bonus > 0:
+        bonus_bits.append(f"🎁 Auto Bonus: <b>+${auto_bonus:.2f}</b>")
+    bonus_txt = ("\n" + "\n".join(bonus_bits)) if bonus_bits else ""
+    caption = (
+        f"💠 <b>ដាក់លុយ — KHPAY</b>\n━━━━━━━━━━━━━━━━━━\n"
+        f"💰 ចំនួន: <b>${amount:.2f}</b>{bonus_txt}\n"
+        f"🆔 Txn: <code>{reference}</code>\n"
+        f"⏱ ផុតក្នុង: <b>{expires_in}s</b>\n━━━━━━━━━━━━━━━━━━\n"
+        f"📱 ស្កេន QR ដោយ App ធនាគារ (ABA / ACLEDA / Wing …)\n"
+        f"✅ បន្ទាប់ពីបង់រួច Bot នឹងបញ្ចូល Balance ស្វ័យប្រវត្តិ"
+    )
+    photo_sent = False
+    try:
+        if isinstance(qr_image, str) and qr_image.startswith("data:image"):
+            raw = base64.b64decode(qr_image.split(",", 1)[-1])
+            bot.send_photo(uid, raw, caption=caption, parse_mode="HTML")
+            photo_sent = True
+        elif isinstance(qr_image, str) and qr_image.startswith("http"):
+            bot.send_photo(uid, qr_image, caption=caption, parse_mode="HTML")
+            photo_sent = True
+        elif isinstance(qr_image, str) and len(qr_image) > 200:
+            try:
+                raw = base64.b64decode(qr_image)
+                bot.send_photo(uid, raw, caption=caption, parse_mode="HTML")
+                photo_sent = True
+            except Exception:
+                pass
+    except Exception as e:
+        logger.warning(f"[khpay] photo: {e}")
+    if not photo_sent and qr_string:
+        try:
+            img = qrcode.make(qr_string)
+            buf = io.BytesIO(); img.save(buf, format="PNG"); buf.seek(0)
+            bot.send_photo(uid, buf, caption=caption, parse_mode="HTML")
+            photo_sent = True
+        except Exception as e:
+            logger.warning(f"[khpay] qrcode: {e}")
+    if not photo_sent:
+        bot.send_message(uid, caption + (f"\n\n🔗 {pay_url}" if pay_url else ""), parse_mode="HTML")
+    try:
+        pnotify(f"🆕 <b>QR KHPAY</b>\n👤 <code>{uid_str}</code>\n💵 ${amount:.2f}\n🔖 <code>{reference}</code>")
+    except Exception: pass
+    threading.Thread(target=_watch_deposit, args=(uid, uid_str, dep_id, amount, reference),
+                     kwargs={"checker": _khpay_check}, daemon=True).start()
+
 def _get_dep_promo(uid):
     step = waiting.get(uid)
     if isinstance(step, dict):
@@ -3156,18 +3340,23 @@ def _process_deposit(uid, uid_str, amount, promo_code=None, method=None):
     បើមានតែមួយ ប្រើវិធីនោះភ្លាម；  បើគ្មានវិធីណាមួយប្រើបាន ជូនដំណឹង user + admin ។ (v12/v13)"""
     camrapid_ok = bool(_effective_camrapid_key()) and is_pay_method_enabled("camrapid")
     aba_ok      = has_aba_payway() and is_pay_method_enabled("aba")
+    khpay_ok    = has_khpay() and is_pay_method_enabled("khpay")
     if method is None:
-        if camrapid_ok and aba_ok:
+        available = []
+        if camrapid_ok: available.append(("camrapid", "🔄 CamRapidPay KHQR", "active"))
+        if aba_ok:      available.append(("aba", "💳 ABA PayWay", "primary"))
+        if khpay_ok:    available.append(("khpay", "💠 KHPAY", "progress"))
+        if len(available) > 1:
             _pending_dep_choice[uid] = {"amount": amount, "promo_code": promo_code}
             lang = get_lang(uid)
             kb = InlineKeyboardMarkup()
-            kb.add(InlineKeyboardButton("🔄 CamRapidPay KHQR", callback_data="depm:camrapid", color="active"))
-            kb.add(InlineKeyboardButton("💳 ABA PayWay", callback_data="depm:aba", color="primary"))
+            for mid, label, color in available:
+                kb.add(InlineKeyboardButton(label, callback_data=f"depm:{mid}", color=color))
             bot.send_message(uid,
                 f"💳 <b>{'ជ្រើសរើសវិធីទូទាត់' if lang=='kh' else 'Choose payment method'}</b> — ${amount:.2f}",
                 parse_mode="HTML", reply_markup=kb)
             return
-        if not camrapid_ok and not aba_ok:
+        if not available:
             lang = get_lang(uid)
             bot.send_message(uid,
                 "⚠️ <b>មិនមានវិធីទូទាត់ស្វ័យប្រវត្តិណាមួយបើកនៅពេលនេះទេ។</b>\nសូមទំនាក់ Admin ដើម្បីជំនួយ"
@@ -3180,7 +3369,7 @@ def _process_deposit(uid, uid_str, amount, promo_code=None, method=None):
                     f"👤 <code>{uid_str}</code>\nសូមចុច 🔀 វិធីទូទាត់ ដើម្បីពិនិត្យ")
             except Exception as _e: logger.debug(f"[silent] {_e}")
             return
-        method = "aba" if aba_ok else "camrapid"
+        method = available[0][0]
 
     lang  = get_lang(uid)
     promo_bonus = 0.0
@@ -3308,18 +3497,26 @@ def admin_kb():
     #    រួចហើយ — បើទុកឲ្យកែពី clone ខ្លួនឯងផ្ទាល់ នឹងធ្វើឲ្យ config ចាស់ក្នុង
     #    clone_registry.json (Master) មិនត្រូវគ្នានឹងតម្លៃពិតរបស់ clone ទៀត
     #    (bug ប្រភពទិន្នន័យស្ទួន — clone restart វិញនឹងទាញយកតម្លៃចាស់ពី Master មកជាន់)។
+    # ── Settings: payment keys + toggle អាចកែបានទាំង Master និង Sub-bot (clone)
+    #    ព្រោះ camrapid_cfg/aba_cfg/khpay_cfg/paytoggle ស្ថិតក្នុង DATA_DIR របស់ instance នីមួយៗ
+    kb.row("━━━ ⚙️ Settings ━━━")
     if IS_MASTER:
-        kb.row("━━━ ⚙️ Settings ━━━")
         kb.row(KeyboardButton("✏️ កែ Support",      color="progress"),
                KeyboardButton("👥 Sub Admins",      color="progress"))
-        kb.row(KeyboardButton("🔑 CamRapidPay Key", color="progress"),
-               KeyboardButton("💳 ABA PayWay Key", color="progress"))
-        kb.row(KeyboardButton("🔀 វិធីទូទាត់", color="progress"),
-               KeyboardButton("🏦 Bakong Deep Link", color="progress"))
+    kb.row(KeyboardButton("🔑 CamRapidPay Key", color="progress"),
+           KeyboardButton("💳 ABA PayWay Key", color="progress"))
+    kb.row(KeyboardButton("💠 KHPAY Key", color="progress"),
+           KeyboardButton("🔀 វិធីទូទាត់", color="progress"))
+    if IS_MASTER:
+        kb.row(KeyboardButton("🏦 Bakong Deep Link", color="progress"),
+               KeyboardButton("⏳ QR Cooldown", color="progress"))
+        kb.row(KeyboardButton("📢 Force Subscribe", color="progress"),
+               KeyboardButton("📝 Welcome Msg",     color="progress"))
+        kb.row(KeyboardButton("😊 កំណត់ Emoji", color="progress"))
+    else:
+        # Sub-bot: កែ payment + cooldown ក្នុង instance ខ្លួន
         kb.row(KeyboardButton("⏳ QR Cooldown", color="progress"),
-               KeyboardButton("📢 Force Subscribe", color="progress"))
-        kb.row(KeyboardButton("📝 Welcome Msg",     color="progress"),
-               KeyboardButton("😊 កំណត់ Emoji", color="progress"))
+               KeyboardButton("📝 Welcome Msg", color="progress"))
     return kb
 
 def emoji_menu_kb():
@@ -5327,6 +5524,8 @@ def cb_newbot_confirm_yes(call):
         "manual_qr_info": step.get("manual_qr_info", ""),
         "aba_key": step.get("aba_key", ""),
         "aba_merchant": step.get("aba_merchant", ""),
+        "khpay_key": step.get("khpay_key", ""),
+        "khpay_merchant": step.get("khpay_merchant", ""),
     }
     clone_registry[name] = cfg
     _save(CLONES_REGISTRY, clone_registry)
@@ -5360,12 +5559,13 @@ def cb_newbot_confirm_no(call):
     bot.send_message(uid, "❌ បានបោះបង់ការបង្កើត bot ថ្មី។", reply_markup=admin_kb())
 
 def _clone_pay_txt(pay_method):
-    """Label ស្តង់ដារសម្រាប់វិធីទូទាត់របស់ clone មួយ — ប្រើទាំង /mybots view និង
-    ក្រោយប្តូរ Step ទូទាត់ (cln_pay) ដើម្បីកុំឲ្យ text ខុសគ្នារវាងកន្លែង។"""
+    """Label ស្តង់ដារសម្រាប់វិធីទូទាត់របស់ clone មួយ"""
     if pay_method == "manual":
         return "🖼 Manual QR (Step 2)"
     if pay_method == "aba":
         return "🏦 ABA PayWay Auto (Step 3)"
+    if pay_method == "khpay":
+        return "💠 KHPAY Auto (khpay.site)"
     return "🔄 CamRapidPay Auto (Step 1)"
 
 _STEP_EMOJI = ["0️⃣","1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣"]
@@ -5395,6 +5595,12 @@ def cb_newbot_paymethod(call):
         bot.send_message(uid,
             f"{_step_label(5, 7)} — វាយ <b>ABA PayWay Profile Key</b> សម្រាប់ bot នេះ "
             "(ពី khmer-system.com/operator/profile):",
+            parse_mode="HTML", reply_markup=cancel_kb())
+    elif method == "khpay":
+        waiting[uid] = {**step, "step": "newbot_khpay_key", "pay_method": "khpay", "camrapid_key": ""}
+        bot.send_message(uid,
+            f"{_step_label(5, 7)} — វាយ <b>KHPAY API Key</b> សម្រាប់ bot នេះ "
+            "(ពី https://khpay.site/dashboard/settings):",
             parse_mode="HTML", reply_markup=cancel_kb())
     else:
         waiting[uid] = {**step, "step": "newbot_manual_qr_photo", "pay_method": "manual", "camrapid_key": ""}
@@ -5444,9 +5650,10 @@ def cb_cln_pay(call):
         bot.answer_callback_query(call.id, "រកមិនឃើញ"); return
     bot.answer_callback_query(call.id)
     kb = InlineKeyboardMarkup(row_width=1)
-    kb.add(InlineKeyboardButton("1️⃣ Step 1 — CamRapidPay QR ស្វ័យប្រវត្តិ", callback_data=f"cln_paysel|auto|{name}", color="active"))
-    kb.add(InlineKeyboardButton("3️⃣ Step 3 — ABA PayWay ស្វ័យប្រវត្តិ", callback_data=f"cln_paysel|aba|{name}", color="active"))
-    kb.add(InlineKeyboardButton("2️⃣ Step 2 — QR ដាក់ដោយដៃ (Manual)", callback_data=f"cln_paysel|manual|{name}", color="progress"))
+    kb.add(InlineKeyboardButton("1️⃣ CamRapidPay QR ស្វ័យប្រវត្តិ", callback_data=f"cln_paysel|auto|{name}", color="active"))
+    kb.add(InlineKeyboardButton("3️⃣ ABA PayWay ស្វ័យប្រវត្តិ", callback_data=f"cln_paysel|aba|{name}", color="active"))
+    kb.add(InlineKeyboardButton("💠 KHPAY ស្វ័យប្រវត្តិ", callback_data=f"cln_paysel|khpay|{name}", color="progress"))
+    kb.add(InlineKeyboardButton("2️⃣ QR ដាក់ដោយដៃ (Manual)", callback_data=f"cln_paysel|manual|{name}", color="progress"))
     kb.add(InlineKeyboardButton("⬅️ ត្រឡប់", callback_data=f"cln_view|{name}", color="inactive"))
     bot.send_message(uid,
         f"🔁 <b>ប្តូរ Step ទូទាត់ — {name}</b>\n\n"
@@ -5944,6 +6151,53 @@ def cb_set_aba(call):
             + ("✅ QR គួរតែចេញបានធម្មតា!" if ok else
                "❌ សូមអានសារ Error ខាងលើ (ឧ. Key/Merchant ID មិនត្រឹមត្រូវ, service down ។ល។)"),
             parse_mode="HTML", reply_markup=admin_kb())
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("set_khpay:"))
+def cb_set_khpay(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID:
+        bot.answer_callback_query(call.id, "🚫"); return
+    action = call.data.split(":")[1]
+    bot.answer_callback_query(call.id)
+    if action == "edit":
+        waiting[uid] = "set_khpay_key"
+        bot.send_message(uid,
+            "💠 <b>ផ្ញើ KHPAY API Key ថ្មី:</b>\n"
+            "(យកពី https://khpay.site/dashboard/settings)\n"
+            "ឬផ្ញើ <code>-</code> ដើម្បី reset ទៅ env/default",
+            parse_mode="HTML", reply_markup=cancel_kb())
+        return
+    if action == "edit_merchant":
+        waiting[uid] = "set_khpay_merchant"
+        bot.send_message(uid,
+            "🏪 <b>ផ្ញើ KHPAY Merchant ID:</b>\n"
+            "ឧ: <code>mch_ea4352a8ebc20c43</code>\n"
+            "ឬផ្ញើ <code>-</code> ដើម្បីលុប (ប្រើ default merchant)",
+            parse_mode="HTML", reply_markup=cancel_kb())
+        return
+    if action == "testcreate":
+        bot.send_message(uid, "⏳ កំពុង Test Generate QR ជាមួយ KHPAY ($0.10)...")
+        test_data = _khpay_create(uid, 0.10, note="KHPAY test")
+        ok = bool(test_data)
+        detail = str(test_data if ok else _last_khpay_error)[:500]
+        mid = _effective_khpay_merchant() or "(default)"
+        msg = (
+            "%s <b>KHPAY Test (Generate QR)</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "🌐 URL: <code>%s</code>\n"
+            "🏪 Merchant: <code>%s</code>\n"
+            "📋 Response: <code>%s</code>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "%s"
+        ) % (
+            "✅" if ok else "❌",
+            KHPAY_CREATE_URL,
+            mid,
+            detail,
+            "✅ QR គួរតែចេញបានធម្មតា!" if ok else "❌ សូមពិនិត្យ API Key / Merchant / account នៅ khpay.site",
+        )
+        bot.send_message(uid, msg, parse_mode="HTML", reply_markup=admin_kb())
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("set_bakong:"))
 def cb_set_bakong(call):
@@ -6609,9 +6863,10 @@ def handle_msg(message):
                 bot.send_message(uid, "⚠️ សូមផ្ញើជាលេខតែប៉ុណ្ណោះ:", reply_markup=cancel_kb()); return
             waiting[uid] = {**step, "step": "newbot_paymethod", "new_admin_id": int(text.strip())}
             kb = InlineKeyboardMarkup(row_width=1)
-            kb.add(InlineKeyboardButton("🔄 CamRapidPay QR ស្វ័យប្រវត្តិ (7 ជំហាន)", callback_data="newbot_pay|auto", color="active"))
-            kb.add(InlineKeyboardButton("🏦 ABA PayWay ស្វ័យប្រវត្តិ (8 ជំហាន)", callback_data="newbot_pay|aba", color="active"))
-            kb.add(InlineKeyboardButton("🖼 QR ដាក់ដោយដៃ Manual (8 ជំហាន)", callback_data="newbot_pay|manual", color="progress"))
+            kb.add(InlineKeyboardButton("🔄 CamRapidPay QR ស្វ័យប្រវត្តិ", callback_data="newbot_pay|auto", color="active"))
+            kb.add(InlineKeyboardButton("🏦 ABA PayWay ស្វ័យប្រវត្តិ", callback_data="newbot_pay|aba", color="active"))
+            kb.add(InlineKeyboardButton("💠 KHPAY ស្វ័យប្រវត្តិ (khpay.site)", callback_data="newbot_pay|khpay", color="progress"))
+            kb.add(InlineKeyboardButton("🖼 QR ដាក់ដោយដៃ Manual", callback_data="newbot_pay|manual", color="progress"))
             bot.send_message(uid,
                 f"{_step_label(4)} — ជ្រើសរើស <b>របៀបទទួលទឹក</b> សម្រាប់ bot នេះ:\n\n"
                 "🔄 <b>CamRapidPay Auto</b> — ប្រើ API Key បង្កើត QR ស្វ័យប្រវត្តិ (ត្រូវការ API Key) — សរុប 7 ជំហាន\n"
@@ -6660,6 +6915,31 @@ def handle_msg(message):
                 parse_mode="HTML", reply_markup=cancel_kb())
             return
 
+        if isinstance(step, dict) and step.get("step") == "newbot_khpay_key":
+            key = text.strip()
+            if len(key) < 8:
+                bot.send_message(uid, "⚠️ KHPAY Key ខ្លីពេក សូមផ្ញើម្តងទៀត:", reply_markup=cancel_kb()); return
+            waiting[uid] = {**step, "step": "newbot_khpay_merchant", "khpay_key": key}
+            bot.send_message(uid,
+                f"{_step_label(6, 7)} — វាយ <b>KHPAY Merchant ID</b> (optional)\n"
+                "ឧ: <code>mch_ea4352a8ebc20c43</code>\n"
+                "ឬផ្ញើ <code>-</code> ដើម្បីប្រើ default merchant:",
+                parse_mode="HTML", reply_markup=cancel_kb())
+            return
+
+        if isinstance(step, dict) and step.get("step") == "newbot_khpay_merchant":
+            raw = text.strip()
+            merchant = "" if raw == "-" else raw
+            name = step["name"]
+            port = _next_clone_port()
+            waiting[uid] = {**step, "step": "newbot_display", "khpay_merchant": merchant, "port": port}
+            bot.send_message(uid,
+                f"{_step_label(7, 7)} — វាយ <b>ឈ្មោះ bot</b> ដែលបង្ហាញដល់អ្នកប្រើ (ឧ. <code>Jak Like Shop</code>)\n"
+                "ឬផ្ញើ <code>-</code> ដើម្បីប្រើឈ្មោះ internal (<code>"
+                + name + "</code>) ជំនួស:",
+                parse_mode="HTML", reply_markup=cancel_kb())
+            return
+
         if isinstance(step, dict) and step.get("step") == "newbot_manual_qr_info":
             raw = text.strip()
             info = "" if raw == "-" else raw
@@ -6699,6 +6979,28 @@ def handle_msg(message):
             name = step["clone"]
             waiting.pop(uid, None)
             _apply_clone_pay_update(uid, name, "aba", aba_key=step.get("aba_key", ""), aba_merchant=merchant)
+            return
+
+        if isinstance(step, dict) and step.get("step") == "cln_pay_khpay_key":
+            key = text.strip()
+            if len(key) < 8:
+                bot.send_message(uid, "⚠️ KHPAY Key ខ្លីពេក សូមផ្ញើម្តងទៀត:", reply_markup=cancel_kb()); return
+            name = step["clone"]
+            waiting[uid] = {"step": "cln_pay_khpay_merchant", "clone": name, "khpay_key": key}
+            bot.send_message(uid,
+                f"វាយ <b>KHPAY Merchant ID</b> សម្រាប់ '{name}' (optional)\n"
+                "ឧ: <code>mch_ea4352a8ebc20c43</code> ឬ <code>-</code> សម្រាប់ default:",
+                parse_mode="HTML", reply_markup=cancel_kb())
+            return
+
+        if isinstance(step, dict) and step.get("step") == "cln_pay_khpay_merchant":
+            raw = text.strip()
+            merchant = "" if raw == "-" else raw
+            name = step["clone"]
+            waiting.pop(uid, None)
+            _apply_clone_pay_update(uid, name, "khpay",
+                                     khpay_key=step.get("khpay_key", ""),
+                                     khpay_merchant=merchant)
             return
 
         if isinstance(step, dict) and step.get("step") == "cln_pay_qr_info":
@@ -7823,6 +8125,35 @@ def handle_msg(message):
                 f"💡 បើកំណត់ទាំង CamRapidPay + ABA ព្រមគ្នា Bot នឹងឲ្យ User ជ្រើសរើសពេលដាក់លុយ។",
                 parse_mode="HTML", reply_markup=kb2); return
 
+        if text == "💠 KHPAY Key":
+            if uid != ADMIN_ID:
+                bot.send_message(uid, "🚫 Admin only!", reply_markup=sub_admin_kb()); return
+            cur = _effective_khpay_key()
+            mid = _effective_khpay_merchant()
+            masked = cur[:8] + "..." + cur[-4:] if len(cur) > 12 else (("*" * len(cur)) if cur else "(មិនទាន់កំណត់)")
+            kb2 = InlineKeyboardMarkup()
+            kb2.add(InlineKeyboardButton("✏️ ប្តូរ API Key", callback_data="set_khpay:edit", color="progress"))
+            kb2.add(InlineKeyboardButton("✏️ ប្តូរ Merchant ID", callback_data="set_khpay:edit_merchant", color="progress"))
+            kb2.add(InlineKeyboardButton("🧪 Test Generate QR ($0.10)", callback_data="set_khpay:testcreate", color="active"))
+            msg = (
+                "💠 <b>KHPAY (khpay.site)</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "🔑 Key: <code>%s</code>\n"
+                "🏪 Merchant: <code>%s</code>\n"
+                "Source: %s\n"
+                "🌐 API: <code>%s</code>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "📌 Key: Dashboard → Settings\n"
+                "📌 Merchant ID (optional): <code>mch_...</code> — បើទុកចោល ប្រើ default\n"
+                "💡 Sub-bot ក៏កែបាន — config រក្សាក្នុង DATA_DIR របស់ bot នេះ"
+            ) % (
+                masked,
+                mid or "(default)",
+                ("📁 runtime" if (khpay_cfg.get("key") or khpay_cfg.get("merchant_id")) else "⚙️ env/default"),
+                KHPAY_BASE_URL,
+            )
+            bot.send_message(uid, msg, parse_mode="HTML", reply_markup=kb2); return
+
         if text == "🔀 វិធីទូទាត់":
             if uid != ADMIN_ID:
                 bot.send_message(uid, "🚫 Master Admin only!", reply_markup=sub_admin_kb()); return
@@ -7946,6 +8277,42 @@ def handle_msg(message):
                 masked = k[:6] + "..." + k[-4:] if len(k) > 10 else "*" * len(k)
                 bot.send_message(uid, f"✅ ABA PayWay Key ថ្មីបានរក្សា!\n🔑 <code>{masked}</code>",
                                  parse_mode="HTML", reply_markup=admin_kb())
+            return
+
+
+        if step == "set_khpay_key":
+            waiting.pop(uid, None)
+            if text.strip() == "-":
+                khpay_cfg["key"] = ""
+                _save(KHPAY_CFG_FILE, khpay_cfg)
+                bot.send_message(uid, "✅ KHPAY Key reset ទៅ env/default!", reply_markup=admin_kb())
+            else:
+                k = text.strip()
+                if len(k) < 8:
+                    bot.send_message(uid, "❌ Key ខ្លីពេក!", reply_markup=admin_kb()); return
+                khpay_cfg["key"] = k
+                _save(KHPAY_CFG_FILE, khpay_cfg)
+                masked = k[:8] + "..." + k[-4:] if len(k) > 12 else "*" * len(k)
+                bot.send_message(uid,
+                    "✅ KHPAY Key ថ្មីបានរក្សា!\n🔑 <code>%s</code>" % masked,
+                    parse_mode="HTML", reply_markup=admin_kb())
+            return
+
+        if step == "set_khpay_merchant":
+            waiting.pop(uid, None)
+            if text.strip() == "-":
+                khpay_cfg["merchant_id"] = ""
+                _save(KHPAY_CFG_FILE, khpay_cfg)
+                bot.send_message(uid, "✅ KHPAY Merchant ID លុបហើយ (ប្រើ default)!", reply_markup=admin_kb())
+            else:
+                mid = text.strip()
+                if not mid.startswith("mch_") and len(mid) < 6:
+                    bot.send_message(uid, "❌ Merchant ID មិនត្រឹមត្រូវ (ឧ. mch_ea4352a8ebc20c43)", reply_markup=admin_kb()); return
+                khpay_cfg["merchant_id"] = mid
+                _save(KHPAY_CFG_FILE, khpay_cfg)
+                bot.send_message(uid,
+                    "✅ KHPAY Merchant ID រក្សាហើយ!\n🏪 <code>%s</code>" % mid,
+                    parse_mode="HTML", reply_markup=admin_kb())
             return
 
         if step == "set_aba_merchant":
