@@ -3253,12 +3253,16 @@ def _send_deposit_qr(uid, amount, promo_code=None, label="💸 ដាក់ល�
     def _attach_bank_button():
         try:
             dlink = _bakong_deeplink(qr_str, uid) if qr_str else None
-            if not dlink:
+            aba_pay = _aba_mobile_https_link(qr_str) if qr_str else None
+            if not dlink and not aba_pay:
                 return
             kb_pay = InlineKeyboardMarkup()
-            kb_pay.add(InlineKeyboardButton("🏦 ស្កេន QR ឬ ចុចបើក App ធនាគារ", url=dlink, color="active"))
-            new_cap = cap + ("\n📱 <i>ចុច button ខាងក្រោម ដើម្បីបើក App ធនាគារ auto-scan។ "
-                              "បើមិនចូល App ស្វ័យប្រវត្តិទេ សូមចុច ••• (ជ្រុងស្តាំលើ ក្នុង browser) → 'បើកក្នុង Safari'</i>")
+            if aba_pay:
+                kb_pay.add(InlineKeyboardButton("🏦 បើក ABA → Pay", url=aba_pay, color="active"))
+            if dlink:
+                kb_pay.add(InlineKeyboardButton("🏦 បើក App ធនាគារ (ACLEDA/Wing…)", url=dlink, color="progress"))
+            new_cap = cap + ("\n📱 <i>ចុច «បើក ABA → Pay» ដើម្បីចូលអេក្រង់ទូទាត់ភ្លាម។ "
+                              "បើមិនចូល App សូម ••• → បើកក្នុង Safari/Chrome</i>")
             if img_buf:
                 bot.edit_message_caption(new_cap, chat_id=uid, message_id=sent_msg.message_id,
                                          parse_mode="HTML", reply_markup=kb_pay)
@@ -3344,13 +3348,24 @@ def _send_deposit_qr_aba(uid, amount, promo_code_name=None, bonus=0.0, promo_bon
     # So _build_aba_app_deeplink()'s custom-scheme fallback is only usable for a button
     # when khmer-system.com happens to return an http(s) wrapper link; otherwise we
     # silently drop the button (the QR image/pay_url are still enough for the user).
-    aba_btn_link = aba_app_link if (aba_app_link and aba_app_link.lower().startswith(("http://", "https://", "tg://"))) else None
+    # Telegram មិនទទួល abamobilebank:// — ប្រើ /open-aba → ចូល ABA Pay screen
+    aba_https = None
+    if aba_app_link:
+        if aba_app_link.lower().startswith(("http://", "https://", "tg://")):
+            aba_https = aba_app_link
+        else:
+            aba_https = _aba_mobile_https_link(aba_app_link)
+    if not aba_https:
+        for _k in ("qr_string", "qrString", "qr_code", "qr"):
+            if data.get(_k):
+                aba_https = _aba_mobile_https_link(data.get(_k))
+                break
 
     kb_pay = None
-    if aba_btn_link or pay_url:
+    if aba_https or pay_url:
         kb_pay = InlineKeyboardMarkup()
-        if aba_btn_link:
-            kb_pay.add(InlineKeyboardButton("🏦 បើក ABA App ស្កេនស្វ័យប្រវត្តិ", url=aba_btn_link, color="active"))
+        if aba_https:
+            kb_pay.add(InlineKeyboardButton("🏦 បើក ABA → Pay", url=aba_https, color="active"))
         if pay_url:
             kb_pay.add(InlineKeyboardButton("🌐 បើកទំព័រទូទាត់", url=pay_url, color="progress"))
 
@@ -3465,11 +3480,9 @@ def _send_deposit_qr_khpay(uid, amount, promo_code_name=None, bonus=0.0, promo_b
     kb_pay = InlineKeyboardMarkup()
     has_btn = False
     if aba_https:
-        kb_pay.add(InlineKeyboardButton("🏦 បើក ABA Mobile", url=aba_https, color="active"))
+        kb_pay.add(InlineKeyboardButton("🏦 បើក ABA → Pay", url=aba_https, color="active"))
         has_btn = True
-    if pay_url and str(pay_url).lower().startswith(("http://", "https://")):
-        kb_pay.add(InlineKeyboardButton("🌐 បើកទំព័រទូទាត់", url=str(pay_url).strip(), color="progress"))
-        has_btn = True
+    # payment_url button លុប — User ប្រើតែ «បើក ABA → Pay» ឬ ស្កេន QR
     if not has_btn:
         kb_pay = None
 
@@ -3518,15 +3531,13 @@ def _send_deposit_qr_khpay(uid, amount, promo_code_name=None, bonus=0.0, promo_b
                 return
             kb2 = InlineKeyboardMarkup()
             if aba_link:
-                kb2.add(InlineKeyboardButton("🏦 បើក ABA Mobile", url=aba_link, color="active"))
+                kb2.add(InlineKeyboardButton("🏦 បើក ABA → Pay", url=aba_link, color="active"))
             if bakong_link and bakong_link != aba_link:
                 kb2.add(InlineKeyboardButton(
                     "🏦 បើក App ធនាគារ (ABA/ACLEDA/Wing)", url=bakong_link, color="active"))
-            if pay_url and str(pay_url).lower().startswith(("http://", "https://")):
-                kb2.add(InlineKeyboardButton(
-                    "🌐 បើកទំព័រទូទាត់", url=str(pay_url).strip(), color="progress"))
+            # payment_url button លុបពី KHPAY
             new_cap = caption + (
-                "\n📱 <i>ចុច «បើក ABA Mobile» — បើមិនចូល App សូមបើកតំណក្នុង Safari/Chrome "
+                "\n📱 <i>ចុច «បើក ABA → Pay» — ចូលអេក្រង់ទូទាត់ភ្លាម។ បើមិនចូល សូមបើកក្នុង Safari/Chrome "
                 "(មិនមែន in-app browser របស់ Telegram)</i>")
             if photo_sent:
                 bot.edit_message_caption(
@@ -9095,9 +9106,12 @@ def health():
 
 @flask_app.route("/open-aba")
 def open_aba_app():
-    """HTTPS landing → redirect ទៅ ABA Mobile (abamobilebank://).
-    User ចុច button ក្នុង Telegram → បើក browser → បើក ABA App។"""
+    """HTTPS landing → បើក ABA Mobile ចូលអេក្រង់ Pay (type=payway + qrcode) តែម្តង។
+    Android: intent:// + package com.paygo24.ibank
+    iOS: abamobilebank://ababank.com?type=payway&qrcode=…"""
     from flask import Response
+    from urllib.parse import quote
+    import json as _json
     tok = (flask_request.args.get("d") or "").strip()
     deeplink = ""
     if tok:
@@ -9110,19 +9124,66 @@ def open_aba_app():
         return Response(
             "<!DOCTYPE html><html><body><p>❌ Invalid or expired ABA link</p></body></html>",
             status=400, mimetype="text/html; charset=utf-8")
-    safe = deeplink.replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;")
+    # ធានា type=payway → ចូលអេក្រង់ Pay ផ្ទាល់
+    low = deeplink.lower()
+    if "type=payway" not in low and "qrcode=" in low:
+        host_q = deeplink.split("://", 1)[-1]
+        if "?" in host_q:
+            host, q = host_q.split("?", 1)
+            deeplink = f"abamobilebank://{host}?type=payway&{q}"
+        else:
+            deeplink = deeplink + "?type=payway"
+    # Android Intent → package ABA, ចូល pay screen
+    path_q = deeplink.split("://", 1)[-1]
+    intent_url = (
+        f"intent://{path_q}#Intent;scheme=abamobilebank;"
+        f"package=com.paygo24.ibank;S.browser_fallback_url={quote(deeplink, safe='')};end"
+    )
+    js_dl = _json.dumps(deeplink)
+    js_intent = _json.dumps(intent_url)
+    safe_dl = deeplink.replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;")
+    safe_intent = intent_url.replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;")
     html = f"""<!DOCTYPE html>
 <html lang="km"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="0;url={safe}">
-<title>Opening ABA Mobile…</title>
-<script>window.location.href={deeplink!r};</script>
-</head><body style="font-family:sans-serif;text-align:center;padding:2rem">
-<p>🏦 កំពុងបើក <b>ABA Mobile</b>…</p>
-<p><a href="{safe}" style="font-size:1.2rem">ចុចទីនេះ បើ App មិនបើកស្វ័យប្រវត្តិ</a></p>
-<p style="color:#888;font-size:0.9rem">បើនៅតែមិនចូល — បើកតំណនេះក្នុង <b>Safari / Chrome</b> (មិនមែនក្នុង Telegram)</p>
-</body></html>"""
+<title>បើក ABA Pay…</title>
+<style>
+body{{font-family:system-ui,sans-serif;text-align:center;padding:2rem;background:#0b1f3a;color:#fff;margin:0}}
+.btn{{display:inline-block;margin:12px 8px;padding:14px 28px;background:#ed1c24;color:#fff;
+text-decoration:none;border-radius:12px;font-size:1.15rem;font-weight:700}}
+.btn2{{background:#1a73e8}}
+.hint{{color:#a8c0d8;font-size:0.9rem;margin-top:1.5rem;line-height:1.5}}
+</style>
+<script>
+(function(){{
+  var dl = {js_dl};
+  var intent = {js_intent};
+  var isAndroid = /Android/i.test(navigator.userAgent || "");
+  function go(){{
+    if (isAndroid) {{
+      window.location.href = intent;
+      setTimeout(function(){{ window.location.href = dl; }}, 500);
+    }} else {{
+      window.location.href = dl;
+    }}
+  }}
+  go();
+  setTimeout(go, 350);
+  setTimeout(go, 1000);
+}})();
+</script>
+</head>
+<body>
+  <p style="font-size:1.3rem;margin-top:2rem">🏦 កំពុងបើក <b>ABA Mobile → Pay</b>…</p>
+  <p><a class="btn" href="{safe_intent}">បើក ABA Pay (Android)</a></p>
+  <p><a class="btn btn2" href="{safe_dl}">បើក ABA Pay (iOS)</a></p>
+  <p class="hint">
+    បើមិនចូល App — ចុច ••• → <b>បើកក្នុង Safari / Chrome</b><br>
+    (Telegram in-app browser ជួនកាលរារាំង banking app)
+  </p>
+</body>
+</html>"""
     return Response(html, mimetype="text/html; charset=utf-8")
 
 @flask_app.route("/webhook/camrapid", methods=["POST"])
