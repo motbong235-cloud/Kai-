@@ -829,6 +829,56 @@ bakong_cfg   = _load(BAKONG_CFG_FILE, {"token": ""})            # live-editable 
 webhook_cfg  = _load(WEBHOOK_CFG_FILE, {"url": ""})              # live-editable CamRapidPay webhook URL
 paytoggle_cfg= _load(PAYTOGGLE_CFG_FILE, {"camrapid_enabled": True, "aba_enabled": True, "khpay_enabled": True})  # បិទ/បើក វិធីទូទាត់ (v13)
 
+# ★ Sync env → runtime cfg (clone spawn ផ្ញើ key តាម env — ធានាថា _effective_* រកឃើញ)
+def _sync_payment_keys_from_env():
+    changed = False
+    if KHPAY_API_KEY and not (khpay_cfg.get("key") or "").strip():
+        khpay_cfg["key"] = KHPAY_API_KEY
+        changed = True
+    if KHPAY_MERCHANT_ID and not (khpay_cfg.get("merchant_id") or "").strip():
+        khpay_cfg["merchant_id"] = KHPAY_MERCHANT_ID
+        changed = True
+    if CAMRAPID_API_KEY and not (camrapid_cfg.get("key") or "").strip():
+        camrapid_cfg["key"] = CAMRAPID_API_KEY
+        changed = True
+    if ABA_API_KEY and not (aba_cfg.get("key") or "").strip():
+        aba_cfg["key"] = ABA_API_KEY
+        changed = True
+    if ABA_MERCHANT_ID and not (aba_cfg.get("merchant_id") or "").strip():
+        aba_cfg["merchant_id"] = ABA_MERCHANT_ID
+        changed = True
+    # បើ PAY_METHOD កំណត់ method តែមួយ → បើក toggle នោះ
+    pref = (os.getenv("PAY_METHOD") or "auto").strip().lower()
+    if pref == "khpay":
+        paytoggle_cfg["khpay_enabled"] = True
+        paytoggle_cfg["camrapid_enabled"] = False
+        paytoggle_cfg["aba_enabled"] = False
+        changed = True
+    elif pref == "aba":
+        paytoggle_cfg["aba_enabled"] = True
+        paytoggle_cfg["camrapid_enabled"] = False
+        paytoggle_cfg["khpay_enabled"] = False
+        changed = True
+    elif pref in ("auto", "camrapid"):
+        if CAMRAPID_API_KEY or camrapid_cfg.get("key"):
+            paytoggle_cfg["camrapid_enabled"] = True
+    if changed:
+        try:
+            if khpay_cfg.get("key"):
+                _save(KHPAY_CFG_FILE, khpay_cfg)
+            if camrapid_cfg.get("key"):
+                _save(CAMRAPID_CFG_FILE, camrapid_cfg)
+            if aba_cfg.get("key"):
+                _save(ABA_CFG_FILE, aba_cfg)
+            _save(PAYTOGGLE_CFG_FILE, paytoggle_cfg)
+        except Exception as e:
+            logger.warning(f"[sync_pay_env] save: {e}")
+        logger.info(f"[sync_pay_env] pref={pref} khpay={bool(khpay_cfg.get('key'))} "
+                    f"camrapid={bool(camrapid_cfg.get('key'))} aba={bool(aba_cfg.get('key'))}")
+
+_sync_payment_keys_from_env()
+
+
 def _effective_camrapid_key():
     """Return runtime key if set, else fall back to env/default"""
     return camrapid_cfg.get("key") or CAMRAPID_API_KEY
@@ -2699,6 +2749,37 @@ def _effective_webhook_url():
         return render_url.rstrip("/") + "/webhook/camrapid"
     return "https://example.com/webhook/camrapid"
 
+def _public_base_url():
+    """Base HTTPS URL របស់ Bot (Render) — ប្រើសម្រាប់ /open-aba → ABA Mobile."""
+    render_url = (os.getenv("RENDER_EXTERNAL_URL") or "").strip().rstrip("/")
+    if render_url:
+        return render_url
+    wh = (webhook_cfg.get("url") or WEBHOOK_URL or "").strip()
+    if wh.startswith("http"):
+        try:
+            from urllib.parse import urlparse
+            p = urlparse(wh)
+            if p.scheme and p.netloc:
+                return f"{p.scheme}://{p.netloc}"
+        except Exception:
+            pass
+    return ""
+
+def _aba_mobile_https_link(deeplink_or_qr):
+    """https://bot/open-aba?d=... → redirect ទៅ abamobilebank:// (បើក ABA Mobile)។
+    Telegram button ត្រូវ http(s) តែប៉ុណ្ណោះ។"""
+    base = _public_base_url()
+    if not base or not deeplink_or_qr:
+        return None
+    s = str(deeplink_or_qr).strip()
+    if not s:
+        return None
+    if not s.lower().startswith("abamobilebank://"):
+        from urllib.parse import quote
+        s = f"abamobilebank://ababank.com?type=payway&qrcode={quote(s, safe='')}"
+    tok = base64.urlsafe_b64encode(s.encode("utf-8")).decode("ascii").rstrip("=")
+    return f"{base}/open-aba?d={tok}"
+
 def _camrapid_create(uid, amount, reference):
     """Create KHQR payment via CamRapidPay API — returns response dict or None"""
     payload = {
@@ -3321,6 +3402,9 @@ def _send_deposit_qr_aba(uid, amount, promo_code_name=None, bonus=0.0, promo_bon
 
 
 def _send_deposit_qr_khpay(uid, amount, promo_code_name=None, bonus=0.0, promo_bonus=0.0, auto_bonus=0.0):
+    """Create payment via KHPAY → QR + ប៊ូតុងបើក ABA Mobile.
+    Telegram មិនទទួល abamobilebank:// ជា button URL — ប្រើ HTTPS /open-aba
+    ដែល redirect ទៅ ABA App។"""
     uid_str = str(uid)
     promo_applied = promo_code_name
     _gen_msg = None
@@ -3342,6 +3426,14 @@ def _send_deposit_qr_khpay(uid, amount, promo_code_name=None, bonus=0.0, promo_b
     qr_image = data.get("qr_image") or data.get("qrImage") or ""
     qr_string = data.get("qr_string") or data.get("qrString") or ""
     pay_url = data.get("payment_url") or data.get("pay_url") or ""
+    aba_deeplink_raw = (
+        data.get("abapay_deeplink") or data.get("aba_deeplink")
+        or data.get("deeplink") or data.get("deep_link") or ""
+    )
+    if isinstance(aba_deeplink_raw, str):
+        aba_deeplink_raw = aba_deeplink_raw.strip()
+    else:
+        aba_deeplink_raw = ""
     expires_in = int(data.get("expires_in") or KHPAY_EXPIRE_SEC)
     dep_id = f"dep_{uid}_{int(time.time())}"
     reference = txn_id or f"KHPAY{uid}_{int(time.time())}"[:50]
@@ -3352,9 +3444,7 @@ def _send_deposit_qr_khpay(uid, amount, promo_code_name=None, bonus=0.0, promo_b
         "payment_url": pay_url or "", "method": "khpay", "created_ts": time.time(),
     }
     _save(SMM_DEP_FILE, smm_deps)
-    if _gen_msg:
-        try: bot.delete_message(uid, _gen_msg.message_id)
-        except Exception: pass
+
     bonus_bits = []
     if promo_bonus > 0:
         bonus_bits.append(f"🎟️ Promo Bonus: <b>+${promo_bonus:.2f}</b>")
@@ -3366,22 +3456,41 @@ def _send_deposit_qr_khpay(uid, amount, promo_code_name=None, bonus=0.0, promo_b
         f"💰 ចំនួន: <b>${amount:.2f}</b>{bonus_txt}\n"
         f"🆔 Txn: <code>{reference}</code>\n"
         f"⏱ ផុតក្នុង: <b>{expires_in}s</b>\n━━━━━━━━━━━━━━━━━━\n"
-        f"📱 ស្កេន QR ដោយ App ធនាគារ (ABA / ACLEDA / Wing …)\n"
+        f"📱 ស្កេន QR ឬ ចុចប៊ូតុងបើក ABA Mobile\n"
         f"✅ បន្ទាប់ពីបង់រួច Bot នឹងបញ្ចូល Balance ស្វ័យប្រវត្តិ"
     )
+
+    # HTTPS link → /open-aba → abamobilebank:// (បើក ABA Mobile)
+    aba_https = _aba_mobile_https_link(aba_deeplink_raw or qr_string)
+    kb_pay = InlineKeyboardMarkup()
+    has_btn = False
+    if aba_https:
+        kb_pay.add(InlineKeyboardButton("🏦 បើក ABA Mobile", url=aba_https, color="active"))
+        has_btn = True
+    if pay_url and str(pay_url).lower().startswith(("http://", "https://")):
+        kb_pay.add(InlineKeyboardButton("🌐 បើកទំព័រទូទាត់", url=str(pay_url).strip(), color="progress"))
+        has_btn = True
+    if not has_btn:
+        kb_pay = None
+
+    if _gen_msg:
+        try: bot.delete_message(uid, _gen_msg.message_id)
+        except Exception: pass
+
+    sent_msg = None
     photo_sent = False
     try:
         if isinstance(qr_image, str) and qr_image.startswith("data:image"):
             raw = base64.b64decode(qr_image.split(",", 1)[-1])
-            bot.send_photo(uid, raw, caption=caption, parse_mode="HTML")
+            sent_msg = bot.send_photo(uid, raw, caption=caption, parse_mode="HTML", reply_markup=kb_pay)
             photo_sent = True
         elif isinstance(qr_image, str) and qr_image.startswith("http"):
-            bot.send_photo(uid, qr_image, caption=caption, parse_mode="HTML")
+            sent_msg = bot.send_photo(uid, qr_image, caption=caption, parse_mode="HTML", reply_markup=kb_pay)
             photo_sent = True
         elif isinstance(qr_image, str) and len(qr_image) > 200:
             try:
                 raw = base64.b64decode(qr_image)
-                bot.send_photo(uid, raw, caption=caption, parse_mode="HTML")
+                sent_msg = bot.send_photo(uid, raw, caption=caption, parse_mode="HTML", reply_markup=kb_pay)
                 photo_sent = True
             except Exception:
                 pass
@@ -3391,17 +3500,54 @@ def _send_deposit_qr_khpay(uid, amount, promo_code_name=None, bonus=0.0, promo_b
         try:
             img = qrcode.make(qr_string)
             buf = io.BytesIO(); img.save(buf, format="PNG"); buf.seek(0)
-            bot.send_photo(uid, buf, caption=caption, parse_mode="HTML")
+            sent_msg = bot.send_photo(uid, buf, caption=caption, parse_mode="HTML", reply_markup=kb_pay)
             photo_sent = True
         except Exception as e:
             logger.warning(f"[khpay] qrcode: {e}")
     if not photo_sent:
-        bot.send_message(uid, caption + (f"\n\n🔗 {pay_url}" if pay_url else ""), parse_mode="HTML")
+        extra = f"\n\n🔗 {pay_url}" if pay_url else ""
+        sent_msg = bot.send_message(uid, caption + extra, parse_mode="HTML", reply_markup=kb_pay)
+
+    def _attach_bank_button():
+        try:
+            if not sent_msg:
+                return
+            bakong_link = _bakong_deeplink(qr_string, uid) if qr_string else None
+            aba_link = aba_https or _aba_mobile_https_link(aba_deeplink_raw or qr_string)
+            if not bakong_link and not aba_link:
+                return
+            kb2 = InlineKeyboardMarkup()
+            if aba_link:
+                kb2.add(InlineKeyboardButton("🏦 បើក ABA Mobile", url=aba_link, color="active"))
+            if bakong_link and bakong_link != aba_link:
+                kb2.add(InlineKeyboardButton(
+                    "🏦 បើក App ធនាគារ (ABA/ACLEDA/Wing)", url=bakong_link, color="active"))
+            if pay_url and str(pay_url).lower().startswith(("http://", "https://")):
+                kb2.add(InlineKeyboardButton(
+                    "🌐 បើកទំព័រទូទាត់", url=str(pay_url).strip(), color="progress"))
+            new_cap = caption + (
+                "\n📱 <i>ចុច «បើក ABA Mobile» — បើមិនចូល App សូមបើកតំណក្នុង Safari/Chrome "
+                "(មិនមែន in-app browser របស់ Telegram)</i>")
+            if photo_sent:
+                bot.edit_message_caption(
+                    new_cap, chat_id=uid, message_id=sent_msg.message_id,
+                    parse_mode="HTML", reply_markup=kb2)
+            else:
+                bot.edit_message_text(
+                    new_cap, chat_id=uid, message_id=sent_msg.message_id,
+                    parse_mode="HTML", reply_markup=kb2)
+        except Exception as e:
+            logger.warning(f"[khpay] attach_bank_button failed: {e}")
+
+    if qr_string or aba_deeplink_raw:
+        threading.Thread(target=_attach_bank_button, daemon=True).start()
+
     try:
         pnotify(f"🆕 <b>QR KHPAY</b>\n👤 <code>{uid_str}</code>\n💵 ${amount:.2f}\n🔖 <code>{reference}</code>")
     except Exception: pass
     threading.Thread(target=_watch_deposit, args=(uid, uid_str, dep_id, amount, reference),
                      kwargs={"checker": _khpay_check}, daemon=True).start()
+
 
 def _get_dep_promo(uid):
     step = waiting.get(uid)
@@ -3418,14 +3564,19 @@ def _process_deposit(uid, uid_str, amount, promo_code=None, method=None):
     camrapid_ok = bool(_effective_camrapid_key()) and is_pay_method_enabled("camrapid")
     aba_ok      = has_aba_payway() and is_pay_method_enabled("aba")
     khpay_ok    = has_khpay() and is_pay_method_enabled("khpay")
-    # Clone កំណត់ pay_method តែមួយ (env PAY_METHOD) → បង្ខំប្រើ method នោះ
+    # Clone កំណត់ pay_method តែមួយ → ចូលចិត្ត method នោះ ប៉ុន្តែបើមិន ready រក fallback
     _pref = (os.getenv("PAY_METHOD") or "auto").strip().lower()
-    if _pref == "khpay" and khpay_ok:
-        camrapid_ok = False; aba_ok = False
-    elif _pref == "aba" and aba_ok:
-        camrapid_ok = False; khpay_ok = False
-    elif _pref in ("auto", "camrapid") and camrapid_ok:
-        aba_ok = False; khpay_ok = False
+    if _pref == "khpay":
+        if khpay_ok:
+            camrapid_ok = False; aba_ok = False
+        else:
+            logger.warning("[deposit] PAY_METHOD=khpay but khpay not ready — fallback other methods")
+    elif _pref == "aba":
+        if aba_ok:
+            camrapid_ok = False; khpay_ok = False
+    elif _pref in ("auto", "camrapid"):
+        if camrapid_ok:
+            aba_ok = False; khpay_ok = False
     if method is None:
         available = []
         if camrapid_ok: available.append(("camrapid", "🔄 CamRapidPay KHQR", "active"))
@@ -8942,6 +9093,38 @@ def _check_key():
 def health():
     return jsonify({"status": "running", "bot": _bot_brand()})
 
+@flask_app.route("/open-aba")
+def open_aba_app():
+    """HTTPS landing → redirect ទៅ ABA Mobile (abamobilebank://).
+    User ចុច button ក្នុង Telegram → បើក browser → បើក ABA App។"""
+    from flask import Response
+    tok = (flask_request.args.get("d") or "").strip()
+    deeplink = ""
+    if tok:
+        try:
+            pad = "=" * (-len(tok) % 4)
+            deeplink = base64.urlsafe_b64decode(tok + pad).decode("utf-8", errors="ignore")
+        except Exception as e:
+            logger.warning(f"[open-aba] decode failed: {e}")
+    if not deeplink or not deeplink.lower().startswith("abamobilebank://"):
+        return Response(
+            "<!DOCTYPE html><html><body><p>❌ Invalid or expired ABA link</p></body></html>",
+            status=400, mimetype="text/html; charset=utf-8")
+    safe = deeplink.replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;")
+    html = f"""<!DOCTYPE html>
+<html lang="km"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="0;url={safe}">
+<title>Opening ABA Mobile…</title>
+<script>window.location.href={deeplink!r};</script>
+</head><body style="font-family:sans-serif;text-align:center;padding:2rem">
+<p>🏦 កំពុងបើក <b>ABA Mobile</b>…</p>
+<p><a href="{safe}" style="font-size:1.2rem">ចុចទីនេះ បើ App មិនបើកស្វ័យប្រវត្តិ</a></p>
+<p style="color:#888;font-size:0.9rem">បើនៅតែមិនចូល — បើកតំណនេះក្នុង <b>Safari / Chrome</b> (មិនមែនក្នុង Telegram)</p>
+</body></html>"""
+    return Response(html, mimetype="text/html; charset=utf-8")
+
 @flask_app.route("/webhook/camrapid", methods=["POST"])
 def camrapid_webhook():
     """ទទួល Webhook ពី CamRapidPay ពេល Payment ចូល — ធ្វើឲ្យ Confirm លឿនជាង Poll ។
@@ -9049,6 +9232,45 @@ def _self_ping():
                 logger.info("✅ Self-ping OK")
         except Exception as e:
             logger.warning(f"⚠️ Self-ping failed: {e}")
+
+
+@bot.message_handler(commands=["paystatus", "paytest"])
+def cmd_pay_debug(message):
+    """Admin: /paystatus = មើល config | /paytest = សាក generate QR $0.10"""
+    uid = message.from_user.id
+    if uid != ADMIN_ID and uid not in sub_admins:
+        return
+    cam = bool(_effective_camrapid_key())
+    aba = has_aba_payway()
+    khp = has_khpay()
+    pref = os.getenv("PAY_METHOD") or "auto"
+    txt = (
+        f"💳 <b>Payment Status</b> — <code>{INSTANCE_NAME or 'MASTER'}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"PAY_METHOD: <code>{pref}</code>\n"
+        f"CamRapid: {'✅' if cam else '❌'} key | toggle={'ON' if is_pay_method_enabled('camrapid') else 'OFF'}\n"
+        f"ABA: {'✅' if aba else '❌'} key | toggle={'ON' if is_pay_method_enabled('aba') else 'OFF'}\n"
+        f"KHPAY: {'✅' if khp else '❌'} key | toggle={'ON' if is_pay_method_enabled('khpay') else 'OFF'}\n"
+        f"KHPAY merchant: <code>{_effective_khpay_merchant() or '(default)'}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"DATA_DIR: <code>{os.getenv('DATA_DIR') or '.'}</code>"
+    )
+    bot.send_message(uid, txt, parse_mode="HTML")
+    if message.text and message.text.startswith("/paytest"):
+        bot.send_message(uid, "⏳ សាក Generate QR $0.10 …")
+        try:
+            if khp and is_pay_method_enabled("khpay"):
+                _send_deposit_qr_khpay(uid, 0.10)
+            elif aba and is_pay_method_enabled("aba"):
+                _send_deposit_qr_aba(uid, 0.10)
+            elif cam and is_pay_method_enabled("camrapid"):
+                _send_deposit_qr(uid, 0.10, method="camrapid")
+            else:
+                bot.send_message(uid, "❌ គ្មាន method ណាមួយ ready — ប្រើ /paystatus")
+        except Exception as e:
+            logger.exception(f"[paytest] {e}")
+            bot.send_message(uid, f"❌ paytest error:\n<code>{type(e).__name__}: {e}</code>", parse_mode="HTML")
+
 
 def _bot_polling_with_retry():
     """Polling with auto-reconnect on network error"""
