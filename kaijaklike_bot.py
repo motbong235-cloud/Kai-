@@ -131,9 +131,14 @@ def _entities_for_emoji_text(text):
             ch = m.group(1)
             length = len(ch.encode("utf-16-le")) // 2
             eid = EMOJI_MAP.get(ch)
+            if not eid:
+                for k, v in EMOJI_MAP.items():
+                    if v and k.replace("️", "") == ch.replace("️", ""):
+                        eid = v
+                        break
             if eid:
                 entities.append(_MessageEntity(type="custom_emoji", offset=utf16_pos,
-                                                length=length, custom_emoji_id=eid))
+                                                length=length, custom_emoji_id=str(eid)))
             utf16_pos += length
             idx += len(ch)
         else:
@@ -165,17 +170,33 @@ class InlineKeyboardButton(_IKB_orig):
         self._color = color
         label = kwargs.get("text") if "text" in kwargs else (args[0] if args else None)
         self._emoji_char = _leading_emoji(label)
-        if emoji_id is None and self._emoji_char:
-            emoji_id = EMOJI_MAP.get(self._emoji_char)
-        self._emoji_id = emoji_id
+        self._emoji_id = emoji_id  # may be None — resolve live in to_dict()
+
+    def _resolve_emoji_id(self):
+        if self._emoji_id:
+            return str(self._emoji_id)
+        ch = self._emoji_char
+        if not ch:
+            return None
+        eid = EMOJI_MAP.get(ch)
+        if eid:
+            return str(eid)
+        # VS16-tolerant lookup
+        for k, v in EMOJI_MAP.items():
+            if not v:
+                continue
+            if k.replace("️", "") == ch.replace("️", ""):
+                return str(v)
+        return None
 
     def to_dict(self):
         d = super().to_dict()
         style = _to_style(self._color)
         if style:
             d["style"] = style
-        if self._emoji_id:
-            d["icon_custom_emoji_id"] = str(self._emoji_id)
+        eid = self._resolve_emoji_id()
+        if eid:
+            d["icon_custom_emoji_id"] = eid
             if "text" in d:
                 d["text"] = _strip_leading_emoji_text(d["text"], self._emoji_char)
         return d
@@ -206,21 +227,35 @@ class KeyboardButton(_KB_orig):
         self._color = color
         label = kwargs.get("text") if "text" in kwargs else (args[0] if args else None)
         self._emoji_char = _leading_emoji(label)
-        if emoji_id is None and self._emoji_char:
-            emoji_id = EMOJI_MAP.get(self._emoji_char)
-        self._emoji_id = emoji_id
+        self._emoji_id = emoji_id  # resolve live in to_dict so /setemojis applies without restart
+
+    def _resolve_emoji_id(self):
+        if self._emoji_id:
+            return str(self._emoji_id)
+        ch = self._emoji_char
+        if not ch:
+            return None
+        eid = EMOJI_MAP.get(ch)
+        if eid:
+            return str(eid)
+        for k, v in EMOJI_MAP.items():
+            if not v:
+                continue
+            if k.replace("️", "") == ch.replace("️", ""):
+                return str(v)
+        return None
 
     def to_dict(self):
         d = super().to_dict()
         style = _to_style(self._color)
         if style:
             d["style"] = style
-        if self._emoji_id and "text" in d:
+        eid = self._resolve_emoji_id()
+        if eid and "text" in d:
             original_text = d["text"]
-            d["icon_custom_emoji_id"] = str(self._emoji_id)
+            d["icon_custom_emoji_id"] = eid
             stripped = _strip_leading_emoji_text(original_text, self._emoji_char)
             if stripped != original_text:
-                # កត់ត្រា mapping ដើម្បីឲ្យ handler ចាស់ៗនៅតែដំណើរការធម្មតា
                 _STRIPPED_TEXT_MAP[stripped] = original_text
                 d["text"] = stripped
         return d
@@ -370,9 +405,11 @@ NOTIFY_BOTS_FILE = _dpath("smm_notify_bots.json")   # ★ Order Bot / Payment Bo
 SMM_API_FILE    = _dpath("smm_api.json")
 SMM_SVC_FILE    = _dpath("smm_services.json")
 SMM_ORD_FILE    = _dpath("smm_orders.json")
+ORDER_SEQ_FILE  = _dpath("smm_order_seq.json")  # sequential Order ID counter (total orders)
 SMM_PROFIT_FILE = _dpath("smm_profit.json")
 SMM_POLL_FILE   = _dpath("smm_poll.json")
 SMM_DEP_FILE    = _dpath("smm_deposits.json")
+USED_REFS_FILE  = _dpath("smm_used_refs.json")  # payment references already credited (anti double-pay)
 DEP_BONUS_FILE  = _dpath("smm_deposit_bonus.json")
 USER_DISCOUNT_FILE = _dpath("smm_user_discounts.json")  # uid -> {pct, note} — បញ្ចុះតម្លៃសម្រាប់តែ TikTok Khmer
 SUB_ADMIN_FILE  = _dpath("smm_sub_admins.json")
@@ -487,6 +524,9 @@ daily_report_cfg  = _load(DAILY_REPORT_FILE, {"enabled": True, "hour": 8})
 _KH_TZ = datetime.timezone(datetime.timedelta(hours=7))
 smm_poll     = _load(SMM_POLL_FILE,  {"interval": POLL_INTERVAL})
 smm_deps     = _load(SMM_DEP_FILE,   {})
+used_payment_refs = _load(USED_REFS_FILE, {})  # ref -> {dep_id, uid, amount, ts}
+_pay_credit_lock  = threading.Lock()  # ការពារ double-credit race (poll + webhook + admin)
+
 
 # ── Auto Deposit Bonus — "ដាក់ $1 ឡើងទៅ ទទួល 5% ត្រលប់មកវិញ" ──────────
 # enabled: បើក/បិទ Auto Bonus, min_amount: ចំនួនអប្បបរមាដែលទទួលបាន Bonus,
@@ -692,12 +732,21 @@ def _admin_contact():
 # ទាំងអស់ (fallback ទៅ unicode emoji ធម្មតាវិញ) ដើម្បីធានាថា message/button
 # តែងតែផ្ញើចេញបានជោគជ័យ — មិនដែលឲ្យ premium emoji ធ្វើឲ្យ button ខូចឡើយ។
 def _emojify(text):
+    """Replace unicode emoji with <tg-emoji> when custom_emoji_id is set in EMOJI_MAP.
+    VS16-tolerant: key and text may differ by U+FE0F — still apply premium id."""
     if not text or not isinstance(text, str) or "<tg-emoji" in text:
         return text
     for ch in _EMOJI_CHARS_SORTED:
         eid = EMOJI_MAP.get(ch)
-        if eid and ch in text:
-            text = text.replace(ch, f'<tg-emoji emoji-id="{eid}">{ch}</tg-emoji>')
+        if not eid:
+            continue
+        variants = {ch, ch.replace("\ufe0f", "")}
+        if not ch.endswith("\ufe0f"):
+            variants.add(ch + "\ufe0f")
+        variants.discard("")
+        for v in sorted(variants, key=len, reverse=True):
+            if v and v in text:
+                text = text.replace(v, f'<tg-emoji emoji-id="{eid}">{v}</tg-emoji>')
     return text
 
 def _strip_tg_emoji_tags(text):
@@ -728,11 +777,7 @@ def _looks_emoji_related(exc):
     return any(h in str(exc).upper() for h in _EMOJI_ERROR_HINTS)
 
 def _markup_has_emoji_icon(markup):
-    """ត្រឡប់ True បើ keyboard/markup មាន button ណាមួយកំណត់ icon_custom_emoji_id
-    (_emoji_id)។ ប្រើដើម្បីសម្រេចថាតើគួរ fallback-retry ដែរឬទេ សូម្បីតែ error
-    message មិនបាននិយាយពាក្យទាក់ទង emoji ដោយផ្ទាល់ក៏ដោយ (Telegram ពេលខ្លះ
-    បដិសេធ request ទាំងមូលដោយសារ field នេះ ដោយគ្មានប្រាប់ច្បាស់ក្នុង error
-    text — ករណីនេះហើយដែលបណ្តាលឲ្យ buttonខ្លះ "ស្ងាត់" ជានិច្ចមុនកែ)។"""
+    """True បើ markup មាន button ណាមួយនឹងផ្ញើ icon_custom_emoji_id (resolve live)."""
     try:
         rows = getattr(markup, "keyboard", None)
         if not rows:
@@ -740,6 +785,12 @@ def _markup_has_emoji_icon(markup):
         for row in rows:
             for btn in row:
                 if getattr(btn, "_emoji_id", None):
+                    return True
+                # live resolve from EMOJI_MAP (same as to_dict)
+                if hasattr(btn, "_resolve_emoji_id") and btn._resolve_emoji_id():
+                    return True
+                ch = getattr(btn, "_emoji_char", None)
+                if ch and EMOJI_MAP.get(ch):
                     return True
     except Exception:
         pass
@@ -753,19 +804,26 @@ def _wrap_safe_call(fn, text_kw=None, text_pos=None):
         args = list(args)
         orig_text, emojified = None, False
 
-        if text_kw is not None and kwargs.get("parse_mode") == "HTML":
+        # Premium emoji via <tg-emoji> requires HTML parse_mode.
+        # Auto-apply whenever text has mapped premium ids (even if caller forgot parse_mode).
+        if text_kw is not None:
+            pm = kwargs.get("parse_mode")
             if text_kw in kwargs and kwargs[text_kw]:
                 orig_text = kwargs[text_kw]
                 new_text = _emojify(orig_text)
                 if new_text != orig_text:
                     kwargs[text_kw] = new_text
                     emojified = True
+                    if not pm:
+                        kwargs["parse_mode"] = "HTML"
             elif text_pos is not None and len(args) > text_pos and isinstance(args[text_pos], str):
                 orig_text = args[text_pos]
                 new_text = _emojify(orig_text)
                 if new_text != orig_text:
                     args[text_pos] = new_text
                     emojified = True
+                    if not pm:
+                        kwargs["parse_mode"] = "HTML"
 
         markup = kwargs.get("reply_markup")
         has_icon_markup = _markup_has_emoji_icon(markup)
@@ -1125,7 +1183,7 @@ STRINGS = {
         "deposit_ok":    "✅ ដាក់លុយបានជោគជ័យ! 🎉\nអរគុណច្រើនដែលបន្ថែម Balance! 💙 Kaijaklike",
         "qr_expired":    "⏰ QR ផុតហើយ! សូម Top Up ម្តងទៀតនៅ",
         "qr_error":      "⚠️ មានបញ្ហា Generate QR! សូមទំនាក់ Admin 🙏",
-        "track_prompt":  "🔍 វាយ Order ID របស់អ្នក (ឧ: KZ12345):",
+        "track_prompt":  "🔍 វាយ Order ID របស់អ្នក (ឧ: 206406):",
         "order_notfound":"❌ រកមិនឃើញ Order នេះទេ! ត្រូវប្រាកដ ID ត្រឹមត្រូវ",
         "no_orders":     "❌ មិនទាន់មាន Order ណាមួយទេ!",
         "how_to_use": (
@@ -1173,7 +1231,7 @@ STRINGS = {
         "deposit_ok":    "✅ Deposit successful! 🎉\nThank you for topping up! 💙 Kaijaklike",
         "qr_expired":    "⏰ QR expired! Please Top Up again",
         "qr_error":      "⚠️ QR error! Please contact Admin 🙏",
-        "track_prompt":  "🔍 Send your Order ID (e.g. KZ12345):",
+        "track_prompt":  "🔍 Send your Order ID (e.g. 206406):",
         "order_notfound":"❌ Order not found! Make sure the ID is correct.",
         "no_orders":     "❌ No orders yet!",
         "how_to_use": (
@@ -2319,12 +2377,109 @@ def _notify(msg):
     except Exception as _e:
         logger.debug(f"[silent] {_e}")
     try:
+        msg = _emojify(msg) if msg else msg
         bot.send_message(cid, msg, parse_mode="HTML")
         logger.info(f"[notify] sent to {cid}")
     except Exception as e:
         logger.warning(f"[notify] failed cid={cid} err={e}")
 
-def _send_deposit_notify(uid, amount, bonus, new_bal):
+def _mask_uid(uid):
+    """Mask UID for public channel: 56xxxxxxxx"""
+    s = str(uid)
+    if len(s) <= 2:
+        return s + "xxxxxxxx"
+    return s[:2] + "x" * max(8, len(s) - 2)
+
+def _kh_now_str(fmt="full"):
+    """Khmer-friendly datetime string (UTC+7).
+    fmt=full  → 2026-09-26 01:42:44 PM
+    fmt=24    → 2026-09-26 13:38:48
+    """
+    now = datetime.datetime.now(_KH_TZ)
+    if fmt == "24":
+        return now.strftime("%Y-%m-%d %H:%M:%S")
+    return now.strftime("%Y-%m-%d %I:%M:%S %p")
+
+def _channel_deposit_msg(uid, amount, reference="", method_label="ដាក់ប្រាក់", bonus=0.0):
+    """Channel invoice style — matches LazR SMM deposit notification."""
+    ref = reference or f"JAKLIKE_{int(time.time()*1000)}"
+    msg = (
+        f"🔔 <b>ការដាក់ប្រាក់បានជោគជ័យហើយ</b>\n"
+        f"លេខសម្គាល់អ្នកប្រើ: <code>{_mask_uid(uid)}</code>\n"
+        f"ចំនួនទឹកប្រាក់: <b>${float(amount):.2f}</b>\n"
+        f"ម៉ោង: {_kh_now_str('full')}\n"
+        f"វិធីបង់ប្រាក់: {method_label}\n"
+        f"ស្ថានភាព: បានជោគជ័យ\n"
+        f"លេខសម្គាល់ប្រតិបត្តិការ:\n"
+        f"<code>{ref}</code>\n\n"
+        f"🙏 អរគុណសម្រាប់ការដាក់ប្រាក់ <b>${float(amount):.2f}</b> ✅"
+    )
+    if bonus and float(bonus) > 0:
+        msg += f"\n🎁 Bonus: <b>+${float(bonus):.2f}</b>"
+    return msg
+
+def _channel_new_user_msg(uid):
+    """Channel style — new user joined bot."""
+    return (
+        f"🆕 <b>អ្នកប្រើថ្មីបានចូលប្រើ Bot</b>\n"
+        f"លេខសម្គាល់អ្នកប្រើ: <code>{_mask_uid(uid)}</code>\n"
+        f"ពេលវេលា: {_kh_now_str('full')}\n"
+        f"ស្ថានភាព: បានចូលរួច / បានចុះឈ្មោះរួច"
+    )
+
+def _channel_order_msg(uid, label, price, link, oid, api_order_id=None, qty=None, extra_order_ids=None):
+    """Channel invoice style — new SMM order (LazR format).
+    extra_order_ids: optional list of (emoji, title, id) e.g. [('❤️','Like Order ID', '206406')]
+    """
+    # Privacy: hide full link on public channel
+    link_disp = "Private"
+    if link and isinstance(link, str):
+        low = link.lower()
+        if "private" in low or not link.startswith("http"):
+            link_disp = "Private"
+        else:
+            # show domain only
+            try:
+                from urllib.parse import urlparse
+                host = urlparse(link).netloc or "Private"
+                link_disp = host if host else "Private"
+            except Exception:
+                link_disp = "Private"
+
+    svc_line = label or "?"
+    if qty:
+        try:
+            svc_line = f"{label} x{int(qty):,}"
+        except Exception:
+            pass
+    svc_line = f"{svc_line} - ${float(price):.2f}" if price is not None else svc_line
+
+    lines = [
+        f"📦 <b>ការបញ្ជាទិញថ្មី!</b>",
+        f"",
+        f"Buyer ID: <code>{_mask_uid(uid)}</code>",
+        f"",
+        f"🔗 Link: {link_disp}",
+        f"🎯 សេវាកម្ម: {svc_line}",
+    ]
+    if extra_order_ids:
+        for emoji, title, eid in extra_order_ids:
+            lines.append(f"{emoji} {title}: <code>{eid}</code>")
+    else:
+        if api_order_id:
+            lines.append(f"🆔 API Order ID: <code>{api_order_id}</code>")
+        lines.append(f"📋 Order ID: <code>{oid}</code>")
+    lines += [
+        f"💵 តម្លៃសរុប: <b>${float(price):.2f}</b>",
+        f"📦 ការបញ្ជា: ជោគជ័យ ✅",
+        f"📅 Date: {_kh_now_str('24')}",
+        f"",
+        f"អរគុណចំពោះការប្រើប្រាស់ ❤️",
+    ]
+    return "\n".join(lines)
+
+def _send_deposit_notify(uid, amount, bonus, new_bal, reference="", method_label="ដាក់ប្រាក់"):
+    """Admin/pay-bot style kept short; channel uses LazR invoice format."""
     msg = (
         f"💰 <b>ដាក់លុយ ថ្មី!</b>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
@@ -2337,7 +2492,14 @@ def _send_deposit_notify(uid, amount, bonus, new_bal):
         f"💳 Balance ថ្មី: <b>${new_bal:.2f}</b>\n"
         f"━━━━━━━━━━━━━━━━━━"
     )
-    _notify(msg)
+    # short admin/pay notify
+    try:
+        pnotify(msg)
+    except Exception:
+        pass
+    # public channel — LazR style
+    _notify(_channel_deposit_msg(uid, amount, reference=reference,
+                                 method_label=method_label, bonus=bonus))
 
 def _get_notify_cfg():
     cfg = _load(NOTIFY_FILE, {})
@@ -2424,6 +2586,9 @@ def onotify(text, reply_markup=None, parse_mode="HTML"):
     *ឈប់* ផ្ញើនៅ bot service ទាំងស្រុង។ បើមិនទាន់ setup → fallback ទៅ bot service
     ជាបណ្តោះអាសន្ន ដើម្បីកុំឲ្យបាត់ Notification (setup /setup_order_bot ដើម្បីផ្លាស់)។"""
     try:
+        text = _emojify(text) if text else text
+        if parse_mode is None and text and "<tg-emoji" in str(text):
+            parse_mode = "HTML"
         if order_bot:
             order_bot.send_message(_notify_target_chat_id(), text, parse_mode=parse_mode, reply_markup=reply_markup)
         else:
@@ -2434,6 +2599,9 @@ def onotify(text, reply_markup=None, parse_mode="HTML"):
 def pnotify(text, reply_markup=None, parse_mode="HTML"):
     """ដូច onotify() ប៉ុន្តែសម្រាប់ Payment/Deposit — ប្រើ Payment Bot ដាច់ដោយឡែក។"""
     try:
+        text = _emojify(text) if text else text
+        if parse_mode is None and text and "<tg-emoji" in str(text):
+            parse_mode = "HTML"
         if pay_bot:
             pay_bot.send_message(_notify_target_chat_id(), text, parse_mode=parse_mode, reply_markup=reply_markup)
         else:
@@ -2449,16 +2617,41 @@ def pnotify_photo(file_id, caption, reply_markup=None):
         if pay_bot:
             finfo = bot.get_file(file_id)
             raw = bot.download_file(finfo.file_path)
+            caption = _emojify(caption) if caption else caption
             pay_bot.send_photo(_notify_target_chat_id(), raw, caption=caption,
                                 parse_mode="HTML", reply_markup=reply_markup)
         else:
+            caption = _emojify(caption) if caption else caption
             bot.send_photo(ADMIN_ID, file_id, caption=caption,
                             parse_mode="HTML", reply_markup=reply_markup)
     except Exception as e:
         logger.warning(f"[pnotify_photo] failed: {e}")
 
 def _make_order_id():
-    return f"KZ{int(time.time())%100000:05d}"
+    """Order ID = លេខលំដាប់ យកពីទិន្នន័យស្ថិតិ (smm_orders = ប្រភព 📊 ស្ថិតិ)។
+    next_id = ចំនួន Order សរុបក្នុងស្ថិតិ + 1
+    (ឧ. ស្ថិតិបង្ហាញ 150 orders → Order ID ថ្មី = 151)
+    បើមាន Order ID លេខធំជាងចំនួនសរុប (ឧ. migrate ពីប្រព័ន្ធផ្សេង) បន្តពី max នោះ។"""
+    global smm_orders
+    # ── ទិន្នន័យពីស្ថិតិ (ដូច 📊 ស្ថិតិ → SMM Orders) ──
+    total_orders = len(smm_orders)  # សរុប order ទាំងអស់ក្នុង database
+    max_numeric = 0
+    for k in smm_orders.keys():
+        try:
+            max_numeric = max(max_numeric, int(str(k)))
+        except (TypeError, ValueError):
+            pass  # លុប KZ... ចាស់ មិនរាប់ជាលេខ
+    # លំដាប់បន្ទាប់ = max(ចំនួនសរុប, ID លេខធំបំផុត) + 1
+    next_id = max(total_orders, max_numeric) + 1
+    while str(next_id) in smm_orders:
+        next_id += 1
+    # រក្សា counter ឲ្យ sync ជាមួយស្ថិតិ (សម្រាប់ debug / backup)
+    try:
+        _save(ORDER_SEQ_FILE, {"n": next_id, "total_orders": total_orders})
+    except Exception:
+        pass
+    return str(next_id)
+
 
 def _user_display(uid_str):
     """បង្កើតឈ្មោះ + username បង្ហាញឲ្យ Admin មើលងាយ (ជំនួសមើលតែលេខ UID
@@ -2808,8 +3001,11 @@ def _camrapid_create(uid, amount, reference):
         logger.error(f"[camrapid_create] exception: {e}")
         return None
 
-def _camrapid_check(reference) -> bool:
-    """Check payment status via CamRapidPay API — returns True if paid"""
+def _camrapid_check_detail(reference) -> dict:
+    """CamRapidPay status — returns {paid, amount, status, raw} for anti-bypass verification."""
+    out = {"paid": False, "amount": None, "status": "", "raw": {}}
+    if not reference:
+        return out
     try:
         r = http.get(
             CAMRAPID_CHECK,
@@ -2817,12 +3013,30 @@ def _camrapid_check(reference) -> bool:
             headers={"Accept": "application/json"},
             timeout=10,
         )
-        data = r.json()
-        logger.info(f"[camrapid_check] ref={reference} resp={data}")
-        return data.get("success") and data.get("status") in ("Success", "success", "PAID", "paid")
+        data = r.json() if r.content else {}
+        out["raw"] = data if isinstance(data, dict) else {}
+        st = str(data.get("status") or data.get("payment_status") or "").strip()
+        out["status"] = st
+        paid_ok = bool(data.get("success")) and st.lower() in (
+            "success", "paid", "completed", "complete", "done"
+        )
+        # extract amount if gateway returns it
+        amt = data.get("amount") or data.get("paid_amount") or data.get("total")
+        if amt is not None:
+            try:
+                out["amount"] = round(float(amt), 2)
+            except (TypeError, ValueError):
+                pass
+        out["paid"] = paid_ok
+        logger.info(f"[camrapid_check] ref={reference} paid={paid_ok} amount={out['amount']} status={st}")
+        return out
     except Exception as e:
         logger.error(f"[camrapid_check] {e}")
-        return False
+        return out
+
+def _camrapid_check(reference) -> bool:
+    """Backward-compatible bool wrapper."""
+    return bool(_camrapid_check_detail(reference).get("paid"))
 
 # ═══════════════════════════════════════════════════════════
 #  ABA PAYWAY (តាម KHMER SYSTEM — khmer-system.com) — ជម្រើសទូទាត់ស្វ័យប្រវត្តិទី ២
@@ -2885,8 +3099,11 @@ def _aba_create(uid, amount, username, _attempt=1):
             return _aba_create(uid, amount, username, _attempt=2)
         return None
 
-def _aba_check(payment_id) -> bool:
-    """Check ABA PayWay (KHMER SYSTEM) payment status — returns True if PAID"""
+def _aba_check_detail(payment_id) -> dict:
+    """ABA PayWay status — {paid, amount, status, raw}."""
+    out = {"paid": False, "amount": None, "status": "", "raw": {}}
+    if not payment_id:
+        return out
     try:
         r = http.post(
             ABA_CHECK_URL,
@@ -2895,12 +3112,26 @@ def _aba_check(payment_id) -> bool:
             headers={"Content-Type": "application/json", "Accept": "application/json"},
             timeout=10,
         )
-        data = r.json()
-        logger.info(f"[aba_check] payment_id={payment_id} resp={data}")
-        return bool(data.get("ok")) and str(data.get("status", "")).upper() == "PAID"
+        data = r.json() if r.content else {}
+        out["raw"] = data if isinstance(data, dict) else {}
+        st = str(data.get("status") or "").strip()
+        out["status"] = st
+        paid_ok = bool(data.get("ok")) and st.upper() == "PAID"
+        amt = data.get("amount") or data.get("paid_amount") or data.get("total")
+        if amt is not None:
+            try:
+                out["amount"] = round(float(amt), 2)
+            except (TypeError, ValueError):
+                pass
+        out["paid"] = paid_ok
+        logger.info(f"[aba_check] payment_id={payment_id} paid={paid_ok} amount={out['amount']} status={st}")
+        return out
     except Exception as e:
         logger.error(f"[aba_check] {e}")
-        return False
+        return out
+
+def _aba_check(payment_id) -> bool:
+    return bool(_aba_check_detail(payment_id).get("paid"))
 
 def _build_aba_app_deeplink(data):
     """បើ response ពី khmer-system.com មាន field deeplink ត្រង់ៗ ត្រឡប់វាភ្លាម។ បើគ្មាន
@@ -3010,87 +3241,266 @@ def _khpay_create(uid, amount, note=""):
         logger.error(f"[khpay_create] {e}")
         return None
 
-def _khpay_check(transaction_id) -> bool:
+def _khpay_check_detail(transaction_id) -> dict:
+    """KHPAY status — {paid, amount, status, raw}."""
+    out = {"paid": False, "amount": None, "status": "", "raw": {}}
     api_key = _effective_khpay_key()
     if not api_key or not transaction_id:
-        return False
+        return out
     try:
         url = f"{KHPAY_CHECK_URL.rstrip('/')}/{transaction_id}"
         r = http.get(url, headers={"Authorization": f"Bearer {api_key}",
                                    "Accept": "application/json"}, timeout=10)
-        data = r.json()
-        logger.info(f"[khpay_check] {transaction_id} -> {data}")
+        data = r.json() if r.content else {}
         d = data.get("data") if isinstance(data.get("data"), dict) else data
-        if d.get("paid") is True:
-            return True
-        if str(d.get("action", "")).lower() == "approved":
-            return True
-        if str(d.get("status", "")).lower() in ("paid", "success", "completed", "approved"):
-            return True
-        return False
+        if not isinstance(d, dict):
+            d = {}
+        out["raw"] = d
+        st = str(d.get("status") or d.get("action") or "").strip()
+        out["status"] = st
+        paid_ok = (
+            d.get("paid") is True
+            or st.lower() in ("paid", "success", "completed", "approved")
+        )
+        amt = d.get("amount") or d.get("paid_amount") or d.get("total")
+        if amt is not None:
+            try:
+                out["amount"] = round(float(amt), 2)
+            except (TypeError, ValueError):
+                pass
+        out["paid"] = paid_ok
+        logger.info(f"[khpay_check] {transaction_id} paid={paid_ok} amount={out['amount']} status={st}")
+        return out
     except Exception as e:
         logger.error(f"[khpay_check] {e}")
-        return False
+        return out
 
-def _watch_deposit(uid, uid_str, dep_id, amount, reference, checker=None):
-    """Poll payment gateway until paid or expired (5 min). `checker` ជា function ទទួល
-    reference/payment_id → True/False ថាបានទូទាត់ហើយឬនៅ — default ជា CamRapidPay (backward
-    compatible), ប្ដូរជា _aba_check ពេលហៅសម្រាប់ ABA PayWay deposit (v12)."""
-    checker = checker or _camrapid_check
+def _khpay_check(transaction_id) -> bool:
+    return bool(_khpay_check_detail(transaction_id).get("paid"))
+
+
+def _alert_pay_security(msg):
+    """ជូនដំណឹង Admin ភ្លាមៗពេលរកឃើញភាពមិនប្រក្រតី Payment (bypass attempt / mismatch)."""
+    try:
+        logger.warning(f"[pay_security] {msg}")
+        bot.send_message(ADMIN_ID, f"🚨 <b>Payment Security</b>\n{msg}", parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"[pay_security alert failed] {e}")
+
+def _ref_already_used(reference, except_dep_id=None) -> bool:
+    """True បើ reference នេះធ្លាប់ credit រួច (ឬកំពុង confirm deposit ផ្សេង)."""
+    if not reference:
+        return False
+    ref = str(reference).strip()
+    info = used_payment_refs.get(ref)
+    if info and info.get("dep_id") != except_dep_id:
+        return True
+    for did, d in smm_deps.items():
+        if did == except_dep_id:
+            continue
+        if str(d.get("reference") or "") == ref and d.get("status") in ("confirmed", "confirming"):
+            return True
+    return False
+
+def _mark_ref_used(reference, dep_id, uid, amount):
+    if not reference:
+        return
+    ref = str(reference).strip()
+    used_payment_refs[ref] = {
+        "dep_id": dep_id,
+        "uid": str(uid),
+        "amount": float(amount),
+        "ts": int(time.time()),
+    }
+    # រក្សាត្រឹម 5000 refs ចុងក្រោយ
+    if len(used_payment_refs) > 5000:
+        oldest = sorted(used_payment_refs.items(), key=lambda kv: kv[1].get("ts") or 0)
+        for k, _ in oldest[: len(used_payment_refs) - 5000]:
+            used_payment_refs.pop(k, None)
+    _save(USED_REFS_FILE, used_payment_refs)
+
+def _verify_paid_amount(expected, paid_amount, dep_id, reference, uid):
+    """ពិនិត្យចំនួនបង់ពី Gateway vs ចំនួន QR។
+    - paid_amount is None → អនុញ្ញាត (gateway មិនត្រឡប់ amount) តែ log
+    - paid < expected → REJECT (underpay bypass)
+    - paid >= expected → OK (credit តែ expected)
+    Returns (ok: bool, credit_amount: float)
+    """
+    expected = round(float(expected), 2)
+    if paid_amount is None:
+        logger.info(f"[pay_verify] no amount from gateway dep={dep_id} ref={reference} expected={expected}")
+        return True, expected
+    try:
+        paid = round(float(paid_amount), 2)
+    except (TypeError, ValueError):
+        return True, expected
+    if paid + 0.009 < expected:
+        _alert_pay_security(
+            f"❌ <b>Amount mismatch (underpay)</b>\n"
+            f"👤 <code>{uid}</code>\n"
+            f"📌 Ref: <code>{reference}</code>\n"
+            f"🧾 QR: <b>${expected:.2f}</b>\n"
+            f"🏦 Paid: <b>${paid:.2f}</b>\n"
+            f"🆔 dep: <code>{dep_id}</code>\n"
+            f"→ <b>មិន credit</b> (ការពារ bypass)"
+        )
+        return False, 0.0
+    if paid > expected + 0.05:
+        logger.info(f"[pay_verify] overpay dep={dep_id} expected={expected} paid={paid} — credit expected only")
+    return True, expected
+
+def _safe_confirm_deposit(dep_id, reference, paid_amount=None, source="poll"):
+    """Atomic credit path — ការពារ double-credit / ref reuse / underpay.
+    Returns True បើ credit ជោគជ័យ។"""
+    global smm_deps, used_payment_refs
+    with _pay_credit_lock:
+        dep = smm_deps.get(dep_id)
+        if not dep:
+            logger.warning(f"[safe_confirm] dep missing {dep_id}")
+            return False
+        if dep.get("status") != "pending":
+            logger.info(f"[safe_confirm] skip dep={dep_id} status={dep.get('status')} source={source}")
+            return False
+        uid_str = str(dep.get("uid") or "")
+        try:
+            uid = int(uid_str)
+        except (TypeError, ValueError):
+            logger.error(f"[safe_confirm] bad uid dep={dep_id}")
+            return False
+        expected = round(float(dep.get("amount") or 0), 2)
+        if expected <= 0:
+            _alert_pay_security(f"❌ dep={dep_id} amount invalid: {expected}")
+            return False
+        ref = str(reference or dep.get("reference") or "").strip()
+        if not ref:
+            _alert_pay_security(f"❌ dep={dep_id} empty reference — refuse credit")
+            return False
+        # ── Anti re-use reference ──
+        if _ref_already_used(ref, except_dep_id=dep_id):
+            smm_deps[dep_id]["status"] = "rejected_dup_ref"
+            _save(SMM_DEP_FILE, smm_deps)
+            _alert_pay_security(
+                f"❌ <b>Reference reuse blocked</b>\n"
+                f"👤 <code>{uid_str}</code>\n"
+                f"📌 Ref: <code>{ref}</code>\n"
+                f"🆔 dep: <code>{dep_id}</code>\n"
+                f"source: {source}"
+            )
+            return False
+        # ── Amount verify ──
+        ok_amt, credit_base = _verify_paid_amount(expected, paid_amount, dep_id, ref, uid_str)
+        if not ok_amt:
+            smm_deps[dep_id]["status"] = "rejected_amount"
+            smm_deps[dep_id]["paid_reported"] = paid_amount
+            _save(SMM_DEP_FILE, smm_deps)
+            return False
+        # ── Claim (lock status) ──
+        smm_deps[dep_id]["status"] = "confirming"
+        smm_deps[dep_id]["confirm_source"] = source
+        smm_deps[dep_id]["confirmed_ts"] = time.time()
+        if paid_amount is not None:
+            smm_deps[dep_id]["paid_reported"] = paid_amount
+        _save(SMM_DEP_FILE, smm_deps)
+        _mark_ref_used(ref, dep_id, uid_str, credit_base)
+
+        bonus = float(dep.get("bonus") or 0)
+        promo_bonus = float(dep.get("promo_bonus") or 0)
+        auto_bonus = float(dep.get("auto_bonus") or 0)
+        total = round(credit_base + bonus, 2)
+        add_bal(uid, total)
+        smm_deps[dep_id]["status"] = "confirmed"
+        smm_deps[dep_id]["credited"] = total
+        _save(SMM_DEP_FILE, smm_deps)
+        if dep.get("promo") and promo_bonus > 0:
+            try:
+                confirm_promo(dep["promo"], uid)
+            except Exception as e:
+                logger.warning(f"[safe_confirm] confirm_promo: {e}")
+
+        new_b = bal(uid)
+        # notify user
+        msg = (f"✅ <b>ដាក់លុយបានជោគជ័យហើយ!</b> 🎉\n"
+               f"━━━━━━━━━━━━━━━━━━\n"
+               f"💰 បានទទួល: <b>${credit_base:.2f}</b>")
+        if promo_bonus > 0:
+            msg += f"\n🎟️ Promo Bonus: <b>+${promo_bonus:.2f}</b>"
+        if auto_bonus > 0:
+            msg += f"\n🎁 Auto Bonus: <b>+${auto_bonus:.2f}</b>"
+        msg += f"\n💳 Balance: <b>${new_b:.2f}</b>\n━━━━━━━━━━━━━━━━━━\n💙 អរគុណដែលប្រើ {_bot_brand()}!"
+        try:
+            bot.send_message(uid, msg, parse_mode="HTML", reply_markup=main_kb(uid))
+        except Exception as _e:
+            logger.debug(f"[silent] {_e}")
+        try:
+            pnotify(
+                f"💰 <b>ដាក់លុយ ✅</b> ({source})\n👤 <code>{uid_str}</code>\n"
+                f"📌 Ref: <code>{ref}</code>\n"
+                f"💰 ${credit_base:.2f}" + (f" + Bonus ${bonus:.2f}" if bonus > 0 else "")
+            )
+        except Exception as _e:
+            logger.debug(f"[silent] {_e}")
+        try:
+            method_label = {
+                "aba": "ABA PayWay",
+                "khpay": "KHPAY",
+                "camrapid": "CamRapidPay KHQR",
+                "manual": "ដាក់ប្រាក់",
+            }.get((dep.get("method") or "").lower(), "ដាក់ប្រាក់")
+            _notify(_channel_deposit_msg(
+                uid, credit_base,
+                reference=ref,
+                method_label=method_label,
+                bonus=bonus,
+            ))
+        except Exception as e:
+            logger.warning(f"[deposit_notify] failed: {e}")
+        logger.info(f"[safe_confirm] OK dep={dep_id} uid={uid_str} ${credit_base} source={source}")
+        return True
+
+def _watch_deposit(uid, uid_str, dep_id, amount, reference, checker=None, detail_checker=None):
+    """Poll payment gateway until paid or expired.
+    ប្រើ detail_checker (ត្រឡប់ dict paid/amount) ពេលមាន — បើអត់ fallback bool checker។
+    Credit តែតាម _safe_confirm_deposit (anti double-credit / underpay / ref-reuse)."""
+    # map bool checkers → detail checkers
+    if detail_checker is None:
+        if checker is _aba_check:
+            detail_checker = _aba_check_detail
+        elif checker is _khpay_check:
+            detail_checker = _khpay_check_detail
+        elif checker is None or checker is _camrapid_check:
+            detail_checker = _camrapid_check_detail
+        else:
+            detail_checker = None
     deadline = time.time() + DEPOSIT_EXPIRE_SEC + 30
     while time.time() < deadline:
         dep = smm_deps.get(dep_id)
-        if not dep or dep.get("status") != "pending": return
-        if checker(reference):
-            bonus       = float(dep.get("bonus") or 0)
-            promo_bonus = float(dep.get("promo_bonus") or 0)
-            auto_bonus  = float(dep.get("auto_bonus") or 0)
-            total = round(amount + bonus, 2)
-            add_bal(uid, total)
-            smm_deps[dep_id]["status"] = "confirmed"
-            _save(SMM_DEP_FILE, smm_deps)
-            if dep.get("promo") and promo_bonus > 0:
-                confirm_promo(dep["promo"], uid)
-            new_b = bal(uid)
-            msg = (f"✅ <b>ដាក់លុយបានជោគជ័យហើយ!</b> 🎉\n"
-                   f"━━━━━━━━━━━━━━━━━━\n"
-                   f"💰 បានទទួល: <b>${amount:.2f}</b>")
-            if promo_bonus > 0:
-                msg += f"\n🎟️ Promo Bonus: <b>+${promo_bonus:.2f}</b>"
-            if auto_bonus > 0:
-                msg += f"\n🎁 Auto Bonus: <b>+${auto_bonus:.2f}</b>"
-            msg += f"\n💳 Balance: <b>${new_b:.2f}</b>\n━━━━━━━━━━━━━━━━━━\n💙 អរគុណដែលប្រើ {_bot_brand()}!"
-            try: bot.send_message(uid, msg, parse_mode="HTML", reply_markup=main_kb(uid))
-            except Exception as _e: logger.debug(f"[silent] {_e}")
-            try:
-                pnotify(
-                    f"💰 <b>ដាក់លុយ ✅</b>\n👤 <code>{uid_str}</code>\n"
-                    f"📌 Ref: <code>{reference}</code>\n"
-                    f"💰 ${amount:.2f}" + (f" + Bonus ${bonus:.2f}" if bonus > 0 else "") +
-                    (f" (Promo ${promo_bonus:.2f} / Auto ${auto_bonus:.2f})" if (promo_bonus > 0 and auto_bonus > 0) else ""))
-            except Exception as _e: logger.debug(f"[silent] {_e}")
-            # Notify channel — call _notify directly to avoid any config issues
-            try:
-                dep_msg = (
-                    f"💰 <b>ដាក់លុយ ថ្មី!</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━\n"
-                    f"👤 User ID: <code>{uid}</code>\n"
-                    f"💵 បានទទួល: <b>${amount:.2f}</b>\n"
-                )
-                if bonus > 0:
-                    dep_msg += f"🎟️ Bonus: <b>+${bonus:.2f}</b>\n"
-                dep_msg += f"💳 Balance ថ្មី: <b>${new_b:.2f}</b>\n━━━━━━━━━━━━━━━━━━"
-                bot.send_message(NOTIFY_CHANNEL_ID_DEFAULT, dep_msg, parse_mode="HTML")
-                logger.info(f"[deposit_notify] sent uid={uid} amount={amount}")
-            except Exception as e:
-                logger.warning(f"[deposit_notify] failed: {e}")
+        if not dep or dep.get("status") != "pending":
+            return
+        paid_amount = None
+        is_paid = False
+        try:
+            if detail_checker:
+                info = detail_checker(reference)
+                is_paid = bool(info.get("paid"))
+                paid_amount = info.get("amount")
+            elif checker:
+                is_paid = bool(checker(reference))
+        except Exception as e:
+            logger.warning(f"[watch_deposit] check error dep={dep_id}: {e}")
+            is_paid = False
+        if is_paid:
+            _safe_confirm_deposit(dep_id, reference, paid_amount=paid_amount, source="poll")
             return
         time.sleep(POLL_INTERVAL)
     dep = smm_deps.get(dep_id)
     if dep and dep.get("status") == "pending":
-        dep["status"] = "expired"; _save(SMM_DEP_FILE, smm_deps)
-        try: bot.send_message(uid, "⏰ <b>QR ផុតកំណត់!</b> សូម top up ម្តងទៀត", parse_mode="HTML")
-        except Exception as _e: logger.debug(f"[silent] {_e}")
+        dep["status"] = "expired"
+        _save(SMM_DEP_FILE, smm_deps)
+        try:
+            bot.send_message(uid, "⏰ <b>QR ផុតកំណត់!</b> សូម top up ម្តងទៀត", parse_mode="HTML")
+        except Exception as _e:
+            logger.debug(f"[silent] {_e}")
+
 
 def _dep_created_ts(dep_id, dep):
     """ត្រឡប់ created timestamp របស់ deposit មួយ — ប្រើ field 'created_ts' បើមាន
@@ -4026,7 +4436,7 @@ def _track_user(message):
             _notify_admin_user_block(uid, blocked=False)
         except Exception as _e:
             logger.debug(f"[silent] {_e}")
-    # ── ជូនដំណឹង Admin ពេល User ថ្មីចូលប្រើ Bot (មិនជូន Admin/Sub-admin ខ្លួនឯង) ──
+    # ── ជូនដំណឹង Admin + Channel ពេល User ថ្មីចូលប្រើ Bot ──
     if is_new and uid != ADMIN_ID and uid not in sub_admins:
         try:
             name = (u.first_name or "").strip() or "?"
@@ -4042,6 +4452,11 @@ def _track_user(message):
                 parse_mode="HTML")
         except Exception as e:
             logger.warning(f"[new_user notify] failed: {e}")
+        # Channel — LazR style
+        try:
+            _notify(_channel_new_user_msg(uid_str))
+        except Exception as e:
+            logger.warning(f"[new_user channel] failed: {e}")
 
 def is_banned(uid):
     return bool(users_db.get(str(uid), {}).get("banned", False))
@@ -4394,7 +4809,7 @@ def _apply_setemojis(src_msg):
 
     remaining = sum(1 for v in EMOJI_MAP.values() if not v)
     lines.append(f"\n📊 សរុប: {sum(1 for v in EMOJI_MAP.values() if v)}/{len(EMOJI_MAP)} កំណត់រួច — នៅសល់ {remaining}")
-    lines.append("🔄 Restart bot (/restart) ដើម្បីឲ្យប្រើប្រាស់ពេញលេញគ្រប់កន្លែង។")
+    lines.append("✅ អនុវត្តភ្លាម (message + button ថ្មី) — បើ keyboard ចាស់នៅ unicode សូម /start ម្ដងទៀត។")
     return "\n".join(lines)
 
 @bot.message_handler(commands=["setemojis"])
@@ -8734,12 +9149,26 @@ def handle_msg(message):
         auto_bonus  = _auto_dep_bonus(paid)
         bonus = round(promo_bonus + auto_bonus, 2)
         total = round(paid + bonus, 2)
-        add_bal(user_uid, total)
-        smm_deps[dep_id]["status"]      = "confirmed"
-        smm_deps[dep_id]["amount"]      = paid
-        smm_deps[dep_id]["bonus"]       = bonus
-        smm_deps[dep_id]["auto_bonus"]  = auto_bonus
-        _save(SMM_DEP_FILE, smm_deps)
+        # ── Manual confirm: នៅតែតាម lock + anti re-use ref ──
+        with _pay_credit_lock:
+            cur = smm_deps.get(dep_id) or {}
+            if cur.get("status") == "confirmed":
+                bot.send_message(uid, "⚠️ Deposit នេះ confirmed រួចហើយ (anti double-credit)", reply_markup=admin_kb())
+                return
+            ref_m = str(cur.get("reference") or f"MANUAL_{dep_id}")
+            if _ref_already_used(ref_m, except_dep_id=dep_id):
+                bot.send_message(uid, "🚨 Reference នេះធ្លាប់ credit រួច — blocked", reply_markup=admin_kb())
+                _alert_pay_security(f"Admin manual blocked dup ref <code>{ref_m}</code>")
+                return
+            add_bal(user_uid, total)
+            smm_deps[dep_id]["status"]      = "confirmed"
+            smm_deps[dep_id]["amount"]      = paid
+            smm_deps[dep_id]["bonus"]       = bonus
+            smm_deps[dep_id]["auto_bonus"]  = auto_bonus
+            smm_deps[dep_id]["confirm_source"] = "admin_manual"
+            smm_deps[dep_id]["confirmed_ts"] = time.time()
+            _mark_ref_used(ref_m, dep_id, dep.get("uid"), paid)
+            _save(SMM_DEP_FILE, smm_deps)
         if dep.get("promo") and promo_bonus > 0:
             confirm_promo(dep["promo"], user_uid)
         new_b = bal(user_uid)
@@ -8756,6 +9185,16 @@ def handle_msg(message):
         bot.send_message(uid,
             f"✅ <b>Confirmed!</b>\n👤 <code>{dep['uid']}</code>\n💰 <b>${paid:.2f}</b>",
             parse_mode="HTML", reply_markup=admin_kb())
+        # Channel — LazR style
+        try:
+            _notify(_channel_deposit_msg(
+                dep["uid"], paid,
+                reference=dep.get("reference") or f"MANUAL_{dep_id}",
+                method_label="ដាក់ប្រាក់",
+                bonus=bonus,
+            ))
+        except Exception as e:
+            logger.warning(f"[manual_dep channel] failed: {e}")
         return
 
     # ── Manual Deposit: User វាយចំនួនលុយ ──────────────────────────
@@ -8948,12 +9387,29 @@ def handle_msg(message):
                 f"🔢 {qty:,} | 💰 ${price:.4f}\n"
                 f"🔗 <code>{link}</code>")
             except Exception as _e: logger.debug(f"[silent] {_e}")
+        # Channel invoice — LazR SMM style (all order types)
+        try:
+            api_oid = order_rec.get("api_order_id") or (res.get("order") if isinstance(res, dict) else None)
+            _notify(_channel_order_msg(
+                uid_str,
+                label=s.get("label", slug),
+                price=price,
+                link=link,
+                oid=oid,
+                api_order_id=api_oid,
+                qty=qty,
+            ))
+        except Exception as e:
+            logger.warning(f"[order channel] failed: {e}")
         return
 
     # Track order
     if step == "track_order":
-        oid = text.strip().upper()
-        o   = smm_orders.get(oid)
+        oid = text.strip()
+        # support both numeric sequential IDs and legacy KZxxxxx
+        o = smm_orders.get(oid) or smm_orders.get(oid.upper())
+        if o and oid.upper() in smm_orders and oid not in smm_orders:
+            oid = oid.upper()
         waiting.pop(uid, None)
         if not o or o.get("uid") != uid_str:
             bot.send_message(uid, "❌ Order រកមិនឃើញ!", reply_markup=main_kb(uid)); return
@@ -9188,21 +9644,32 @@ text-decoration:none;border-radius:12px;font-size:1.15rem;font-weight:700}}
 
 @flask_app.route("/webhook/camrapid", methods=["POST"])
 def camrapid_webhook():
-    """ទទួល Webhook ពី CamRapidPay ពេល Payment ចូល — ធ្វើឲ្យ Confirm លឿនជាង Poll ។
-    ចំណាំ: Bot នៅតែ Poll ជា Backup ដដែល (_watch_deposit) ដូច្នេះ Route នេះជា Bonus
-    មិនមែនជា Dependency តឹងរឹងទេ — បើមិនមាន Webhook ក៏ដំណើរការធម្មតា។"""
+    """ទទួល Webhook ពី CamRapidPay — confirm តាម _safe_confirm_deposit (atomic + anti-bypass).
+    នៅតែ verify ជាមួយ CamRapidPay API មុន credit (មិនជឿ webhook body តែមួយឡើយ)."""
     try:
         data = flask_request.get_json(silent=True) or {}
-        reference = data.get("reference") or data.get("bill_number") or ""
+        reference = str(data.get("reference") or data.get("bill_number") or "").strip()
         logger.info(f"[camrapid_webhook] received: {data}")
-        if reference:
-            for dep_id, dep in list(smm_deps.items()):
-                if dep.get("reference") == reference and dep.get("status") == "pending":
-                    # _watch_deposit នឹងបន្ត Detect នៅ Poll ជុំបន្ទាប់ដោយស្វ័យប្រវត្តិ —
-                    # Route នេះគ្រាន់តែ Log ទុកសម្រាប់ Debug, មិន Mutate State ដោយផ្ទាល់ទេ
-                    # ដើម្បីជៀសវាង Race Condition ជាមួយ Thread _watch_deposit ដែលកំពុង Poll ស្រាប់។
-                    break
-        return jsonify({"received": True}), 200
+        if not reference:
+            return jsonify({"received": True, "ok": False, "reason": "no_ref"}), 200
+        # ── មិនជឿ webhook តែមួយ — re-check gateway ──
+        info = _camrapid_check_detail(reference)
+        if not info.get("paid"):
+            logger.info(f"[camrapid_webhook] ref={reference} not paid yet per API")
+            return jsonify({"received": True, "ok": False, "reason": "not_paid"}), 200
+        matched = False
+        for dep_id, dep in list(smm_deps.items()):
+            if str(dep.get("reference") or "") == reference and dep.get("status") == "pending":
+                matched = True
+                _safe_confirm_deposit(
+                    dep_id, reference,
+                    paid_amount=info.get("amount"),
+                    source="webhook",
+                )
+                break
+        if not matched:
+            logger.info(f"[camrapid_webhook] no pending dep for ref={reference}")
+        return jsonify({"received": True, "ok": matched}), 200
     except Exception as e:
         logger.error(f"[camrapid_webhook] error: {e}")
         return jsonify({"received": False}), 200
