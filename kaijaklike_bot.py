@@ -9339,68 +9339,77 @@ def handle_msg(message):
                 f"💳 Balance: <b>${bal(uid):.2f}</b>",
                 parse_mode="HTML", reply_markup=main_kb(uid))
 
-        # ── Notify Admin ──
+        # ── Notify ──
+        # Manual / TikTok Promote (ត្រូវ Admin ដាក់ដោយដៃ) → តែ Order Bot (ប្រតិបត្តិការ + Done/Reject)
+        # Auto API order → តែ Channel invoice (log ប្រតិបត្តិការ សាធារណៈ) មិន spam Order Bot
         udisp = _user_display(uid_str)
         admin_disc = f"\n🏷️ Discount {disc_pct:.0f}% (−${disc_amt:.2f})" if disc_pct > 0 else ""
-        if is_tiktok_promote:
-            admin_msg = (
-                f"🎵 <b>TikTok Promote Order!</b>\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"🆔 <code>{oid}</code>\n"
-                f"👤 {udisp}\n"
-                f"💰 <b>${price:.2f}</b>{admin_disc}\n"
-                f"🔗 <code>{link}</code>\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"📋 <b>Admin Steps:</b>\n"
-                f"1️⃣ ចូល TikTok → video → Promote\n"
-                f"2️⃣ ជ្រើស budget → ផ្ញើ invite\n"
-                f"3️⃣ User នឹង Accept → ចុច ✅ Done"
-            )
+        needs_admin_hand = bool(is_tiktok_promote or is_manual)
+
+        if needs_admin_hand:
             kb_adm = InlineKeyboardMarkup([[
                 InlineKeyboardButton("✅ Done",   callback_data=f"manord:done:{oid}", color="active"),
                 InlineKeyboardButton("❌ Reject", callback_data=f"manord:reject:{oid}", color="inactive"),
             ]])
-            try: onotify(admin_msg, reply_markup=kb_adm)
-            except Exception as _e: logger.debug(f"[silent] {_e}")
-        elif is_manual:
-            admin_msg = (
-                f"✍️ <b>Manual SMM Order</b>\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"🆔 <code>{oid}</code>\n"
-                f"👤 {udisp}\n"
-                f"📊 {s.get('label',slug)}\n"
-                f"🔢 {qty:,} | 💰 ${price:.4f}\n"
-                f"🔗 <code>{link}</code>"
-            )
-            kb_adm = InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ Done",   callback_data=f"manord:done:{oid}", color="active"),
-                InlineKeyboardButton("❌ Reject", callback_data=f"manord:reject:{oid}", color="inactive"),
-            ]])
-            try: onotify(admin_msg, reply_markup=kb_adm)
-            except Exception as _e: logger.debug(f"[silent] {_e}")
+            # Link ពេញ 100% ទៅ Order Bot (មិន mask / មិនកាត់) — ចុចបាន + copy បាន
+            _link_full = (link or "").strip()
+            if _link_full.lower().startswith(("http://", "https://")):
+                from html import escape as _html_esc
+                _href = _html_esc(_link_full, quote=True)
+                _link_disp = (
+                    f"🔗 <b>Link ពេញ:</b>\n"
+                    f"<a href=\"{_href}\">{_html_esc(_link_full)}</a>\n"
+                    f"<code>{_html_esc(_link_full)}</code>"
+                )
+            else:
+                _link_disp = f"🔗 <b>Link ពេញ:</b>\n<code>{_link_full}</code>"
+
+            if is_tiktok_promote:
+                admin_msg = (
+                    f"🎵 <b>ប្រតិបត្តិការ — TikTok Promote</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"🆔 Order: <code>{oid}</code>\n"
+                    f"👤 {udisp}\n"
+                    f"💰 <b>${price:.2f}</b>{admin_disc}\n"
+                    f"{_link_disp}\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"📋 <b>Admin Steps:</b>\n"
+                    f"1️⃣ ចូល TikTok → video → Promote\n"
+                    f"2️⃣ ជ្រើស budget → ផ្ញើ invite\n"
+                    f"3️⃣ User Accept → ចុច ✅ Done"
+                )
+            else:
+                admin_msg = (
+                    f"✍️ <b>ប្រតិបត្តិការ — Manual Order</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"🆔 Order: <code>{oid}</code>\n"
+                    f"👤 {udisp}\n"
+                    f"📦 {s.get('label', slug)}\n"
+                    f"🔢 {qty:,} | 💰 ${price:.4f}{admin_disc}\n"
+                    f"{_link_disp}\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"⏳ ត្រូវ Admin ដាក់ដោយដៃ — ចុច ✅ Done / ❌ Reject"
+                )
+            try:
+                onotify(admin_msg, reply_markup=kb_adm)
+            except Exception as _e:
+                logger.debug(f"[silent] {_e}")
+            # មិនផ្ញើ Channel invoice សម្រាប់ manual — គ្រាន់តែ Order Bot ប្រតិបត្តិការ
         else:
-            try: onotify(
-                f"📊 <b>SMM Order</b>\n"
-                f"🆔 <code>{oid}</code>\n"
-                f"👤 {udisp}\n"
-                f"📦 {s.get('label',slug)}\n"
-                f"🔢 {qty:,} | 💰 ${price:.4f}\n"
-                f"🔗 <code>{link}</code>")
-            except Exception as _e: logger.debug(f"[silent] {_e}")
-        # Channel invoice — LazR SMM style (all order types)
-        try:
-            api_oid = order_rec.get("api_order_id") or (res.get("order") if isinstance(res, dict) else None)
-            _notify(_channel_order_msg(
-                uid_str,
-                label=s.get("label", slug),
-                price=price,
-                link=link,
-                oid=oid,
-                api_order_id=api_oid,
-                qty=qty,
-            ))
-        except Exception as e:
-            logger.warning(f"[order channel] failed: {e}")
+            # Auto API — log ប្រតិបត្តិការលើ Channel តែប៉ុណ្ណោះ (មិនចាំបាច់ Order Bot)
+            try:
+                api_oid = order_rec.get("api_order_id") or (res.get("order") if isinstance(res, dict) else None)
+                _notify(_channel_order_msg(
+                    uid_str,
+                    label=s.get("label", slug),
+                    price=price,
+                    link=link,
+                    oid=oid,
+                    api_order_id=api_oid,
+                    qty=qty,
+                ))
+            except Exception as e:
+                logger.warning(f"[order channel] failed: {e}")
         return
 
     # Track order
