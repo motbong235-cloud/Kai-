@@ -2427,7 +2427,7 @@ def _channel_new_user_msg(uid):
         f"ស្ថានភាព: បានចូលរួច / បានចុះឈ្មោះរួច"
     )
 
-def _channel_order_msg(uid, label, price, link, oid, api_order_id=None, qty=None, extra_order_ids=None):
+def _channel_order_msg(uid, label, price, link, oid, api_order_id=None, qty=None, extra_order_ids=None, status_label=None):
     """Channel invoice style — new SMM order (LazR format).
     extra_order_ids: optional list of (emoji, title, id) e.g. [('❤️','Like Order ID', '206406')]
     """
@@ -2471,7 +2471,7 @@ def _channel_order_msg(uid, label, price, link, oid, api_order_id=None, qty=None
         lines.append(f"📋 Order ID: <code>{oid}</code>")
     lines += [
         f"💵 តម្លៃសរុប: <b>${float(price):.2f}</b>",
-        f"📦 ការបញ្ជា: ជោគជ័យ ✅",
+        f"📦 ការបញ្ជា: {status_label or 'ជោគជ័យ ✅'}",
         f"📅 Date: {_kh_now_str('24')}",
         f"",
         f"អរគុណចំពោះការប្រើប្រាស់ ❤️",
@@ -9340,8 +9340,7 @@ def handle_msg(message):
                 parse_mode="HTML", reply_markup=main_kb(uid))
 
         # ── Notify ──
-        # Manual / TikTok Promote (ត្រូវ Admin ដាក់ដោយដៃ) → តែ Order Bot (ប្រតិបត្តិការ + Done/Reject)
-        # Auto API order → តែ Channel invoice (log ប្រតិបត្តិការ សាធារណៈ) មិន spam Order Bot
+        # ទាំង Manual/TikTok Promote និង Auto API → ផ្ញើទាំង Channel invoice (log សាធារណៈ) និង Order Bot (log ជូន Admin)
         udisp = _user_display(uid_str)
         admin_disc = f"\n🏷️ Discount {disc_pct:.0f}% (−${disc_amt:.2f})" if disc_pct > 0 else ""
         needs_admin_hand = bool(is_tiktok_promote or is_manual)
@@ -9394,11 +9393,23 @@ def handle_msg(message):
                 onotify(admin_msg, reply_markup=kb_adm)
             except Exception as _e:
                 logger.debug(f"[silent] {_e}")
-            # មិនផ្ញើ Channel invoice សម្រាប់ manual — គ្រាន់តែ Order Bot ប្រតិបត្តិការ
-        else:
-            # Auto API — log ប្រតិបត្តិការលើ Channel តែប៉ុណ្ណោះ (មិនចាំបាច់ Order Bot)
+
             try:
-                api_oid = order_rec.get("api_order_id") or (res.get("order") if isinstance(res, dict) else None)
+                _notify(_channel_order_msg(
+                    uid_str,
+                    label=s.get("label", slug),
+                    price=price,
+                    link=link,
+                    oid=oid,
+                    qty=qty,
+                    status_label="កំពុងដំណើរការ ⏳",
+                ))
+            except Exception as e:
+                logger.warning(f"[order channel] failed: {e}")
+        else:
+            # Auto API — ផ្ញើទាំង Channel (invoice សាធារណៈ) និង Order Bot (log សម្រាប់ Admin)
+            api_oid = order_rec.get("api_order_id") or (res.get("order") if isinstance(res, dict) else None)
+            try:
                 _notify(_channel_order_msg(
                     uid_str,
                     label=s.get("label", slug),
@@ -9410,6 +9421,22 @@ def handle_msg(message):
                 ))
             except Exception as e:
                 logger.warning(f"[order channel] failed: {e}")
+
+            try:
+                auto_admin_msg = (
+                    f"⚡ <b>ប្រតិបត្តិការ — Auto Order</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"🆔 Order: <code>{oid}</code>\n"
+                    f"👤 {udisp}\n"
+                    f"📦 {s.get('label', slug)}\n"
+                    f"🔢 {qty:,} | 💰 ${price:.4f}{admin_disc}\n"
+                    + (f"🆔 API Order: <code>{api_oid}</code>\n" if api_oid else "")
+                    + f"━━━━━━━━━━━━━━━━━━\n"
+                    f"✅ បានបញ្ជូនទៅ Supplier ស្វ័យប្រវត្តិ"
+                )
+                onotify(auto_admin_msg)
+            except Exception as e:
+                logger.warning(f"[order bot] failed: {e}")
         return
 
     # Track order
