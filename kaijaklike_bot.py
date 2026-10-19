@@ -2605,6 +2605,23 @@ def _start_pay_bot(token):
     threading.Thread(target=_notify_bot_polling, args=(pay_bot, "Payment Bot"), daemon=True).start()
     return True
 
+def _bot_tag(tb):
+    """Tag for waiting[] so Done/Reject note steps resume on the same bot."""
+    if tb is order_bot:
+        return "order"
+    if tb is pay_bot:
+        return "pay"
+    return "main"
+
+
+def _bot_by_tag(tag):
+    if tag == "order" and order_bot:
+        return order_bot
+    if tag == "pay" and pay_bot:
+        return pay_bot
+    return bot
+
+
 def _notify_target_chat_id(kind="order"):
     """Chat ID for Order/Payment Bot.
     Priority: notify_bots_cfg order_chat_id/pay_chat_id → ADMIN_ID.
