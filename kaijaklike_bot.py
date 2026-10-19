@@ -103,6 +103,8 @@ _EMOJI_CHAR_LIST = [
     # how-to / payment steps)។
     '🏷️', '🕒', '🆕',
     '0️⃣', '1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣',
+    # ⚠️ បន្ថែម 2026-10-20 — emoji ដែលប្រើក្នុង UI តែមិនទាន់ក្នុង map (KHPAY, mute, scroll, target)
+    '💠', '🔇', '📜', '🎯',
 ]
 EMOJI_MAP = {ch: None for ch in _EMOJI_CHAR_LIST}
 # ធ្វើ regex pattern មួយសម្រាប់ចាប់ emoji នៅដើម string (រួមទាំង variation
@@ -501,6 +503,18 @@ def _save(path, data):
 # ដែលធ្លាប់រក្សាទុកនៅក្នុងឯកសារ (បើមាន) ដើម្បីឲ្យ /setemojis រក្សាទុកជាអចិន្ត្រៃយ៍
 _EMOJI_DEFAULTS = dict(EMOJI_MAP)
 EMOJI_MAP.update(_load(EMOJI_FILE, {}))
+# ensure newly added chars exist even if emoji.json is older
+for _ch in _EMOJI_CHAR_LIST:
+    EMOJI_MAP.setdefault(_ch, None)
+# rebuild sorted patterns so new chars are emojified in messages
+_EMOJI_CHARS_SORTED = sorted([c for c in EMOJI_MAP.keys() if c], key=len, reverse=True)
+_LEADING_EMOJI_RE = _re.compile(
+    "^(" + "|".join(_re.escape(c) for c in _EMOJI_CHARS_SORTED) + ")"
+)
+_EMOJI_ANY_RE = _re.compile(
+    "(" + "|".join(_re.escape(c) for c in _EMOJI_CHARS_SORTED) + ")"
+)
+
 EMOJI_KEYS = list(_EMOJI_DEFAULTS.keys())   # បញ្ជី emoji ទាំងអស់ដែល bot ស្គាល់ (សម្រាប់ reference)
 
 wallets      = _load(WALLETS_FILE,   {})
@@ -4198,22 +4212,23 @@ def main_kb(uid=None):
     lang = get_lang(uid) if uid else "kh"
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     e = EMOJI_MAP
+    # emoji_id ត្រូវប្រើ key ជាតួ emoji ពិត (👤/💸/...) — មិនមែន "account"/"topup"
     if lang == "en":
-        kb.row(KeyboardButton("👤 My Account", emoji_id=e.get("account"), color="active"),
-               KeyboardButton("💸 Top Up",      emoji_id=e.get("topup"),   color="progress"))
-        kb.row(KeyboardButton("🛒 Order Service", emoji_id=e.get("order"), color="active"))
-        kb.row(KeyboardButton("📋 Order History", emoji_id=e.get("history"), color="active"),
-               KeyboardButton("🔍 Track Order",   emoji_id=e.get("track"),   color="active"))
-        kb.row(KeyboardButton("💬 Support", emoji_id=e.get("support"), color="active"),
-               KeyboardButton("💡 How to Use",  emoji_id=e.get("💡"),      color="progress"))
+        kb.row(KeyboardButton("👤 My Account", emoji_id=e.get("👤"), color="active"),
+               KeyboardButton("💸 Top Up",      emoji_id=e.get("💸"), color="progress"))
+        kb.row(KeyboardButton("🛒 Order Service", emoji_id=e.get("🛒"), color="active"))
+        kb.row(KeyboardButton("📋 Order History", emoji_id=e.get("📋"), color="active"),
+               KeyboardButton("🔍 Track Order",   emoji_id=e.get("🔍"), color="active"))
+        kb.row(KeyboardButton("💬 Support", emoji_id=e.get("💬"), color="active"),
+               KeyboardButton("💡 How to Use",  emoji_id=e.get("💡"), color="progress"))
     else:
-        kb.row(KeyboardButton("👤 គណនី",            emoji_id=e.get("account"), color="active"),
-               KeyboardButton("💸 បញ្ចូលលុយ",       emoji_id=e.get("topup"),   color="progress"))
-        kb.row(KeyboardButton("🛒 បញ្ជាទិញសេវា", emoji_id=e.get("order"), color="active"))
-        kb.row(KeyboardButton("📋 ប្រវត្តិការបញ្ជាទិញ", emoji_id=e.get("history"), color="active"),
-               KeyboardButton("🔍 តាមដានការបញ្ជាទិញ", emoji_id=e.get("track"),   color="active"))
-        kb.row(KeyboardButton("💬 ជំនួយ", emoji_id=e.get("support"), color="active"),
-               KeyboardButton("💡 របៀបប្រើប្រាស់", emoji_id=e.get("💡"),  color="progress"))
+        kb.row(KeyboardButton("👤 គណនី",            emoji_id=e.get("👤"), color="active"),
+               KeyboardButton("💸 បញ្ចូលលុយ",       emoji_id=e.get("💸"), color="progress"))
+        kb.row(KeyboardButton("🛒 បញ្ជាទិញសេវា", emoji_id=e.get("🛒"), color="active"))
+        kb.row(KeyboardButton("📋 ប្រវត្តិការបញ្ជាទិញ", emoji_id=e.get("📋"), color="active"),
+               KeyboardButton("🔍 តាមដានការបញ្ជាទិញ", emoji_id=e.get("🔍"), color="active"))
+        kb.row(KeyboardButton("💬 ជំនួយ", emoji_id=e.get("💬"), color="active"),
+               KeyboardButton("💡 របៀបប្រើប្រាស់", emoji_id=e.get("💡"), color="progress"))
     return kb
 
 def admin_kb():
