@@ -2419,49 +2419,20 @@ def _kh_now_str(fmt="full"):
     return now.strftime("%Y-%m-%d %I:%M:%S %p")
 
 
-def _channel_user_hit(uid):
-    """Clickable name + @username + copyable id."""
-    uid_str = str(uid)
-    u = users_db.get(uid_str, {}) if isinstance(users_db, dict) else {}
-    name = (u.get("name") or "").strip() or "User"
-    uname = (u.get("username") or "").strip().lstrip("@")
-    def _esc(s):
-        return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    name_e = _esc(name)
-    name_link = f'<a href="tg://user?id={uid_str}">{name_e}</a>'
-    if uname:
-        name_link += f' · <a href="https://t.me/{_esc(uname)}">@{_esc(uname)}</a>'
-    return name_link, f'ID: <code>{uid_str}</code>'
-
-
-def _channel_link_hit(link):
-    """Clickable order link for channel."""
-    if not link or not isinstance(link, str):
-        return "—"
-    link = link.strip()
-    if not link.startswith("http"):
-        safe = link.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        return f"<code>{safe}</code>"
-    href = link.replace('"', "%22")
-    disp = link if len(link) <= 64 else (link[:61] + "...")
-    disp = disp.replace("&", "&amp;").replace("<", "&lt;")
-    return f'<a href="{href}">{disp}</a>'
-
 
 def _channel_deposit_msg(uid, amount, reference="", method_label="ដាក់ប្រាក់", bonus=0.0):
-    """Channel deposit — name / id clickable-copyable."""
+    """Channel invoice style — LazR SMM (masked UID for public channel)."""
     ref = reference or f"JAKLIKE_{int(time.time()*1000)}"
-    name_hit, id_hit = _channel_user_hit(uid)
     msg = (
         f"🔔 <b>ការដាក់ប្រាក់បានជោគជ័យហើយ</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"👤 {name_hit}\n"
-        f"🆔 {id_hit}\n"
-        f"💵 ចំនួន: <b>${float(amount):.2f}</b>\n"
-        f"💳 វិធី: {method_label}\n"
-        f"🕐 {_kh_now_str('full')}\n"
-        f"🔖 Ref: <code>{ref}</code>\n"
-        f"✅ ស្ថានភាព: ជោគជ័យ"
+        f"លេខសម្គាល់អ្នកប្រើ: <code>{_mask_uid(uid)}</code>\n"
+        f"ចំនួនទឹកប្រាក់: <b>${float(amount):.2f}</b>\n"
+        f"ម៉ោង: {_kh_now_str('full')}\n"
+        f"វិធីបង់ប្រាក់: {method_label}\n"
+        f"ស្ថានភាព: បានជោគជ័យ\n"
+        f"លេខសម្គាល់ប្រតិបត្តិការ:\n"
+        f"<code>{ref}</code>\n\n"
+        f"🙏 អរគុណសម្រាប់ការដាក់ប្រាក់ <b>${float(amount):.2f}</b> ✅"
     )
     if bonus and float(bonus) > 0:
         msg += f"\n🎁 Bonus: <b>+${float(bonus):.2f}</b>"
@@ -2469,21 +2440,19 @@ def _channel_deposit_msg(uid, amount, reference="", method_label="ដាក់�
 
 
 def _channel_new_user_msg(uid):
-    """Channel style — new user joined bot."""
-    name_hit, id_hit = _channel_user_hit(uid)
+    """Channel style — new user (masked ID)."""
     return (
         f"🆕 <b>អ្នកប្រើថ្មីបានចូលប្រើ Bot</b>\n"
-        f"👤 {name_hit}\n"
-        f"🆔 {id_hit}\n"
-        f"🕐 {_kh_now_str('full')}\n"
-        f"✅ បានចូលរួច"
+        f"លេខសម្គាល់អ្នកប្រើ: <code>{_mask_uid(uid)}</code>\n"
+        f"ពេលវេលា: {_kh_now_str('full')}\n"
+        f"ស្ថានភាព: បានចូលរួច / បានចុះឈ្មោះរួច"
     )
 
 
 def _channel_order_msg(uid, label, price, link, oid, api_order_id=None, qty=None, extra_order_ids=None, status_label=None):
-    """Channel order — clickable name, link, copyable ids."""
-    name_hit, id_hit = _channel_user_hit(uid)
-    link_hit = _channel_link_hit(link)
+    """Channel order — LazR style: masked buyer, Link: Private (public channel)."""
+    # Privacy on public channel: never post full target link
+    link_disp = "Private"
     svc_line = label or "?"
     if qty:
         try:
@@ -2491,31 +2460,29 @@ def _channel_order_msg(uid, label, price, link, oid, api_order_id=None, qty=None
         except Exception:
             pass
     if price is not None:
-        svc_line = f"{svc_line} — ${float(price):.2f}"
+        svc_line = f"{svc_line} - ${float(price):.2f}"
+
     lines = [
-        "📦 <b>ការបញ្ជាទិញថ្មី!</b>",
-        "━━━━━━━━━━━━━━━━━━",
-        f"👤 {name_hit}",
-        f"🆔 {id_hit}",
-        f"🔗 Link: {link_hit}",
-        f"🎯 សេវា: {svc_line}",
+        f"📦 <b>ការបញ្ជាទិញថ្មី!</b>",
+        f"",
+        f"Buyer ID: <code>{_mask_uid(uid)}</code>",
+        f"",
+        f"🔗 Link: {link_disp}",
+        f"🎯 សេវាកម្ម: {svc_line}",
     ]
     if extra_order_ids:
         for emoji, title, eid in extra_order_ids:
             lines.append(f"{emoji} {title}: <code>{eid}</code>")
     else:
         if api_order_id:
-            lines.append(f"🧾 API Order: <code>{api_order_id}</code>")
+            lines.append(f"🆔 API Order ID: <code>{api_order_id}</code>")
         lines.append(f"📋 Order ID: <code>{oid}</code>")
-    if price is not None:
-        lines.append(f"💵 តម្លៃ: <b>${float(price):.2f}</b>")
-    else:
-        lines.append("💵 តម្លៃ: —")
     lines += [
-        f"📌 ស្ថានភាព: {status_label or 'ជោគជ័យ ✅'}",
-        f"📅 {_kh_now_str('24')}",
-        "",
-        "អរគុណចំពោះការប្រើប្រាស់ ❤️",
+        f"💵 តម្លៃសរុប: <b>${float(price):.2f}</b>" if price is not None else "💵 តម្លៃសរុប: —",
+        f"📦 ការបញ្ជា: {status_label or 'ជោគជ័យ ✅'}",
+        f"📅 Date: {_kh_now_str('24')}",
+        f"",
+        f"អរគុណចំពោះការប្រើប្រាស់ ❤️",
     ]
     return "\n".join(lines)
 
