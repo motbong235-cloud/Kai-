@@ -69,3 +69,8 @@ services:
         value: "0"
       - key: PYTHON_VERSION
         value: "3.11.0"
+# Optional notify bots (persist across restarts):
+# ORDER_BOT_TOKEN=
+# PAY_BOT_TOKEN=
+# ORDER_BOT_CHAT_ID=   # optional group/user id
+# PAY_BOT_CHAT_ID=

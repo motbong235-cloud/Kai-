@@ -1,3 +1,4 @@
+import os
 """
 ╔══════════════════════════════════════════════════════════════╗
 ║     Kaijaklike Bot — カイロゼン SMM  [v11]                ║
@@ -513,7 +514,21 @@ user_lang    = _load(LANG_FILE,      {})
 promos       = _load(PROMO_FILE,     {})
 settings     = _load(SETTINGS_FILE,  {})
 notify_cfg   = _load(NOTIFY_FILE,    {"channel_id": "-1003930705105", "enabled": True})
-notify_bots_cfg = _load(NOTIFY_BOTS_FILE, {"order_token": "", "pay_token": ""})
+notify_bots_cfg = _load(NOTIFY_BOTS_FILE, {"order_token": "", "pay_token": "", "order_chat_id": "", "pay_chat_id": ""})
+# Render disk ងាយបាត់ — អាច set token តាម env ជាអចិន្ត្រៃយ៍
+for _k_env, _k_cfg in (
+    ("ORDER_BOT_TOKEN", "order_token"),
+    ("PAY_BOT_TOKEN", "pay_token"),
+    ("ORDER_BOT_CHAT_ID", "order_chat_id"),
+    ("PAY_BOT_CHAT_ID", "pay_chat_id"),
+):
+    _v = (os.environ.get(_k_env) or "").strip()
+    if _v:
+        notify_bots_cfg[_k_cfg] = _v
+try:
+    _save(NOTIFY_BOTS_FILE, notify_bots_cfg)
+except Exception:
+    pass
 
 smm_api      = _load(SMM_API_FILE,   {"url": "", "key": ""})
 smm_services = _load(SMM_SVC_FILE,   {})
@@ -2563,51 +2578,72 @@ def _start_pay_bot(token):
     threading.Thread(target=_notify_bot_polling, args=(pay_bot, "Payment Bot"), daemon=True).start()
     return True
 
-def _notify_target_chat_id():
-    """Chat ID ដែល Order/Payment Bot ត្រូវផ្ញើទៅ — ប្រើ ADMIN_ID ដដែល ព្រោះ
-    Telegram user ID ជា global (admin គ្រាន់តែត្រូវ /start bot ថ្មីម្តង)។"""
+def _notify_target_chat_id(kind="order"):
+    """Chat ID for Order/Payment Bot.
+    Priority: notify_bots_cfg order_chat_id/pay_chat_id → ADMIN_ID.
+    Admin must /start the notify bot at least once if target is a private user chat.
+    """
+    try:
+        cfg = notify_bots_cfg or {}
+        raw = (cfg.get("order_chat_id") if kind == "order" else cfg.get("pay_chat_id")) or ""
+        raw = str(raw).strip()
+        if raw:
+            return int(raw)
+    except Exception as e:
+        logger.debug(f"[notify chat_id] {e}")
     return ADMIN_ID
 
-def _bot_tag(tb):
-    """កំណត់ tag សម្រាប់ bot instance មួយ ដើម្បីរក្សាទុកក្នុង waiting[uid] state
-    (JSON-safe) ហើយអាច lookup ត្រឡប់ vិញនៅជំហានបន្ទាប់ (ឧ. វាយ Note អ្វីមួយ)។"""
-    if tb is order_bot: return "order"
-    if tb is pay_bot:   return "pay"
-    return "main"
 
-def _bot_by_tag(tag):
-    if tag == "order" and order_bot: return order_bot
-    if tag == "pay" and pay_bot:     return pay_bot
-    return bot
+def _safe_send(tb, chat_id, text, reply_markup=None, parse_mode="HTML", label="notify"):
+    """Send via a TeleBot instance; return True on success."""
+    if not tb:
+        return False
+    try:
+        tb.send_message(chat_id, text, parse_mode=parse_mode, reply_markup=reply_markup)
+        logger.info(f"[{label}] sent → {chat_id}")
+        return True
+    except Exception as e:
+        logger.warning(f"[{label}] send failed chat={chat_id} err={e}")
+        return False
 
 
 def onotify(text, reply_markup=None, parse_mode="HTML"):
-    """ផ្ញើ Order-notification។ បើ Order Bot setup រួច → ផ្ញើតាម Order Bot ហើយ
-    *ឈប់* ផ្ញើនៅ bot service ទាំងស្រុង។ បើមិនទាន់ setup → fallback ទៅ bot service
-    ជាបណ្តោះអាសន្ន ដើម្បីកុំឲ្យបាត់ Notification (setup /setup_order_bot ដើម្បីផ្លាស់)។"""
+    """Order notification → Order Bot (if set) + always fallback to main bot ADMIN.
+    Fixes silent failure when Order Bot exists but admin never /start'ed it.
+    """
     try:
         text = _emojify(text) if text else text
         if parse_mode is None and text and "<tg-emoji" in str(text):
             parse_mode = "HTML"
+        ok = False
         if order_bot:
-            order_bot.send_message(_notify_target_chat_id(), text, parse_mode=parse_mode, reply_markup=reply_markup)
-        else:
-            bot.send_message(ADMIN_ID, text, parse_mode=parse_mode, reply_markup=reply_markup)
+            ok = _safe_send(order_bot, _notify_target_chat_id("order"), text, reply_markup, parse_mode, "onotify/order_bot")
+        # Always try main bot as well when order_bot missing OR failed
+        if not ok:
+            ok = _safe_send(bot, ADMIN_ID, text, reply_markup, parse_mode, "onotify/main")
+        if not ok:
+            logger.error("[onotify] all channels failed")
     except Exception as e:
         logger.warning(f"[onotify] failed: {e}")
 
+
 def pnotify(text, reply_markup=None, parse_mode="HTML"):
-    """ដូច onotify() ប៉ុន្តែសម្រាប់ Payment/Deposit — ប្រើ Payment Bot ដាច់ដោយឡែក។"""
+    """Payment/Deposit notification → Payment Bot + fallback main bot."""
     try:
         text = _emojify(text) if text else text
         if parse_mode is None and text and "<tg-emoji" in str(text):
             parse_mode = "HTML"
+        ok = False
         if pay_bot:
-            pay_bot.send_message(_notify_target_chat_id(), text, parse_mode=parse_mode, reply_markup=reply_markup)
-        else:
-            bot.send_message(ADMIN_ID, text, parse_mode=parse_mode, reply_markup=reply_markup)
+            ok = _safe_send(pay_bot, _notify_target_chat_id("pay"), text, reply_markup, parse_mode, "pnotify/pay_bot")
+        if not ok:
+            ok = _safe_send(bot, ADMIN_ID, text, reply_markup, parse_mode, "pnotify/main")
+        if not ok:
+            logger.error("[pnotify] all channels failed")
     except Exception as e:
         logger.warning(f"[pnotify] failed: {e}")
+
+
 
 def pnotify_photo(file_id, caption, reply_markup=None):
     """ផ្ញើរូបភាព (ឧ. Proof ដាក់លុយ) ទៅ Payment Bot។ file_id មិនអាចប្រើឆ្លង bot
