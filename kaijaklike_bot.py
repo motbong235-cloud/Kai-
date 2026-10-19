@@ -5873,25 +5873,37 @@ def _process_manord_action(call, tb):
             f"📝 <b>វាយ Note ឲ្យ User</b> (ឬ <code>-</code> ដើម្បីរំលង):",
             parse_mode="HTML", reply_markup=cancel_kb())
     elif action == "reject":
-        smm_orders[oid]["status"] = "rejected"
-        smm_orders[oid]["refunded"] = float(o.get("price") or 0)
-        _save(SMM_ORD_FILE, smm_orders)
+        # ស្នើ Admin វាយមូលហេតុ មុន refund + ជូនដំណឹង User (TikTok Khmer / manual)
+        waiting[uid] = {
+            "step": "manual_order_reject",
+            "oid": oid,
+            "user_uid": o["uid"],
+            "via_bot": _bot_tag(tb),
+            "msg_chat": uid,
+            "msg_id": call.message.message_id,
+        }
         try:
             tb.edit_message_reply_markup(uid, call.message.message_id, reply_markup=None)
-        except Exception as _e: logger.debug(f"[silent] {_e}")
-        # Refund — ដាច់ដោយឡែកពី Notify, ដើម្បីកុំឲ្យ User ខាតលុយបើផ្ញើសារទៅគាត់មិនចេញ (ឧ. Block Bot)
-        add_bal(int(o["uid"]), float(o.get("price") or 0))
-        try:
-            bot.send_message(int(o["uid"]),
-                f"❌ <b>Order ត្រូវបាន Reject!</b>\n"
-                f"🆔 <code>{oid}</code>\n"
-                f"💳  លុយបានដក (${ o.get('price',0):.4f}) ត្រូវបានសងវិញ\n"
-                f"ទំនាក់ Admin ប្រសិនបើចង់ដឹង: {_admin_contact()}",
-                parse_mode="HTML")
-        except Exception as _e: logger.debug(f"[silent] {_e}")
-        tb.send_message(uid,
-            f"❌ <b>Rejected & Refunded</b>\n🆔 <code>{oid}</code>",
-            parse_mode="HTML", reply_markup=_tb_admin_kb(tb))
+        except Exception as _e:
+            logger.debug(f"[silent] {_e}")
+        tb.send_message(
+            uid,
+            f"❌ <b>Reject Order</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 <code>{oid}</code>\n"
+            f"👤 User: <code>{o['uid']}</code>\n"
+            f"📊 {o.get('label','?')} × {o.get('qty',0):,}\n"
+            f"🔗 <code>{o.get('link','?')}</code>\n"
+            f"💵 ${float(o.get('price') or 0):.4f}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"📝 <b>វាយមូលហេតុ Reject</b> (នឹងផ្ញើទៅ User + សងលុយស្វ័យប្រវត្តិ)\n"
+            f"ឬផ្ញើ <code>-</code> បើមិនចង់បញ្ជាក់:",
+            parse_mode="HTML",
+            reply_markup=cancel_kb(),
+        )
+
+
+
 
 def _finish_manual_order(uid, tb, step, text):
     """បញ្ចប់ Manual Order (វាយ Note រួច Complete) — ហៅពី bot service ឬ Order Bot
@@ -5923,6 +5935,76 @@ def _finish_manual_order(uid, tb, step, text):
         f"✅ <b>Order Completed!</b>\n🆔 <code>{oid}</code>",
         parse_mode="HTML", reply_markup=_tb_admin_kb(tb))
 
+
+def _finish_manual_reject(uid, tb, step, text):
+    """Admin វាយមូលហេតុ Reject → refund + ផ្ញើ User + confirm Admin."""
+    oid = step.get("oid")
+    user_uid = step.get("user_uid")
+    o = smm_orders.get(oid)
+    waiting.pop(uid, None)
+    if not o:
+        tb.send_message(uid, "❌ Order រកមិនឃើញ", reply_markup=_tb_admin_kb(tb))
+        return
+    if o.get("status") in ("completed", "rejected", "canceled", "partial"):
+        tb.send_message(
+            uid,
+            f"⚠️ Order <code>{oid}</code> បានដំណើរការរួច (ស្ថានភាព: <b>{o.get('status')}</b>)",
+            parse_mode="HTML",
+            reply_markup=_tb_admin_kb(tb),
+        )
+        return
+    reason = (text or "").strip()
+    if reason in ("-", "—", ""):
+        reason = "Admin មិនបានបញ្ជាក់មូលហេតុ"
+    price = float(o.get("price") or 0)
+    smm_orders[oid]["status"] = "rejected"
+    smm_orders[oid]["refunded"] = price
+    smm_orders[oid]["reject_reason"] = reason
+    _save(SMM_ORD_FILE, smm_orders)
+    # Refund first
+    try:
+        add_bal(int(o["uid"]), price)
+    except Exception as e:
+        logger.warning(f"[reject refund] {e}")
+    # Notify user with reason
+    try:
+        bot.send_message(
+            int(user_uid or o["uid"]),
+            f"❌ <b>Order ត្រូវបាន Reject!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 <code>{oid}</code>\n"
+            f"📊 {o.get('label','?')}\n"
+            f"🔢 {o.get('qty',0):,}\n"
+            f"📝 មូលហេតុ: <b>{reason}</b>\n"
+            f"💳 លុយ ${price:.4f} ត្រូវបានសងវិញ\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"ទំនាក់ Admin: {_admin_contact()}",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.warning(f"[reject notify user] {e}")
+    # Channel optional note
+    try:
+        _notify(
+            f"❌ <b>Order Rejected</b>\n"
+            f"🆔 <code>{oid}</code> · User <code>{o.get('uid')}</code>\n"
+            f"📊 {o.get('label','?')}\n"
+            f"📝 {reason}\n"
+            f"💳 Refund ${price:.4f}"
+        )
+    except Exception:
+        pass
+    tb.send_message(
+        uid,
+        f"❌ <b>Rejected & Refunded</b>\n"
+        f"🆔 <code>{oid}</code>\n"
+        f"📝 មូលហេតុ: {reason}",
+        parse_mode="HTML",
+        reply_markup=_tb_admin_kb(tb),
+    )
+
+
+
 @bot.callback_query_handler(func=lambda c: c.data.startswith("manord:"))
 def cb_manord(call):
     """Admin: mark manual order as completed"""
@@ -5944,6 +6026,15 @@ def _register_order_bot_handlers(tb):
         uid = message.chat.id
         step = waiting.get(uid)
         _finish_manual_order(uid, tb, step, message.text or "")
+
+    @tb.message_handler(func=lambda m: (m.chat.id == ADMIN_ID
+                         and isinstance(waiting.get(m.chat.id), dict)
+                         and waiting.get(m.chat.id, {}).get("step") == "manual_order_reject"
+                         and waiting.get(m.chat.id, {}).get("via_bot") == "order"))
+    def _ob_finish_reject(message):
+        uid = message.chat.id
+        step = waiting.get(uid)
+        _finish_manual_reject(uid, tb, step, message.text or "")
 
 def _register_pay_bot_handlers(tb):
     """ចុះឈ្មោះ callback (mdep:) លើ Payment Bot instance ដាច់ដោយឡែក ដូច្នេះ
@@ -8271,6 +8362,10 @@ def handle_msg(message):
         # ── Admin: Update manual order status ──
         if isinstance(step, dict) and step.get("step") == "manual_order_done" and uid == ADMIN_ID:
             _finish_manual_order(uid, _bot_by_tag(step.get("via_bot", "main")), step, text)
+            return
+        if isinstance(step, dict) and step.get("step") == "manual_order_reject" and uid == ADMIN_ID:
+            _finish_manual_reject(uid, _bot_by_tag(step.get("via_bot", "main")), step, text)
+            return
             return
 
         if text == "✍️ Manual SMM":
