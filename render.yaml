@@ -9,7 +9,7 @@ services:
     runtime: python
     plan: free
     region: singapore
-    buildCommand: pip install -r requirements-bot.txt
+    buildCommand: pip install -r requirements.txt
     startCommand: python kaijaklike_bot.py
     healthCheckPath: /health
     envVars:
