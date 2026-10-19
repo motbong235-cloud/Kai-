@@ -1037,8 +1037,7 @@ def _paytoggle_status_lines():
         status = "🟢 បើក" if on else "🔴 បិទ"
         cfg_note = "" if configured else " ⚠️ (មិនទាន់កំណត់ Key)"
         lines.append(f"{label}: <b>{status}</b>{cfg_note}")
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 def _paytoggle_kb():
     kb = InlineKeyboardMarkup()
@@ -1512,8 +1511,7 @@ def _user_discount_admin_text():
             lines.append(f"• <code>{u_id}</code> {name} → <b>{pct:.0f}%</b>{note_txt}")
         if len(user_discounts) > 30:
             lines.append(f"<i>... និង {len(user_discounts)-30} នាក់ទៀត</i>")
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 def _user_discount_admin_kb():
     kb = InlineKeyboardMarkup()
@@ -1645,8 +1643,7 @@ def _profit_report_text():
         f"  🛒 Orders: <b>{cnt}</b>  |  💵 លក់: <b>${rev:.2f}</b>\n"
         f"  📦 ដើម: <b>${cost:.2f}</b>  |  💹 ចំណេញ: <b>${profit:.2f}</b> ({margin:.1f}%)")
     lines.append("\n<i>* លុប Order rejected/canceled ចេញ (បានសងលុយវិញទាំងអស់) · Order partial ដកចំនួនសងវិញ · Cost គិតតាមអត្រាបច្ចុប្បន្នរបស់ Service</i>")
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 @bot.message_handler(commands=["profit"])
 def cmd_profit(message):
@@ -1697,8 +1694,7 @@ def _top_report_text(period_days=30, top_n=5):
     else:
         lines.append("  <i>គ្មានទិន្នន័យ</i>")
     lines.append("\n<i>* លុប Order rejected/canceled ចេញ</i>")
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 def daily_report_kb():
     on   = daily_report_cfg.get("enabled", True)
@@ -2379,16 +2375,13 @@ def _smm_service_list_text():
         for slug, s in _smm_get_svcs_in_cat(cat):
             sr = _smm_sell_rate(s["cost_rate"], slug)
             lines.append(f"  • {s.get('label',slug)} — ${sr:.2f}/1K")
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 # ── Hardcoded notify channel — always works ──
 NOTIFY_CHANNEL_ID_DEFAULT = -1003930705105
 
 def _notify(msg):
-    """Send message to notify channel (order + deposit).
-    Channel ID: env NOTIFY_CHANNEL_ID → smm_notify.json → default.
-    """
+    """Send to notify channel. ID: env NOTIFY_CHANNEL_ID → file → default."""
     cid = NOTIFY_CHANNEL_ID_DEFAULT
     try:
         env_cid = (os.environ.get("NOTIFY_CHANNEL_ID") or "").strip()
@@ -2403,12 +2396,7 @@ def _notify(msg):
         logger.debug(f"[silent] {_e}")
     try:
         msg = _emojify(msg) if msg else msg
-        bot.send_message(
-            cid,
-            msg,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
+        bot.send_message(cid, msg, parse_mode="HTML", disable_web_page_preview=True)
         logger.info(f"[notify] sent to {cid}")
     except Exception as e:
         logger.warning(f"[notify] failed cid={cid} err={e}")
@@ -2430,32 +2418,30 @@ def _kh_now_str(fmt="full"):
         return now.strftime("%Y-%m-%d %H:%M:%S")
     return now.strftime("%Y-%m-%d %I:%M:%S %p")
 
+
 def _channel_user_hit(uid):
-    """Clickable name + username + copyable id for channel posts."""
+    """Clickable name + @username + copyable id."""
     uid_str = str(uid)
     u = users_db.get(uid_str, {}) if isinstance(users_db, dict) else {}
     name = (u.get("name") or "").strip() or "User"
     uname = (u.get("username") or "").strip().lstrip("@")
-    # HTML escape minimal
     def _esc(s):
         return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     name_e = _esc(name)
-    # tg://user works for users who have interacted with the bot / privacy allows
     name_link = f'<a href="tg://user?id={uid_str}">{name_e}</a>'
     if uname:
         name_link += f' · <a href="https://t.me/{_esc(uname)}">@{_esc(uname)}</a>'
-    id_line = f'ID: <code>{uid_str}</code>'
-    return name_link, id_line
+    return name_link, f'ID: <code>{uid_str}</code>'
 
 
 def _channel_link_hit(link):
-    """Clickable full URL for channel (hit to open)."""
+    """Clickable order link for channel."""
     if not link or not isinstance(link, str):
         return "—"
     link = link.strip()
     if not link.startswith("http"):
-        return f"<code>{link}</code>"
-    # escape quotes in href
+        safe = link.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        return f"<code>{safe}</code>"
     href = link.replace('"', "%22")
     disp = link if len(link) <= 64 else (link[:61] + "...")
     disp = disp.replace("&", "&amp;").replace("<", "&lt;")
@@ -2463,7 +2449,7 @@ def _channel_link_hit(link):
 
 
 def _channel_deposit_msg(uid, amount, reference="", method_label="ដាក់ប្រាក់", bonus=0.0):
-    """Channel deposit — name/id hit-able."""
+    """Channel deposit — name / id clickable-copyable."""
     ref = reference or f"JAKLIKE_{int(time.time()*1000)}"
     name_hit, id_hit = _channel_user_hit(uid)
     msg = (
@@ -2493,11 +2479,11 @@ def _channel_new_user_msg(uid):
         f"✅ បានចូលរួច"
     )
 
+
 def _channel_order_msg(uid, label, price, link, oid, api_order_id=None, qty=None, extra_order_ids=None, status_label=None):
     """Channel order — clickable name, link, copyable ids."""
     name_hit, id_hit = _channel_user_hit(uid)
     link_hit = _channel_link_hit(link)
-
     svc_line = label or "?"
     if qty:
         try:
@@ -2506,10 +2492,9 @@ def _channel_order_msg(uid, label, price, link, oid, api_order_id=None, qty=None
             pass
     if price is not None:
         svc_line = f"{svc_line} — ${float(price):.2f}"
-
     lines = [
-        f"📦 <b>ការបញ្ជាទិញថ្មី!</b>",
-        f"━━━━━━━━━━━━━━━━━━",
+        "📦 <b>ការបញ្ជាទិញថ្មី!</b>",
+        "━━━━━━━━━━━━━━━━━━",
         f"👤 {name_hit}",
         f"🆔 {id_hit}",
         f"🔗 Link: {link_hit}",
@@ -2522,15 +2507,17 @@ def _channel_order_msg(uid, label, price, link, oid, api_order_id=None, qty=None
         if api_order_id:
             lines.append(f"🧾 API Order: <code>{api_order_id}</code>")
         lines.append(f"📋 Order ID: <code>{oid}</code>")
+    if price is not None:
+        lines.append(f"💵 តម្លៃ: <b>${float(price):.2f}</b>")
+    else:
+        lines.append("💵 តម្លៃ: —")
     lines += [
-        f"💵 តម្លៃ: <b>${float(price):.2f}</b>" if price is not None else "💵 តម្លៃ: —",
         f"📌 ស្ថានភាព: {status_label or 'ជោគជ័យ ✅'}",
         f"📅 {_kh_now_str('24')}",
-        f"",
-        f"អរគុណចំពោះការប្រើប្រាស់ ❤️",
+        "",
+        "អរគុណចំពោះការប្រើប្រាស់ ❤️",
     ]
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 
 def _send_deposit_notify(uid, amount, bonus, new_bal, reference="", method_label="ដាក់ប្រាក់"):
@@ -4655,8 +4642,7 @@ def _new_users_report_text(days=30, limit=40):
             ts = int(u.get("joined") or 0)
             dt = datetime.datetime.fromtimestamp(ts, _KH_TZ).strftime("%d/%m %H:%M") if ts else "?"
             lines.append(f"{i}. <b>{name}</b> {uname}\n   <code>{uid_str}</code> · {dt}")
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 def _ban_log_text(limit=20):
     lines = [f"🚫 <b>ប្រវត្តិ Ban/Unban</b> (ចុងក្រោយ {min(limit, len(ban_log))})", "━━━━━━━━━━━━━━━━━━"]
@@ -4670,8 +4656,7 @@ def _ban_log_text(limit=20):
             ts = int(rec.get("ts") or 0)
             dt = datetime.datetime.fromtimestamp(ts, _KH_TZ).strftime("%d/%m %H:%M") if ts else "?"
             lines.append(f"{act} <code>{rec.get('uid')}</code> {name} {uname}\n   ដោយ <code>{rec.get('by')}</code> · {dt}")
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -4699,8 +4684,7 @@ def _blocked_users_list_text(limit=50):
             dt = datetime.datetime.fromtimestamp(ts, _KH_TZ).strftime("%d/%m %H:%M") if ts else "?"
             lines.append("%d. <b>%s</b> %s" % (i, name, uname))
             lines.append("   <code>%s</code> · %s" % (uid_str, dt))
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 def _block_log_text(limit=40):
     """ប្រវត្តិ Block/Unblock ពីមុន"""
@@ -4719,8 +4703,7 @@ def _block_log_text(limit=40):
             dt = datetime.datetime.fromtimestamp(ts, _KH_TZ).strftime("%d/%m %H:%M") if ts else "?"
             lines.append("%s <code>%s</code> %s %s" % (act, rec.get("uid"), name, uname))
             lines.append("   %s" % dt)
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 def _show_promos(uid):
     if not promos:
@@ -4799,8 +4782,7 @@ def _emojiid_text(src_msg):
     for i, (ch, eid) in enumerate(found, 1):
         known = "✅ មានក្នុង EMOJI_MAP" if ch in EMOJI_MAP else "⚠️ មិននៅក្នុង EMOJI_MAP"
         lines.append(f"{i}. {ch} → <code>{eid}</code> ({known})")
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -4891,8 +4873,7 @@ def _apply_setemojis(src_msg):
     remaining = sum(1 for v in EMOJI_MAP.values() if not v)
     lines.append(f"\n📊 សរុប: {sum(1 for v in EMOJI_MAP.values() if v)}/{len(EMOJI_MAP)} កំណត់រួច — នៅសល់ {remaining}")
     lines.append("✅ អនុវត្តភ្លាម (message + button ថ្មី) — បើ keyboard ចាស់នៅ unicode សូម /start ម្ដងទៀត។")
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 @bot.message_handler(commands=["setemojis"])
 def cmd_setemojis(message):
@@ -4926,8 +4907,7 @@ def _emoji_status_text():
         lines.append("✅ រួចហើយ: " + " ".join(done))
     if missing:
         lines.append("\n⬜ នៅសល់ (fallback ទៅ unicode ធម្មតា): " + " ".join(missing))
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 @bot.message_handler(commands=["emojilist"])
 def cmd_emojilist(message):
