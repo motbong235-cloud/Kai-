@@ -2,7 +2,7 @@ import os
 """
 ╔══════════════════════════════════════════════════════════════╗
 ║     Kaijaklike Bot — カイロゼン SMM  [v11]                ║
-║     SMM Panel · ដាក់លុយ CamRapidPay KHQR + ABA PayWay       ║
+║     SMM Panel · ដាក់លុយ ABA PayWay + KHPAY + Manual QR       ║
 ║     Panel Admin · បន្ថែម/កាត់ Balance                       ║
 ║     Compatible: Python 3.10+ · Termux / Render / VPS       ║
 ║     v10: /newbot — បង្កើត Bot ថ្មីដោយផ្ទាល់ខាងក្នុង Telegram  ║
@@ -894,7 +894,9 @@ camrapid_cfg = _load(CAMRAPID_CFG_FILE, {"key": ""})            # live-editable 
 aba_cfg      = _load(ABA_CFG_FILE, {"key": "", "merchant_id": ""})  # live-editable ABA PayWay (KHMER SYSTEM) key/merchant
 khpay_cfg    = _load(KHPAY_CFG_FILE, {"key": "", "merchant_id": ""})
 webhook_cfg  = _load(WEBHOOK_CFG_FILE, {"url": ""})              # live-editable CamRapidPay webhook URL
-paytoggle_cfg= _load(PAYTOGGLE_CFG_FILE, {"camrapid_enabled": True, "aba_enabled": True, "khpay_enabled": True})  # បិទ/បើក វិធីទូទាត់ (v13)
+paytoggle_cfg= _load(PAYTOGGLE_CFG_FILE, {"camrapid_enabled": False, "aba_enabled": True, "khpay_enabled": True})  # បិទ/បើក វិធីទូទាត់ (v13)
+paytoggle_cfg["camrapid_enabled"] = False  # hard-disable CamRapidPay
+
 
 # ★ Sync env → runtime cfg (clone spawn ផ្ញើ key តាម env — ធានាថា _effective_* រកឃើញ)
 def _sync_payment_keys_from_env():
@@ -1006,12 +1008,13 @@ def _log_payment_startup():
 
 
 
-PAY_METHOD_LABELS = {"camrapid": "🔄 CamRapidPay KHQR", "aba": "💳 ABA PayWay", "khpay": "💠 KHPAY"}
+PAY_METHOD_LABELS = {"aba": "💳 ABA PayWay", "khpay": "💠 KHPAY"}  # CamRapidPay removed from UI
 
 def is_pay_method_enabled(method):
-    """True បើ admin មិនទាន់បិទវិធីទូទាត់នេះទេ (default = True បើមិនទាន់កំណត់អ្វីសោះ) — v13.
-    ចំណាំ: នេះជា Toggle ដាច់ដោយឡែកពី Key/Merchant ID — វិធីទូទាត់ណាមួយត្រូវការទាំង ២យ៉ាង
-    (Key/Merchant ID កំណត់រួច + Toggle នេះជា ON) ទើបប្រើបានជាក់ស្តែង។"""
+    """True បើ admin មិនទាន់បិទវិធីទូទាត់នេះទេ។
+    CamRapidPay ត្រូវបានលុបចេញពី product — តែងតែ False។"""
+    if method in ("camrapid", "auto"):
+        return False
     return bool(paytoggle_cfg.get(f"{method}_enabled", True))
 
 def set_pay_method_enabled(method, enabled):
@@ -3629,7 +3632,7 @@ def _active_pending_deposit(uid):
     return None, 0
 
 def _send_deposit_qr(uid, amount, promo_code=None, label="💸 ដាក់លុយ", bonus=0.0, promo_code_name=None,
-                      promo_bonus=0.0, auto_bonus=0.0, method="camrapid"):
+                      promo_bonus=0.0, auto_bonus=0.0, method="aba"):
     """Create payment QR → send branded QR card to user.
     method="camrapid" (default — ដដែលពីមុន, backward-compatible) ឬ method="aba"
     (ABA PayWay តាម KHMER SYSTEM — v12, មិនប៉ះពាល់ code path CamRapidPay ខាងក្រោមទេ)"""
@@ -4073,7 +4076,7 @@ def _process_deposit(uid, uid_str, amount, promo_code=None, method=None):
     """method=None → decide ស្វ័យប្រវត្តិ: បើមានទាំង CamRapidPay + ABA PayWay ព្រមគ្នា (Key
     កំណត់រួច ព្រមទាំង admin មិនទាន់បិទតាម 🔀 វិធីទូទាត់) ឲ្យ user ជ្រើសរើសមុន (picker) ；
     បើមានតែមួយ ប្រើវិធីនោះភ្លាម；  បើគ្មានវិធីណាមួយប្រើបាន ជូនដំណឹង user + admin ។ (v12/v13)"""
-    camrapid_ok = bool(_effective_camrapid_key()) and is_pay_method_enabled("camrapid")
+    camrapid_ok = False  # CamRapidPay removed
     aba_ok      = has_aba_payway() and is_pay_method_enabled("aba")
     khpay_ok    = has_khpay() and is_pay_method_enabled("khpay")
     # Clone កំណត់ pay_method តែមួយ → ចូលចិត្ត method នោះ ប៉ុន្តែបើមិន ready រក fallback
@@ -4265,10 +4268,9 @@ def admin_kb():
     if IS_MASTER:
         kb.row(KeyboardButton("✏️ កែ Support",      color="progress"),
                KeyboardButton("👥 Sub Admins",      color="progress"))
-    kb.row(KeyboardButton("🔑 CamRapidPay Key", color="progress"),
-           KeyboardButton("💳 ABA PayWay Key", color="progress"))
-    kb.row(KeyboardButton("💠 KHPAY Key", color="progress"),
-           KeyboardButton("🔀 វិធីទូទាត់", color="progress"))
+    kb.row(KeyboardButton("💳 ABA PayWay Key", color="progress"),
+           KeyboardButton("💠 KHPAY Key", color="progress"))
+    kb.row(KeyboardButton("🔀 វិធីទូទាត់", color="progress"))
     if IS_MASTER:
         kb.row(KeyboardButton("⏳ QR Cooldown", color="progress"))
         kb.row(KeyboardButton("📢 Force Subscribe", color="progress"),
@@ -6440,7 +6442,7 @@ def _clone_pay_txt(pay_method):
         return "🏦 ABA PayWay Auto (Step 3)"
     if pay_method == "khpay":
         return "💠 KHPAY Auto (khpay.site)"
-    return "🔄 CamRapidPay Auto (Step 1)"
+    return "💳 ABA / KHPAY / Manual"
 
 _STEP_EMOJI = ["0️⃣","1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣"]
 def _step_label(n, total=None):
@@ -6461,9 +6463,10 @@ def cb_newbot_paymethod(call):
     method = call.data.split("|", 1)[1]
     bot.answer_callback_query(call.id)
     if method == "auto":
-        waiting[uid] = {**step, "step": "newbot_key", "pay_method": "auto"}
-        bot.send_message(uid, f"{_step_label(5, 6)} — វាយ <b>CamRapidPay API Key</b> សម្រាប់ bot នេះ:",
-                          parse_mode="HTML", reply_markup=cancel_kb())
+        bot.send_message(uid,
+            "⚠️ <b>CamRapidPay ត្រូវបានលុបចេញ។</b>\nសូមជ្រើស ABA / KHPAY / Manual។",
+            parse_mode="HTML")
+        return
     elif method == "aba":
         waiting[uid] = {**step, "step": "newbot_aba_key", "pay_method": "aba", "camrapid_key": ""}
         bot.send_message(uid,
@@ -6524,17 +6527,16 @@ def cb_cln_pay(call):
         bot.answer_callback_query(call.id, "រកមិនឃើញ"); return
     bot.answer_callback_query(call.id)
     kb = InlineKeyboardMarkup(row_width=1)
-    kb.add(InlineKeyboardButton("1️⃣ CamRapidPay QR ស្វ័យប្រវត្តិ", callback_data=f"cln_paysel|auto|{name}", color="active"))
-    kb.add(InlineKeyboardButton("3️⃣ ABA PayWay ស្វ័យប្រវត្តិ", callback_data=f"cln_paysel|aba|{name}", color="active"))
+    kb.add(InlineKeyboardButton("💳 ABA PayWay ស្វ័យប្រវត្តិ", callback_data=f"cln_paysel|aba|{name}", color="active"))
     kb.add(InlineKeyboardButton("💠 KHPAY ស្វ័យប្រវត្តិ", callback_data=f"cln_paysel|khpay|{name}", color="progress"))
-    kb.add(InlineKeyboardButton("2️⃣ QR ដាក់ដោយដៃ (Manual)", callback_data=f"cln_paysel|manual|{name}", color="progress"))
+    kb.add(InlineKeyboardButton("🖼 QR ដាក់ដោយដៃ (Manual)", callback_data=f"cln_paysel|manual|{name}", color="progress"))
     kb.add(InlineKeyboardButton("⬅️ ត្រឡប់", callback_data=f"cln_view|{name}", color="inactive"))
     bot.send_message(uid,
         f"🔁 <b>ប្តូរ Step ទូទាត់ — {name}</b>\n\n"
-        "1️⃣ <b>CamRapidPay</b> — API Key → QR ស្វ័យប្រវត្តិ\n"
-        "3️⃣ <b>ABA PayWay</b> — Profile Key + Merchant ID → QR ស្វ័យប្រវត្តិ\n"
-        "💠 <b>KHPAY</b> — API Key + Merchant ID (mch_...) → QR ស្វ័យប្រវត្តិ\n"
-        "2️⃣ <b>Manual</b> — Upload រូប QR ដាក់ដោយដៃ",
+        "💳 <b>ABA PayWay</b> — Profile Key + Merchant ID\n"
+        "💠 <b>KHPAY</b> — API Key + Merchant ID\n"
+        "🖼 <b>Manual</b> — Upload រូប QR ដាក់ដោយដៃ\n"
+        "<i>CamRapidPay ត្រូវបានលុបចេញ</i>",
         parse_mode="HTML", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cln_paysel|"))
@@ -6547,9 +6549,10 @@ def cb_cln_paysel(call):
         bot.answer_callback_query(call.id, "រកមិនឃើញ"); return
     bot.answer_callback_query(call.id)
     if method == "auto":
-        waiting[uid] = {"step": "cln_pay_key", "clone": name}
-        bot.send_message(uid, f"វាយ <b>CamRapidPay API Key</b> ថ្មីសម្រាប់ '{name}':",
-                          parse_mode="HTML", reply_markup=cancel_kb())
+        bot.send_message(uid,
+            "⚠️ <b>CamRapidPay ត្រូវបានលុបចេញ។</b>\nសូមជ្រើស ABA / KHPAY / Manual។",
+            parse_mode="HTML", reply_markup=admin_kb())
+        return
     elif method == "aba":
         waiting[uid] = {"step": "cln_pay_aba_key", "clone": name}
         bot.send_message(uid, f"វាយ <b>ABA PayWay Profile Key</b> ថ្មីសម្រាប់ '{name}':",
@@ -7749,15 +7752,16 @@ def handle_msg(message):
                 bot.send_message(uid, "⚠️ សូមផ្ញើជាលេខតែប៉ុណ្ណោះ:", reply_markup=cancel_kb()); return
             waiting[uid] = {**step, "step": "newbot_paymethod", "new_admin_id": int(text.strip())}
             kb = InlineKeyboardMarkup(row_width=1)
-            kb.add(InlineKeyboardButton("🔄 CamRapidPay QR ស្វ័យប្រវត្តិ", callback_data="newbot_pay|auto", color="active"))
+            # CamRapidPay removed
             kb.add(InlineKeyboardButton("🏦 ABA PayWay ស្វ័យប្រវត្តិ", callback_data="newbot_pay|aba", color="active"))
             kb.add(InlineKeyboardButton("💠 KHPAY ស្វ័យប្រវត្តិ (khpay.site)", callback_data="newbot_pay|khpay", color="progress"))
             kb.add(InlineKeyboardButton("🖼 QR ដាក់ដោយដៃ Manual", callback_data="newbot_pay|manual", color="progress"))
             bot.send_message(uid,
                 f"{_step_label(4)} — ជ្រើសរើស <b>របៀបទទួលទឹក</b> សម្រាប់ bot នេះ:\n\n"
-                "🔄 <b>CamRapidPay Auto</b> — ប្រើ API Key បង្កើត QR ស្វ័យប្រវត្តិ (ត្រូវការ API Key) — សរុប 7 ជំហាន\n"
-                "🏦 <b>ABA PayWay Auto</b> — ប្រើ Profile Key + Merchant ID (KHMER SYSTEM) បង្កើត QR ស្វ័យប្រវត្តិ — សរុប 8 ជំហាន\n"
-                "🖼 <b>Manual QR</b> — Upload រូប QR (KHQR) ដាក់ដោយដៃ គ្មានត្រូវការ API Key — សរុប 8 ជំហាន",
+                "🏦 <b>ABA PayWay Auto</b> — Profile Key + Merchant ID (KHMER SYSTEM)\n"
+                "💠 <b>KHPAY Auto</b> — API Key + Merchant ID (khpay.site)\n"
+                "🖼 <b>Manual QR</b> — Upload រូប QR ដាក់ដោយដៃ\n"
+                "<i>CamRapidPay ត្រូវបានលុបចេញ</i>",
                 parse_mode="HTML", reply_markup=kb)
             return
 
@@ -8959,7 +8963,9 @@ def handle_msg(message):
                 lines.append("(គ្មាន Sub Admin ទេ)")
             bot.send_message(uid, "\n".join(lines), parse_mode="HTML", reply_markup=kb2); return
 
-        if text == "🔑 CamRapidPay Key":
+        if text == "🔑 CamRapidPay Key":  # removed — keep for old keyboards
+            bot.send_message(uid, "⚠️ <b>CamRapidPay ត្រូវបានលុបចេញពី bot ហើយ។</b>\nប្រើ <b>ABA PayWay</b> / <b>KHPAY</b> / <b>QR ដាក់ដោយដៃ</b> ជំនួស។", parse_mode="HTML", reply_markup=admin_kb()); return
+        if False and text == "🔑 CamRapidPay Key__disabled":
             if uid != ADMIN_ID:
                 bot.send_message(uid, "🚫 Master Admin only!", reply_markup=sub_admin_kb()); return
             cur = _effective_camrapid_key()
@@ -9003,7 +9009,7 @@ def handle_msg(message):
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"📌 ត្រូវការទាំង ២ (Key + Merchant ID) ដើម្បីបើក ABA PayWay ជាវិធីទូទាត់ស្វ័យប្រវត្តិ។\n"
                 f"យកពី: khmer-system.com/operator/profile\n"
-                f"💡 បើកំណត់ទាំង CamRapidPay + ABA ព្រមគ្នា Bot នឹងឲ្យ User ជ្រើសរើសពេលដាក់លុយ។",
+                f"💡 អាចប្រើ ABA + KHPAY ព្រមគ្នា — User ជ្រើសរើសពេលដាក់លុយ។",
                 parse_mode="HTML", reply_markup=kb2); return
 
         if text == "💠 KHPAY Key":
