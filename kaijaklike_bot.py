@@ -6788,15 +6788,31 @@ def _apply_clone_pay_update(uid, name, pay_method, camrapid_key="", manual_photo
     except Exception as _e:
         logger.error(f"Seed payment files failed for clone '{name}': {_e}")
         qr_warn = f"\n\u26a0\ufe0f seed error: {_e}"
-    was_running = _clone_is_running(name)
-    if was_running:
-        _stop_clone(name); time.sleep(1); _spawn_clone(name, cfg)
+    restart_note = ""
+    try:
+        was_running = _clone_is_running(name)
+        if was_running:
+            _stop_clone(name)
+            time.sleep(1)
+            _spawn_clone(name, cfg)
+            restart_note = " ហើយ restart រួច។"
+        else:
+            restart_note = " (bot នេះកំពុងបិទ — ចាប់ផ្តើមវាដើម្បីអនុវត្ត)។"
+    except Exception as e:
+        logger.error(f"[clone_pay_update] restart failed for {name}: {e}")
+        restart_note = f" (⚠️ restart បរាជ័យ: {e})"
     pay_txt = _clone_pay_txt(pay_method)
-    bot.send_message(uid,
-        f"✅ បានប្តូរការទូទាត់សម្រាប់ '<b>{name}</b>' ទៅជា {pay_txt}"
-        + (" ហើយ restart រួច។" if was_running else " (bot នេះកំពុងបិទ — ចាប់ផ្តើមវាដើម្បីអនុវត្ត)។"),
-        + qr_warn,
-        parse_mode="HTML", reply_markup=admin_kb())
+    try:
+        bot.send_message(
+            uid,
+            f"✅ បានប្តូរការទូទាត់សម្រាប់ '<b>{name}</b>' ទៅជា {pay_txt}"
+            + restart_note
+            + (qr_warn or ""),
+            parse_mode="HTML",
+            reply_markup=admin_kb(),
+        )
+    except Exception as e:
+        logger.error(f"[clone_pay_update] notify admin failed: {e}")
 
 @bot.callback_query_handler(func=lambda c: c.data == "cln_list")
 def cb_cln_list(call):
