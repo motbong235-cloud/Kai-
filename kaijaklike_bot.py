@@ -521,6 +521,7 @@ for _k_env, _k_cfg in (
     ("PAY_BOT_TOKEN", "pay_token"),
     ("ORDER_BOT_CHAT_ID", "order_chat_id"),
     ("PAY_BOT_CHAT_ID", "pay_chat_id"),
+    ("ORDER_GROUP_ID", "order_group_id"),
 ):
     _v = (os.environ.get(_k_env) or "").strip()
     if _v:
@@ -2619,21 +2620,31 @@ def _safe_send(tb, chat_id, text, reply_markup=None, parse_mode="HTML", label="n
 
 
 def onotify(text, reply_markup=None, parse_mode="HTML"):
-    """Order notification → Order Bot (if set) + always fallback to main bot ADMIN.
-    Fixes silent failure when Order Bot exists but admin never /start'ed it.
+    """Order notification — ALWAYS to main bot ADMIN, plus Order Bot / group if set.
+    Fixes TikTok Khmer / manual orders only appearing in public channel.
     """
     try:
         text = _emojify(text) if text else text
         if parse_mode is None and text and "<tg-emoji" in str(text):
             parse_mode = "HTML"
-        ok = False
+        ok_any = False
+        # 1) Main service bot → ADMIN (always — this is what admin expects)
+        if _safe_send(bot, ADMIN_ID, text, reply_markup, parse_mode, "onotify/main"):
+            ok_any = True
+        # 2) Dedicated Order Bot → admin private chat or configured chat id
         if order_bot:
-            ok = _safe_send(order_bot, _notify_target_chat_id("order"), text, reply_markup, parse_mode, "onotify/order_bot")
-        # Always try main bot as well when order_bot missing OR failed
-        if not ok:
-            ok = _safe_send(bot, ADMIN_ID, text, reply_markup, parse_mode, "onotify/main")
-        if not ok:
-            logger.error("[onotify] all channels failed")
+            if _safe_send(order_bot, _notify_target_chat_id("order"), text, reply_markup, parse_mode, "onotify/order_bot"):
+                ok_any = True
+        # 3) Optional extra group (ORDER_GROUP_ID / order_group_id) via main bot
+        try:
+            gid = (notify_bots_cfg or {}).get("order_group_id") or (os.environ.get("ORDER_GROUP_ID") or "").strip()
+            if gid:
+                if _safe_send(bot, int(gid), text, reply_markup, parse_mode, "onotify/group"):
+                    ok_any = True
+        except Exception as e:
+            logger.warning(f"[onotify/group] {e}")
+        if not ok_any:
+            logger.error("[onotify] all targets failed — check ADMIN_ID and that admin /start the bot")
     except Exception as e:
         logger.warning(f"[onotify] failed: {e}")
 
@@ -9534,7 +9545,11 @@ def handle_msg(message):
             try:
                 onotify(admin_msg, reply_markup=kb_adm)
             except Exception as _e:
-                logger.debug(f"[silent] {_e}")
+                logger.warning(f"[order bot notify] failed: {_e}")
+                try:
+                    bot.send_message(ADMIN_ID, admin_msg, parse_mode="HTML", reply_markup=kb_adm)
+                except Exception as e2:
+                    logger.error(f"[order bot notify] main fallback failed: {e2}")
 
             try:
                 _notify(_channel_order_msg(
