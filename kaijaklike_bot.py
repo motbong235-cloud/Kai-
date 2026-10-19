@@ -340,10 +340,6 @@ KHPAY_CHECK_URL    = os.getenv("KHPAY_CHECK_URL", f"{KHPAY_BASE_URL}/qr/check")
 KHPAY_EXPIRE_SEC   = int(os.getenv("KHPAY_EXPIRE_SEC", "180"))
 KHPAY_MERCHANT_ID  = os.getenv("KHPAY_MERCHANT_ID", "")  # optional mch_...
 
-# ── Bakong Open API — Generate Deep Link (បើក App ធនាគារស្វ័យប្រវត្តិ៖ ABA / ACLEDA / Bakong / Wing ...) ──
-BAKONG_API_TOKEN    = os.getenv("BAKONG_API_TOKEN", "")   # 👈 Bakong Developer Token ពី https://api-bakong.nbc.gov.kh/register/ — កំណត់ជា Environment Variable
-BAKONG_DEEPLINK_API = "https://api-bakong.nbc.gov.kh/v1/generate_deeplink_by_qr"
-
 DEPOSIT_EXPIRE_SEC = 300   # 5 minutes (CamRapidPay expire 5 min)
 POLL_INTERVAL      = 8
 SMM_ORDER_POLL_INTERVAL = 180   # 3 minutes — Poll ស្ថានភាព Order ពី SMM API
@@ -418,7 +414,6 @@ SUPPORT_CFG_FILE= _dpath("smm_support.json")
 CAMRAPID_CFG_FILE= _dpath("smm_camrapid.json")
 ABA_CFG_FILE    = _dpath("smm_aba.json")
 KHPAY_CFG_FILE  = _dpath("smm_khpay.json")
-BAKONG_CFG_FILE = _dpath("smm_bakong.json")
 WEBHOOK_CFG_FILE = _dpath("smm_webhook.json")
 PAYTOGGLE_CFG_FILE = _dpath("smm_paytoggle.json")   # បិទ/បើក វិធីទូទាត់ម្តងៗ (v13)
 EMOJI_FILE      = _mdpath("smm_emoji.json")   # ចែក share រួមគ្នារវាង bot ដើម និង clone ទាំងអស់ (មិនញែកតាម DATA_DIR ទេ)
@@ -898,7 +893,6 @@ support_cfg  = _load(SUPPORT_CFG_FILE, {"kh": "", "en": ""})   # custom support 
 camrapid_cfg = _load(CAMRAPID_CFG_FILE, {"key": ""})            # live-editable API key
 aba_cfg      = _load(ABA_CFG_FILE, {"key": "", "merchant_id": ""})  # live-editable ABA PayWay (KHMER SYSTEM) key/merchant
 khpay_cfg    = _load(KHPAY_CFG_FILE, {"key": "", "merchant_id": ""})
-bakong_cfg   = _load(BAKONG_CFG_FILE, {"token": ""})            # live-editable Bakong Developer Token
 webhook_cfg  = _load(WEBHOOK_CFG_FILE, {"url": ""})              # live-editable CamRapidPay webhook URL
 paytoggle_cfg= _load(PAYTOGGLE_CFG_FILE, {"camrapid_enabled": True, "aba_enabled": True, "khpay_enabled": True})  # បិទ/បើក វិធីទូទាត់ (v13)
 
@@ -1048,10 +1042,6 @@ def _paytoggle_kb():
                                     color=("danger" if on else "active")))
     return kb
 
-def _effective_bakong_token():
-    """Return runtime Bakong token if set, else fall back to env/default"""
-    return bakong_cfg.get("token") or BAKONG_API_TOKEN
-
 def is_admin(uid):
     """True if uid is master admin OR sub-admin"""
     return uid == ADMIN_ID or uid in sub_admins
@@ -1088,10 +1078,39 @@ def _seed_clone_payment_files(wdir, cfg):
             "aba_enabled": pay == "aba",
             "khpay_enabled": pay == "khpay",
         })
-        # Manual QR
+        # Manual QR (payment method 2).
+        # FIX: a Telegram file_id only works for the bot that received the photo. The QR was uploaded to the
+        # MASTER bot, so a clone (different token) could not send it -> errors / no QR. Download the image once
+        # and store it inside the clone's data dir; the clone sends it as a file.
+        photo_path = ""
+        src_id = cfg.get("manual_qr_photo_id", "") if pay == "manual" else ""
+        if src_id:
+            target = os.path.join(wdir, "manual_qr.jpg")
+            marker = os.path.join(wdir, "manual_qr.src")
+            same = False
+            try:
+                if os.path.exists(target) and os.path.exists(marker):
+                    with open(marker, "r", encoding="utf8") as _mf:
+                        same = _mf.read().strip() == src_id
+            except Exception:
+                same = False
+            if not same:
+                try:
+                    _fi = bot.get_file(src_id)
+                    _data = bot.download_file(_fi.file_path)
+                    os.makedirs(wdir, exist_ok=True)
+                    with open(target, "wb") as _f:
+                        _f.write(_data)
+                    with open(marker, "w", encoding="utf8") as _mf:
+                        _mf.write(src_id)
+                except Exception as _e:
+                    logger.error(f"[clone_seed] manual QR download failed for {os.path.basename(wdir)}: {_e}")
+            if os.path.exists(target):
+                photo_path = "manual_qr.jpg"
         _save(os.path.join(wdir, "manual_qr.json"), {
             "enabled": pay == "manual",
-            "photo_id": cfg.get("manual_qr_photo_id", "") if pay == "manual" else "",
+            "photo_id": src_id,
+            "photo_path": photo_path,
             "info": cfg.get("manual_qr_info", "") if pay == "manual" else "",
         })
         logger.info(f"[clone_seed] {os.path.basename(wdir)} pay={pay} "
@@ -3275,46 +3294,6 @@ def _build_aba_app_deeplink(data):
     logger.warning(f"[aba_deeplink] គ្មាន deeplink/qr_string field ក្នុង response — keys: {list(data.keys())}")
     return None
 
-def _bakong_deeplink(qr_str, uid=None):
-    """
-    ហៅ Bakong Open API (NBC) ដើម្បីបំលែង KHQR string → Deep Link មួយ
-    ដែលបើក App ធនាគារបានស្វ័យប្រវត្តិ (ABA, ACLEDA, Bakong, Wing, Chip Mong ...) —
-    អ្នកប្រើគ្រាន់តែចុច button ម្តង App ធនាគាររបស់ខ្លួននឹងបើក ព្រមទាំង pre-fill ការទូទាត់។
-    ត្រូវការ BAKONG_API_TOKEN (Bakong Developer Token) កំណត់ជា Environment Variable។
-    """
-    tok = _effective_bakong_token()
-    if not tok or not qr_str:
-        return None
-    try:
-        r = http.post(
-            BAKONG_DEEPLINK_API,
-            json={
-                "qr": qr_str,
-                "sourceInfo": {
-                    "appIconUrl": "https://raw.githubusercontent.com/sovannarinsorn-droid/assets/main/kairozen_logo.png",
-                    "appName": BOT_DISPLAY_NAME or "KaiJakLike",
-                    "appDeepLinkCallback": f"https://t.me/{_bot_username()}",
-                },
-            },
-            headers={
-                "Authorization": f"Bearer {tok}",
-                "Content-Type":  "application/json",
-                "Accept":        "application/json",
-            },
-            timeout=10,
-        )
-        data = r.json()
-        logger.info(f"[bakong_deeplink] uid={uid} HTTP={r.status_code} resp={data}")
-        if data.get("responseCode") == 0:
-            d = data.get("data") or {}
-            return d.get("shortLink") or d.get("deeplink") or d.get("dl")
-        logger.warning(f"[bakong_deeplink] failed: {data}")
-        return None
-    except Exception as e:
-        logger.warning(f"[bakong_deeplink] exception: {e}")
-        return None
-
-
 # ═══════════════════════════════════════════════════════════
 #  KHPAY (khpay.site)
 # ═══════════════════════════════════════════════════════════
@@ -3781,15 +3760,12 @@ def _send_deposit_qr(uid, amount, promo_code=None, label="💸 ដាក់ល�
     #    ដើម្បីកុំឲ្យរង់ចាំ Bakong API (រហូតដល់ 10s) ធ្វើឲ្យ QR ចេញយឺត/មិនចេញ ──
     def _attach_bank_button():
         try:
-            dlink = _bakong_deeplink(qr_str, uid) if qr_str else None
             aba_pay = _aba_mobile_https_link(qr_str) if qr_str else None
-            if not dlink and not aba_pay:
+            if not aba_pay:
                 return
             kb_pay = InlineKeyboardMarkup()
             if aba_pay:
                 kb_pay.add(InlineKeyboardButton("🏦 បើក ABA → Pay", url=aba_pay, color="active"))
-            if dlink:
-                kb_pay.add(InlineKeyboardButton("🏦 បើក App ធនាគារ (ACLEDA/Wing…)", url=dlink, color="progress"))
             new_cap = cap + ("\n📱 <i>ចុច «បើក ABA → Pay» ដើម្បីចូលអេក្រង់ទូទាត់ភ្លាម។ "
                               "បើមិនចូល App សូម ••• → បើកក្នុង Safari/Chrome</i>")
             if img_buf:
@@ -4054,16 +4030,12 @@ def _send_deposit_qr_khpay(uid, amount, promo_code_name=None, bonus=0.0, promo_b
         try:
             if not sent_msg:
                 return
-            bakong_link = _bakong_deeplink(qr_string, uid) if qr_string else None
             aba_link = aba_https or _aba_mobile_https_link(aba_deeplink_raw or qr_string)
-            if not bakong_link and not aba_link:
+            if not aba_link:
                 return
             kb2 = InlineKeyboardMarkup()
             if aba_link:
                 kb2.add(InlineKeyboardButton("🏦 បើក ABA → Pay", url=aba_link, color="active"))
-            if bakong_link and bakong_link != aba_link:
-                kb2.add(InlineKeyboardButton(
-                    "🏦 បើក App ធនាគារ (ABA/ACLEDA/Wing)", url=bakong_link, color="active"))
             # payment_url button លុបពី KHPAY
             new_cap = caption + (
                 "\n📱 <i>ចុច «បើក ABA → Pay» — ចូលអេក្រង់ទូទាត់ភ្លាម។ បើមិនចូល សូមបើកក្នុង Safari/Chrome "
@@ -4298,8 +4270,7 @@ def admin_kb():
     kb.row(KeyboardButton("💠 KHPAY Key", color="progress"),
            KeyboardButton("🔀 វិធីទូទាត់", color="progress"))
     if IS_MASTER:
-        kb.row(KeyboardButton("🏦 Bakong Deep Link", color="progress"),
-               KeyboardButton("⏳ QR Cooldown", color="progress"))
+        kb.row(KeyboardButton("⏳ QR Cooldown", color="progress"))
         kb.row(KeyboardButton("📢 Force Subscribe", color="progress"),
                KeyboardButton("📝 Welcome Msg",     color="progress"))
         kb.row(KeyboardButton("😊 កំណត់ Emoji", color="progress"))
@@ -5505,10 +5476,16 @@ def cb_dep(call):
                    f"{info}\n\n"
                    f"👇 ស្កេន QR ខាងលើ ផ្ទេរប្រាក់ រួចវាយចំនួនប្រាក់ដែលបានផ្ទេរ:")
         try:
-            bot.send_photo(uid, manual_qr_cfg["photo_id"], caption=caption,
-                            parse_mode="HTML", reply_markup=cancel_kb())
+            _pp = manual_qr_cfg.get("photo_path") or ""
+            _full = _dpath(_pp) if _pp else ""
+            if _full and os.path.exists(_full):
+                with open(_full, "rb") as _fh:   # clone: upload the stored file (a master file_id is invalid here)
+                    bot.send_photo(uid, _fh, caption=caption, parse_mode="HTML", reply_markup=cancel_kb())
+            else:
+                bot.send_photo(uid, manual_qr_cfg["photo_id"], caption=caption,
+                                parse_mode="HTML", reply_markup=cancel_kb())
         except Exception as _e:
-            logger.debug(f"[silent] {_e}")
+            logger.warning(f"[manual_qr] send_photo failed: {_e}")
             bot.send_message(uid, caption, parse_mode="HTML", reply_markup=cancel_kb())
         return
 
@@ -6502,7 +6479,7 @@ def cb_newbot_paymethod(call):
     else:
         waiting[uid] = {**step, "step": "newbot_manual_qr_photo", "pay_method": "manual", "camrapid_key": ""}
         bot.send_message(uid,
-            f"{_step_label(5, 7)} — ផ្ញើ <b>រូបភាព QR</b> (Bakong KHQR) សម្រាប់ bot នេះ (ផ្ញើជារូបភាព):",
+            f"{_step_label(5, 7)} — ផ្ញើ <b>រូបភាព QR</b> (KHQR) សម្រាប់ bot នេះ (ផ្ញើជារូបភាព):",
             parse_mode="HTML", reply_markup=cancel_kb())
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cln_view|"))
@@ -6584,7 +6561,7 @@ def cb_cln_paysel(call):
                           parse_mode="HTML", reply_markup=cancel_kb())
     elif method == "manual":
         waiting[uid] = {"step": "cln_pay_qr_photo", "clone": name}
-        bot.send_message(uid, f"ផ្ញើ <b>រូបភាព QR</b> (Bakong KHQR) ថ្មីសម្រាប់ '{name}':",
+        bot.send_message(uid, f"ផ្ញើ <b>រូបភាព QR</b> (KHQR) ថ្មីសម្រាប់ '{name}':",
                           parse_mode="HTML", reply_markup=cancel_kb())
     else:
         bot.send_message(uid, f"⚠️ វិធីទូទាត់មិនស្គាល់: <code>{method}</code>", parse_mode="HTML")
@@ -6657,7 +6634,6 @@ def cb_cln_more(call):
     kb = InlineKeyboardMarkup(row_width=1)
     kb.add(InlineKeyboardButton("💬 Support Message", callback_data=f"cln_support|{name}", color="progress"))
     kb.add(InlineKeyboardButton("👥 Sub Admins", callback_data=f"cln_subadmin|{name}", color="progress"))
-    kb.add(InlineKeyboardButton("🏦 Bakong Deep Link", callback_data=f"cln_bakong|{name}", color="progress"))
     kb.add(InlineKeyboardButton("⏳ QR Cooldown", callback_data=f"cln_cooldown|{name}", color="progress"))
     kb.add(InlineKeyboardButton("⬅️ ត្រឡប់", callback_data=f"cln_view|{name}", color="inactive"))
     bot.send_message(uid, f"⚙️ <b>ការកំណត់ផ្សេងទៀត — {name}</b>", parse_mode="HTML", reply_markup=kb)
@@ -6745,22 +6721,6 @@ def cb_cln_subadmin_del(call):
     _clone_save_restart(uid, name, "smm_sub_admins.json", cur,
                          f"✅ លុប Sub Admin <code>{sa_id}</code> ចេញពី '<b>{name}</b>'")
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("cln_bakong|"))
-def cb_cln_bakong(call):
-    uid = call.message.chat.id
-    if uid != ADMIN_ID or not IS_MASTER:
-        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
-    name = call.data.split("|", 1)[1]
-    if name not in clone_registry:
-        bot.answer_callback_query(call.id, "រកមិនឃើញ"); return
-    bot.answer_callback_query(call.id)
-    waiting[uid] = {"step": "cln_bakong_token", "clone": name}
-    bot.send_message(uid,
-        f"🏦 <b>ផ្ញើ Bakong Developer Token ថ្មី — {name}</b>\n"
-        "(យកពី https://api-bakong.nbc.gov.kh/register/)\n"
-        "ឬផ្ញើ <code>-</code> ដើម្បី reset ទៅ env/default:",
-        parse_mode="HTML", reply_markup=cancel_kb())
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cln_cooldown|"))
 def cb_cln_cooldown(call):
     uid = call.message.chat.id
@@ -6819,11 +6779,15 @@ def _apply_clone_pay_update(uid, name, pay_method, camrapid_key="", manual_photo
         cfg["khpay_merchant"] = ""
     clone_registry[name] = cfg
     _save(CLONES_REGISTRY, clone_registry)
+    qr_warn = ""
     try:
         wdir = _clone_dir(name)
         _seed_clone_payment_files(wdir, cfg)
+        if pay_method == "manual" and not os.path.exists(os.path.join(wdir, "manual_qr.jpg")):
+            qr_warn = "\n\u26a0\ufe0f \u1798\u17b7\u1793\u17a2\u17b6\u1785\u1785\u1798\u17d2\u179b\u1784\u179a\u17bc\u1794 QR \u1791\u17c5 bot \u1793\u17c4\u17c7\u1794\u17b6\u1793 \u17d4 \u179f\u17bc\u1798\u1795\u17d2\u1789\u17be\u179a\u17bc\u1794 QR \u1798\u17d2\u178f\u1784\u1791\u17c0\u178f"
     except Exception as _e:
         logger.error(f"Seed payment files failed for clone '{name}': {_e}")
+        qr_warn = f"\n\u26a0\ufe0f seed error: {_e}"
     was_running = _clone_is_running(name)
     if was_running:
         _stop_clone(name); time.sleep(1); _spawn_clone(name, cfg)
@@ -6831,6 +6795,7 @@ def _apply_clone_pay_update(uid, name, pay_method, camrapid_key="", manual_photo
     bot.send_message(uid,
         f"✅ បានប្តូរការទូទាត់សម្រាប់ '<b>{name}</b>' ទៅជា {pay_txt}"
         + (" ហើយ restart រួច។" if was_running else " (bot នេះកំពុងបិទ — ចាប់ផ្តើមវាដើម្បីអនុវត្ត)។"),
+        + qr_warn,
         parse_mode="HTML", reply_markup=admin_kb())
 
 @bot.callback_query_handler(func=lambda c: c.data == "cln_list")
@@ -7113,37 +7078,6 @@ def cb_set_khpay(call):
             "✅ QR គួរតែចេញបានធម្មតា!" if ok else "❌ សូមពិនិត្យ API Key / Merchant / account នៅ khpay.site",
         )
         bot.send_message(uid, msg, parse_mode="HTML", reply_markup=admin_kb())
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("set_bakong:"))
-def cb_set_bakong(call):
-    uid = call.message.chat.id
-    if uid != ADMIN_ID: bot.answer_callback_query(call.id, "🚫"); return
-    action = call.data.split(":")[1]
-    bot.answer_callback_query(call.id)
-    if action == "edit":
-        waiting[uid] = "set_bakong_token"
-        bot.send_message(uid,
-            "🏦 <b>ផ្ញើ Bakong Developer Token ថ្មី:</b>\n"
-            "(យកពី https://api-bakong.nbc.gov.kh/register/)\n"
-            "ឬផ្ញើ <code>-</code> ដើម្បី reset ទៅ env/default",
-            parse_mode="HTML", reply_markup=cancel_kb())
-    elif action == "reset":
-        bakong_cfg["token"] = ""
-        _save(BAKONG_CFG_FILE, bakong_cfg)
-        bot.send_message(uid, "✅ Bakong Token reset ទៅ env/default!",
-                         parse_mode="HTML", reply_markup=admin_kb())
-    elif action == "test":
-        tok = _effective_bakong_token()
-        if not tok:
-            bot.send_message(uid, "⚠️ មិនទាន់កំណត់ Bakong Token ទេ!",
-                             parse_mode="HTML", reply_markup=admin_kb()); return
-        # KHQR ខ្សែសាកល្បង (generic Bakong test string) — គ្រាន់ត្រួតពិនិត្យថា token/API ដំណើរការ
-        test_dl = _bakong_deeplink("00020101021129180014A00000067701011201150096600123456789530384054031005802KH5910TEST MERCHANT6010PHNOM PENH62070503***6304ABCD", uid)
-        ok = bool(test_dl)
-        bot.send_message(uid,
-            f"{'✅' if ok else '❌'} <b>Bakong Deep Link Test</b>\n"
-            f"{'Deep link: <code>' + test_dl + '</code>' if ok else 'Token invalid ឬ API មិនឆ្លើយតប — ពិនិត្យ log'}",
-            parse_mode="HTML", reply_markup=admin_kb())
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("set_welcome:"))
 def cb_set_welcome(call):
@@ -7786,7 +7720,7 @@ def handle_msg(message):
                 f"{_step_label(4)} — ជ្រើសរើស <b>របៀបទទួលទឹក</b> សម្រាប់ bot នេះ:\n\n"
                 "🔄 <b>CamRapidPay Auto</b> — ប្រើ API Key បង្កើត QR ស្វ័យប្រវត្តិ (ត្រូវការ API Key) — សរុប 7 ជំហាន\n"
                 "🏦 <b>ABA PayWay Auto</b> — ប្រើ Profile Key + Merchant ID (KHMER SYSTEM) បង្កើត QR ស្វ័យប្រវត្តិ — សរុប 8 ជំហាន\n"
-                "🖼 <b>Manual QR</b> — Upload រូប QR (Bakong KHQR) ដាក់ដោយដៃ គ្មានត្រូវការ API Key — សរុប 8 ជំហាន",
+                "🖼 <b>Manual QR</b> — Upload រូប QR (KHQR) ដាក់ដោយដៃ គ្មានត្រូវការ API Key — សរុប 8 ជំហាន",
                 parse_mode="HTML", reply_markup=kb)
             return
 
@@ -7998,15 +7932,6 @@ def handle_msg(message):
             waiting.pop(uid, None)
             _clone_save_restart(uid, name, "smm_sub_admins.json", cur,
                 f"✅ បន្ថែម Sub Admin <code>{new_id}</code> ចូល '<b>{name}</b>'")
-            return
-
-        if isinstance(step, dict) and step.get("step") == "cln_bakong_token":
-            name = step["clone"]
-            raw = text.strip()
-            token = "" if raw == "-" else raw
-            waiting.pop(uid, None)
-            _clone_save_restart(uid, name, "smm_bakong.json", {"token": token},
-                f"✅ Bakong Token បានរក្សាទុកសម្រាប់ '<b>{name}</b>'")
             return
 
         if isinstance(step, dict) and step.get("step") == "cln_cooldown_sec":
@@ -9085,25 +9010,6 @@ def handle_msg(message):
                 f"User នឹងឃើញ picker ជ្រើសរើសពេលដាក់លុយ។ បើមានតែមួយ Bot ប្រើវិធីនោះដោយស្វ័យប្រវត្តិ។",
                 parse_mode="HTML", reply_markup=_paytoggle_kb()); return
 
-        if text == "🏦 Bakong Deep Link":
-            if uid != ADMIN_ID:
-                bot.send_message(uid, "🚫 Master Admin only!", reply_markup=sub_admin_kb()); return
-            cur = _effective_bakong_token()
-            masked = (cur[:8] + "..." + cur[-4:]) if len(cur) > 12 else (("*" * len(cur)) if cur else "(មិនទាន់កំណត់)")
-            kb2 = InlineKeyboardMarkup()
-            kb2.add(InlineKeyboardButton("✏️ ប្តូរ Token ថ្មី", callback_data="set_bakong:edit", color="progress"))
-            kb2.add(InlineKeyboardButton("🧪 Test Token", callback_data="set_bakong:test", color="active"))
-            if bakong_cfg.get("token"):
-                kb2.add(InlineKeyboardButton("🗑️ Reset (env/default)", callback_data="set_bakong:reset", color="inactive"))
-            bot.send_message(uid,
-                f"🏦 <b>Bakong Developer Token</b>\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"Token: <code>{masked}</code>\n"
-                f"Source: {'📁 runtime' if bakong_cfg.get('token') else '⚙️ env/default'}\n"
-                f"📌 ត្រូវការសម្រាប់ button បើក App ធនាគារស្វ័យប្រវត្តិ (ABA/ACLEDA/Bakong) នៅក្រោម QR ដាក់លុយ។\n"
-                f"យក Token ពី: https://api-bakong.nbc.gov.kh/register/",
-                parse_mode="HTML", reply_markup=kb2); return
-
         if text == "📝 Welcome Msg":
             if uid != ADMIN_ID:
                 bot.send_message(uid, "🚫 Master Admin only!", reply_markup=sub_admin_kb()); return
@@ -9294,24 +9200,6 @@ def handle_msg(message):
                                  parse_mode="HTML", reply_markup=admin_kb())
             return
 
-        if step == "set_bakong_token":
-            waiting.pop(uid, None)
-            if text.strip() == "-":
-                bakong_cfg["token"] = ""
-                _save(BAKONG_CFG_FILE, bakong_cfg)
-                bot.send_message(uid, "✅ Bakong Token reset ទៅ env/default!",
-                                 reply_markup=admin_kb())
-            else:
-                k = text.strip()
-                if len(k) < 10:
-                    bot.send_message(uid, "❌ Token ខ្លីពេក!", reply_markup=admin_kb()); return
-                bakong_cfg["token"] = k
-                _save(BAKONG_CFG_FILE, bakong_cfg)
-                masked = k[:8] + "..." + k[-4:] if len(k) > 12 else "*" * len(k)
-                bot.send_message(uid, f"✅ Bakong Token ថ្មីបានរក្សា!\n🏦 <code>{masked}</code>\n"
-                                       f"🔘 Button បើក App ធនាគារនឹងបង្ហាញលើក QR ថ្មីៗចាប់ពីនេះទៅ",
-                                 parse_mode="HTML", reply_markup=admin_kb())
-            return
 
         if step == "set_welcome_msg_text":
             waiting.pop(uid, None)
