@@ -521,7 +521,6 @@ for _k_env, _k_cfg in (
     ("PAY_BOT_TOKEN", "pay_token"),
     ("ORDER_BOT_CHAT_ID", "order_chat_id"),
     ("PAY_BOT_CHAT_ID", "pay_chat_id"),
-    ("ORDER_GROUP_ID", "order_group_id"),
 ):
     _v = (os.environ.get(_k_env) or "").strip()
     if _v:
@@ -2619,51 +2618,113 @@ def _safe_send(tb, chat_id, text, reply_markup=None, parse_mode="HTML", label="n
         return False
 
 
-def onotify(text, reply_markup=None, parse_mode="HTML"):
-    """Order notification — ALWAYS to main bot ADMIN, plus Order Bot / group if set.
-    Fixes TikTok Khmer / manual orders only appearing in public channel.
-    """
+# FIX (TikTok Khmer / manual orders reached the Channel but not the Order Bot):
+# manual orders are the only ones sent WITH a keyboard (Done/Reject). If Telegram rejects that message for the
+# Order Bot (premium icon / style on buttons, <tg-emoji> inside <code>, HTML parse error ...) the old code just
+# logged a warning and the admin saw nothing. Now every notification is retried in 3 steps and the real Telegram
+# error is reported to the admin (rate-limited) so it is visible without opening the Render logs.
+_notify_diag_last = {}
+
+def _plain_markup(markup):
+    """Copy of an InlineKeyboardMarkup with NO premium icon / style: only text + callback_data/url."""
     try:
-        text = _emojify(text) if text else text
-        if parse_mode is None and text and "<tg-emoji" in str(text):
-            parse_mode = "HTML"
-        ok_any = False
-        # 1) Main service bot → ADMIN (always — this is what admin expects)
-        if _safe_send(bot, ADMIN_ID, text, reply_markup, parse_mode, "onotify/main"):
-            ok_any = True
-        # 2) Dedicated Order Bot → admin private chat or configured chat id
-        if order_bot:
-            if _safe_send(order_bot, _notify_target_chat_id("order"), text, reply_markup, parse_mode, "onotify/order_bot"):
-                ok_any = True
-        # 3) Optional extra group (ORDER_GROUP_ID / order_group_id) via main bot
-        try:
-            gid = (notify_bots_cfg or {}).get("order_group_id") or (os.environ.get("ORDER_GROUP_ID") or "").strip()
-            if gid:
-                if _safe_send(bot, int(gid), text, reply_markup, parse_mode, "onotify/group"):
-                    ok_any = True
-        except Exception as e:
-            logger.warning(f"[onotify/group] {e}")
-        if not ok_any:
-            logger.error("[onotify] all targets failed — check ADMIN_ID and that admin /start the bot")
+        rows = []
+        for row in (getattr(markup, "keyboard", None) or []):
+            new_row = []
+            for b in row:
+                txt = _strip_tg_emoji_tags(getattr(b, "text", "") or "").strip() or "\u2022"
+                if getattr(b, "callback_data", None):
+                    new_row.append(_IKB_orig(txt, callback_data=b.callback_data))
+                elif getattr(b, "url", None):
+                    new_row.append(_IKB_orig(txt, url=b.url))
+                else:
+                    new_row.append(_IKB_orig(txt, callback_data="noop"))
+            rows.append(new_row)
+        return InlineKeyboardMarkup(rows)
+    except Exception as _e:
+        logger.debug(f"[plain_markup] {_e}")
+        return None
+
+def _html_to_plain(text):
+    import html as _h
+    t = _strip_tg_emoji_tags(text or "")
+    t = _re.sub(r"<[^>]+>", "", t)
+    return _h.unescape(t)
+
+def _try_send(tb, chat_id, text, markup, parse_mode, label):
+    """-> (ok, error_text)"""
+    try:
+        tb.send_message(chat_id, text, parse_mode=parse_mode, reply_markup=markup, disable_web_page_preview=True)
+        logger.info(f"[{label}] sent -> {chat_id}")
+        return True, ""
     except Exception as e:
-        logger.warning(f"[onotify] failed: {e}")
+        err = str(e)[:300]
+        logger.warning(f"[{label}] send failed chat={chat_id} err={err}")
+        return False, err
 
+def _send_with_fallbacks(tb, chat_id, text, markup, parse_mode, label):
+    """Try (1) as is  (2) plain buttons + no <tg-emoji>  (3) plain text  (4) text only. -> (ok, last_error, how)"""
+    attempts = [("full", text, markup, parse_mode)]
+    if markup is not None:
+        pm = _plain_markup(markup)
+        if pm is not None:
+            attempts.append(("plain-buttons", _strip_tg_emoji_tags(text), pm, parse_mode))
+    attempts.append(("plain-text", _html_to_plain(text), _plain_markup(markup) if markup is not None else None, None))
+    if markup is not None:   # last resort: the keyboard itself is the problem -> at least deliver the text
+        attempts.append(("text-only", _html_to_plain(text), None, None))
+    last = ""
+    for how, t, m, pmode in attempts:
+        ok, err = _try_send(tb, chat_id, t, m, pmode, f"{label}/{how}")
+        if ok:
+            return True, last, how
+        last = err
+    return False, last, ""
 
-def pnotify(text, reply_markup=None, parse_mode="HTML"):
-    """Payment/Deposit notification → Payment Bot + fallback main bot."""
+def _notify_diag(kind, msg):
+    """Tell the admin WHY a notify bot failed (max once / 5 min per kind) so it can be fixed."""
     try:
-        text = _emojify(text) if text else text
+        now = time.time()
+        if now - _notify_diag_last.get(kind, 0) < 300:
+            return
+        _notify_diag_last[kind] = now
+        _try_send(bot, ADMIN_ID, msg[:3500], None, None, f"{kind}/diag")
+    except Exception as _e:
+        logger.debug(f"[notify_diag] {_e}")
+
+def _notify_via(kind, text, reply_markup=None, parse_mode="HTML"):
+    """kind = 'order' | 'pay'. Notify bot first, main bot as fallback; both with degraded retries."""
+    name = "onotify" if kind == "order" else "pnotify"
+    tb = order_bot if kind == "order" else pay_bot
+    try:
+        try:
+            text = _emojify(text) if text else text
+        except Exception as _e:   # a broken emoji map must never swallow the notification
+            logger.warning(f"[{name}] _emojify failed: {_e}")
         if parse_mode is None and text and "<tg-emoji" in str(text):
             parse_mode = "HTML"
         ok = False
-        if pay_bot:
-            ok = _safe_send(pay_bot, _notify_target_chat_id("pay"), text, reply_markup, parse_mode, "pnotify/pay_bot")
+        if tb:
+            ok, err, how = _send_with_fallbacks(tb, _notify_target_chat_id(kind), text, reply_markup, parse_mode, f"{name}/{kind}_bot")
+            if ok and how != "full":
+                _notify_diag(kind, f"ℹ️ {kind.title()} Bot: សារមកដល់ ប៉ុន្តែត្រូវផ្ញើបែបសាមញ្ញ ({how}) ព្រោះ Telegram បដិសេធមុន:\n{err}")
+            if not ok:
+                _notify_diag(kind, f"⚠️ {kind.title()} Bot ផ្ញើមិនបាន:\n{err}\n\n(ពិនិត្យថា Admin បាន /start {kind.title()} Bot ហើយ Chat ID ត្រឹមត្រូវ)")
         if not ok:
-            ok = _safe_send(bot, ADMIN_ID, text, reply_markup, parse_mode, "pnotify/main")
-        if not ok:
-            logger.error("[pnotify] all channels failed")
+            ok, err2, how2 = _send_with_fallbacks(bot, ADMIN_ID, text, reply_markup, parse_mode, f"{name}/main")
+            if not ok:
+                logger.error(f"[{name}] all channels failed: {err2}")
     except Exception as e:
-        logger.warning(f"[pnotify] failed: {e}")
+        logger.warning(f"[{name}] failed: {e}")
+
+
+def onotify(text, reply_markup=None, parse_mode="HTML"):
+    """Order notification -> Order Bot (if set) + fallback to main bot ADMIN (with degraded retries)."""
+    _notify_via("order", text, reply_markup, parse_mode)
+
+
+def pnotify(text, reply_markup=None, parse_mode="HTML"):
+    """Payment/Deposit notification -> Payment Bot + fallback main bot (with degraded retries)."""
+    _notify_via("pay", text, reply_markup, parse_mode)
 
 
 
@@ -9505,8 +9566,8 @@ def handle_msg(message):
             ]])
             # Link ពេញ 100% ទៅ Order Bot (មិន mask / មិនកាត់) — ចុចបាន + copy បាន
             _link_full = (link or "").strip()
+            from html import escape as _html_esc
             if _link_full.lower().startswith(("http://", "https://")):
-                from html import escape as _html_esc
                 _href = _html_esc(_link_full, quote=True)
                 _link_disp = (
                     f"🔗 <b>Link ពេញ:</b>\n"
@@ -9514,7 +9575,7 @@ def handle_msg(message):
                     f"<code>{_html_esc(_link_full)}</code>"
                 )
             else:
-                _link_disp = f"🔗 <b>Link ពេញ:</b>\n<code>{_link_full}</code>"
+                _link_disp = f"🔗 <b>Link ពេញ:</b>\n<code>{_html_esc(_link_full)}</code>"
 
             if is_tiktok_promote:
                 admin_msg = (
@@ -9536,7 +9597,7 @@ def handle_msg(message):
                     f"━━━━━━━━━━━━━━━━━━\n"
                     f"🆔 Order: <code>{oid}</code>\n"
                     f"👤 {udisp}\n"
-                    f"📦 {s.get('label', slug)}\n"
+                    f"📦 {_html_esc(str(s.get('label', slug)))}\n"
                     f"🔢 {qty:,} | 💰 ${price:.4f}{admin_disc}\n"
                     f"{_link_disp}\n"
                     f"━━━━━━━━━━━━━━━━━━\n"
@@ -9545,11 +9606,7 @@ def handle_msg(message):
             try:
                 onotify(admin_msg, reply_markup=kb_adm)
             except Exception as _e:
-                logger.warning(f"[order bot notify] failed: {_e}")
-                try:
-                    bot.send_message(ADMIN_ID, admin_msg, parse_mode="HTML", reply_markup=kb_adm)
-                except Exception as e2:
-                    logger.error(f"[order bot notify] main fallback failed: {e2}")
+                logger.debug(f"[silent] {_e}")
 
             try:
                 _notify(_channel_order_msg(
