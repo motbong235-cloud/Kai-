@@ -2808,7 +2808,7 @@ def _user_display(uid_str):
     return f"<code>{uid_str}</code>"
 
 # ═══════════════════════════════════════════════════════════
-#  KHQR CARD GENERATOR  (Bakong-style branded card)
+#  KHQR CARD GENERATOR
 # ═══════════════════════════════════════════════════════════
 _CARD_NAVY      = (5, 59, 47)       # deep emerald (header / headline text)
 _CARD_NAVY2     = (3, 33, 30)       # deeper teal (header gradient bottom)
@@ -2953,7 +2953,7 @@ def _build_qr_image(qr_string, amount=None, ref=None, label=None, subtitle=None,
 
         draw.text((pad, int(W * 0.045)), "KHQR", font=f_title, fill=_CARD_WHITE)
         draw.text((pad, int(W * 0.045) + f_title.size + int(W * 0.010)),
-                  "Cambodian QR Payment · Bakong", font=f_sub, fill=_CARD_SUBTITLE)
+                  "Cambodian QR Payment · KHQR", font=f_sub, fill=_CARD_SUBTITLE)
         rule_y = int(W * 0.045) + f_title.size + int(W * 0.010) + f_sub.size + int(W * 0.018)
         draw.line([(pad, rule_y), (pad + int(W * 0.14), rule_y)], fill=_CARD_GOLD, width=2)
 
@@ -3037,7 +3037,7 @@ def _build_qr_image(qr_string, amount=None, ref=None, label=None, subtitle=None,
         y += EXP_ROW
 
         # 8. Footer
-        _cx_text(draw, cx, y, "Scan with any Bakong-member app", f_small, _CARD_MUTED)
+        _cx_text(draw, cx, y, "Scan with any banking app (KHQR)", f_small, _CARD_MUTED)
         y += FOOT_ROW1
         _cx_text(draw, cx, y, "ABA · ACLEDA · Wing", f_small, _CARD_MUTED)
 
@@ -3743,7 +3743,7 @@ def _send_deposit_qr(uid, amount, promo_code=None, label="💸 ដាក់ល�
             subtitle="SMM Panel Deposit · ដាក់លុយ",
         )
 
-    # ── ផ្ញើ QR ភ្លាមៗសិន (កុំឲ្យ deposit យឺត ដោយរង់ចាំ Bakong deeplink API) ──
+    # ── ផ្ញើ QR ភ្លាមៗសិន (កុំឲ្យ deposit យឺត ដោយ deeplink API) ──
     if _gen_msg:
         try: bot.delete_message(uid, _gen_msg.message_id)
         except Exception as _e: logger.debug(f"[silent] {_e}")
@@ -3757,7 +3757,7 @@ def _send_deposit_qr(uid, amount, promo_code=None, label="💸 ដាក់ល�
         sent_msg = bot.send_message(uid, cap, parse_mode="HTML")
 
     # ── Deep Link button ចូល App ធនាគារស្វ័យប្រវត្តិ — ធ្វើនៅ background thread
-    #    ដើម្បីកុំឲ្យរង់ចាំ Bakong API (រហូតដល់ 10s) ធ្វើឲ្យ QR ចេញយឺត/មិនចេញ ──
+    #    ដើម្បីកុំឲ្យរង់ចាំ bank deeplink API (រហូតដល់ 10s) ធ្វើឲ្យ QR ចេញយឺត/មិនចេញ ──
     def _attach_bank_button():
         try:
             aba_pay = _aba_mobile_https_link(qr_str) if qr_str else None
@@ -5062,13 +5062,13 @@ def cb_mqr_admin(call):
     if action == "photo":
         bot.answer_callback_query(call.id)
         waiting[uid] = "await_manual_qr_photo"
-        bot.send_message(uid, "📷 សូមផ្ញើរូប QR (Bakong/ធនាគារ) ដែលចង់ឲ្យ User ស្កេន:",
+        bot.send_message(uid, "📷 សូមផ្ញើរូប QR (KHQR / ធនាគារ) ដែលចង់ឲ្យ User ស្កេន:",
                           reply_markup=cancel_kb())
     elif action == "info":
         bot.answer_callback_query(call.id)
         waiting[uid] = "await_manual_qr_info"
         bot.send_message(uid,
-            "✏️ សូមផ្ញើព័ត៌មានបង្ហាញអោយ User (ឧ. ឈ្មោះម្ចាស់គណនី, លេខទូរស័ព្ទ/Bakong ID):",
+            "✏️ សូមផ្ញើព័ត៌មានបង្ហាញអោយ User (ឧ. ឈ្មោះម្ចាស់គណនី, លេខទូរស័ព្ទ):",
             reply_markup=cancel_kb())
     elif action == "toggle":
         manual_qr_cfg["enabled"] = not manual_qr_cfg.get("enabled", False)
@@ -6602,7 +6602,7 @@ def cb_cln_rename(call):
         parse_mode="HTML", reply_markup=cancel_kb())
 
 # ═══════════════════════════════════════════════════════════
-#  Clone ⚙️ ការកំណត់ផ្សេងទៀត (Support / Sub Admins / Bakong / QR Cooldown)
+#  Clone ⚙️ ការកំណត់ផ្សេងទៀត (Support / Sub Admins / QR Cooldown)
 #  — កែផ្ទាល់ពី Master តាម /mybots ដោយសរសេរ file JSON ចូល bot_clones/<n>/
 #    ដោយផ្ទាល់ (ដូចលក្ខណៈ manual_qr.json ដែលមានស្រាប់) — clone process
 #    ត្រូវ restart ដើម្បីអានតម្លៃថ្មី (config files ទាំងនេះផ្ទុកតែម្តងពេល startup)
@@ -7947,7 +7947,7 @@ def handle_msg(message):
                 parse_mode="HTML", reply_markup=admin_kb())
             return
 
-        # ── Clone ⚙️ ការកំណត់ផ្សេងទៀត — Support / Sub Admins / Bakong / QR Cooldown ──
+        # ── Clone ⚙️ ការកំណត់ផ្សេងទៀត — Support / Sub Admins / QR Cooldown ──
         if isinstance(step, dict) and step.get("step") == "cln_support_text":
             name = step["clone"]; lang = step["lang"]
             raw = text.strip()
@@ -9348,7 +9348,7 @@ def handle_msg(message):
         waiting[uid] = {"step": "await_manual_dep_proof", "amount": amt}
         bot.send_message(uid,
             f"💰 ចំនួន: <b>${amt:.2f}</b>\n\n"
-            f"📷 សូមផ្ញើ <b>Screenshot ភស្តុតាងផ្ទេរប្រាក់</b> (Bakong/App ធនាគារ):",
+            f"📷 សូមផ្ញើ <b>Screenshot ភស្តុតាងផ្ទេរប្រាក់</b> (App ធនាគារ / KHQR):",
             parse_mode="HTML", reply_markup=cancel_kb())
         return
 
