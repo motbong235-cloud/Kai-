@@ -2381,19 +2381,29 @@ def _smm_service_list_text():
 NOTIFY_CHANNEL_ID_DEFAULT = -1003930705105
 
 def _notify(msg):
-    """Send message to notify channel — always use hardcoded ID"""
+    """Send message to notify channel (order + deposit).
+    Channel ID: env NOTIFY_CHANNEL_ID → smm_notify.json → default.
+    """
     cid = NOTIFY_CHANNEL_ID_DEFAULT
-    # Override with file/env if admin changed it
     try:
-        cfg = _load(NOTIFY_FILE, {})
-        saved_cid = cfg.get("channel_id", "")
-        if saved_cid:
-            cid = int(saved_cid)
+        env_cid = (os.environ.get("NOTIFY_CHANNEL_ID") or "").strip()
+        if env_cid:
+            cid = int(env_cid)
+        else:
+            cfg = _load(NOTIFY_FILE, {})
+            saved_cid = cfg.get("channel_id", "")
+            if saved_cid:
+                cid = int(saved_cid)
     except Exception as _e:
         logger.debug(f"[silent] {_e}")
     try:
         msg = _emojify(msg) if msg else msg
-        bot.send_message(cid, msg, parse_mode="HTML")
+        bot.send_message(
+            cid,
+            msg,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
         logger.info(f"[notify] sent to {cid}")
     except Exception as e:
         logger.warning(f"[notify] failed cid={cid} err={e}")
@@ -2415,51 +2425,73 @@ def _kh_now_str(fmt="full"):
         return now.strftime("%Y-%m-%d %H:%M:%S")
     return now.strftime("%Y-%m-%d %I:%M:%S %p")
 
+def _channel_user_hit(uid):
+    """Clickable name + username + copyable id for channel posts."""
+    uid_str = str(uid)
+    u = users_db.get(uid_str, {}) if isinstance(users_db, dict) else {}
+    name = (u.get("name") or "").strip() or "User"
+    uname = (u.get("username") or "").strip().lstrip("@")
+    # HTML escape minimal
+    def _esc(s):
+        return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    name_e = _esc(name)
+    # tg://user works for users who have interacted with the bot / privacy allows
+    name_link = f'<a href="tg://user?id={uid_str}">{name_e}</a>'
+    if uname:
+        name_link += f' · <a href="https://t.me/{_esc(uname)}">@{_esc(uname)}</a>'
+    id_line = f'ID: <code>{uid_str}</code>'
+    return name_link, id_line
+
+
+def _channel_link_hit(link):
+    """Clickable full URL for channel (hit to open)."""
+    if not link or not isinstance(link, str):
+        return "—"
+    link = link.strip()
+    if not link.startswith("http"):
+        return f"<code>{link}</code>"
+    # escape quotes in href
+    href = link.replace('"', "%22")
+    disp = link if len(link) <= 64 else (link[:61] + "...")
+    disp = disp.replace("&", "&amp;").replace("<", "&lt;")
+    return f'<a href="{href}">{disp}</a>'
+
+
 def _channel_deposit_msg(uid, amount, reference="", method_label="ដាក់ប្រាក់", bonus=0.0):
-    """Channel invoice style — matches LazR SMM deposit notification."""
+    """Channel deposit — name/id hit-able."""
     ref = reference or f"JAKLIKE_{int(time.time()*1000)}"
+    name_hit, id_hit = _channel_user_hit(uid)
     msg = (
         f"🔔 <b>ការដាក់ប្រាក់បានជោគជ័យហើយ</b>\n"
-        f"លេខសម្គាល់អ្នកប្រើ: <code>{_mask_uid(uid)}</code>\n"
-        f"ចំនួនទឹកប្រាក់: <b>${float(amount):.2f}</b>\n"
-        f"ម៉ោង: {_kh_now_str('full')}\n"
-        f"វិធីបង់ប្រាក់: {method_label}\n"
-        f"ស្ថានភាព: បានជោគជ័យ\n"
-        f"លេខសម្គាល់ប្រតិបត្តិការ:\n"
-        f"<code>{ref}</code>\n\n"
-        f"🙏 អរគុណសម្រាប់ការដាក់ប្រាក់ <b>${float(amount):.2f}</b> ✅"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"👤 {name_hit}\n"
+        f"🆔 {id_hit}\n"
+        f"💵 ចំនួន: <b>${float(amount):.2f}</b>\n"
+        f"💳 វិធី: {method_label}\n"
+        f"🕐 {_kh_now_str('full')}\n"
+        f"🔖 Ref: <code>{ref}</code>\n"
+        f"✅ ស្ថានភាព: ជោគជ័យ"
     )
     if bonus and float(bonus) > 0:
         msg += f"\n🎁 Bonus: <b>+${float(bonus):.2f}</b>"
     return msg
 
+
 def _channel_new_user_msg(uid):
     """Channel style — new user joined bot."""
+    name_hit, id_hit = _channel_user_hit(uid)
     return (
         f"🆕 <b>អ្នកប្រើថ្មីបានចូលប្រើ Bot</b>\n"
-        f"លេខសម្គាល់អ្នកប្រើ: <code>{_mask_uid(uid)}</code>\n"
-        f"ពេលវេលា: {_kh_now_str('full')}\n"
-        f"ស្ថានភាព: បានចូលរួច / បានចុះឈ្មោះរួច"
+        f"👤 {name_hit}\n"
+        f"🆔 {id_hit}\n"
+        f"🕐 {_kh_now_str('full')}\n"
+        f"✅ បានចូលរួច"
     )
 
 def _channel_order_msg(uid, label, price, link, oid, api_order_id=None, qty=None, extra_order_ids=None, status_label=None):
-    """Channel invoice style — new SMM order (LazR format).
-    extra_order_ids: optional list of (emoji, title, id) e.g. [('❤️','Like Order ID', '206406')]
-    """
-    # Privacy: hide full link on public channel
-    link_disp = "Private"
-    if link and isinstance(link, str):
-        low = link.lower()
-        if "private" in low or not link.startswith("http"):
-            link_disp = "Private"
-        else:
-            # show domain only
-            try:
-                from urllib.parse import urlparse
-                host = urlparse(link).netloc or "Private"
-                link_disp = host if host else "Private"
-            except Exception:
-                link_disp = "Private"
+    """Channel order — clickable name, link, copyable ids."""
+    name_hit, id_hit = _channel_user_hit(uid)
+    link_hit = _channel_link_hit(link)
 
     svc_line = label or "?"
     if qty:
@@ -2467,33 +2499,35 @@ def _channel_order_msg(uid, label, price, link, oid, api_order_id=None, qty=None
             svc_line = f"{label} x{int(qty):,}"
         except Exception:
             pass
-    svc_line = f"{svc_line} - ${float(price):.2f}" if price is not None else svc_line
+    if price is not None:
+        svc_line = f"{svc_line} — ${float(price):.2f}"
 
     lines = [
         f"📦 <b>ការបញ្ជាទិញថ្មី!</b>",
-        f"",
-        f"Buyer ID: <code>{_mask_uid(uid)}</code>",
-        f"",
-        f"🔗 Link: {link_disp}",
-        f"🎯 សេវាកម្ម: {svc_line}",
+        f"━━━━━━━━━━━━━━━━━━",
+        f"👤 {name_hit}",
+        f"🆔 {id_hit}",
+        f"🔗 Link: {link_hit}",
+        f"🎯 សេវា: {svc_line}",
     ]
     if extra_order_ids:
         for emoji, title, eid in extra_order_ids:
             lines.append(f"{emoji} {title}: <code>{eid}</code>")
     else:
         if api_order_id:
-            lines.append(f"🆔 API Order ID: <code>{api_order_id}</code>")
+            lines.append(f"🧾 API Order: <code>{api_order_id}</code>")
         lines.append(f"📋 Order ID: <code>{oid}</code>")
     lines += [
-        f"💵 តម្លៃសរុប: <b>${float(price):.2f}</b>",
-        f"📦 ការបញ្ជា: {status_label or 'ជោគជ័យ ✅'}",
-        f"📅 Date: {_kh_now_str('24')}",
+        f"💵 តម្លៃ: <b>${float(price):.2f}</b>" if price is not None else "💵 តម្លៃ: —",
+        f"📌 ស្ថានភាព: {status_label or 'ជោគជ័យ ✅'}",
+        f"📅 {_kh_now_str('24')}",
         f"",
         f"អរគុណចំពោះការប្រើប្រាស់ ❤️",
     ]
     return "\n".join(lines)
 
-def _send_deposit_notify(uid, amount, bonus, new_bal, reference="", method_label="ដាក់ប្រាក់"):
+
+def _send_deposit_notifydef _send_deposit_notify(uid, amount, bonus, new_bal, reference="", method_label="ដាក់ប្រាក់"):
     """Admin/pay-bot style kept short; channel uses LazR invoice format."""
     msg = (
         f"💰 <b>ដាក់លុយ ថ្មី!</b>\n"
