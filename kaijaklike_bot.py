@@ -2527,7 +2527,7 @@ def _channel_order_msg(uid, label, price, link, oid, api_order_id=None, qty=None
     return "\n".join(lines)
 
 
-def _send_deposit_notifydef _send_deposit_notify(uid, amount, bonus, new_bal, reference="", method_label="ដាក់ប្រាក់"):
+def _send_deposit_notify(uid, amount, bonus, new_bal, reference="", method_label="ដាក់ប្រាក់"):
     """Admin/pay-bot style kept short; channel uses LazR invoice format."""
     msg = (
         f"💰 <b>ដាក់លុយ ថ្មី!</b>\n"
