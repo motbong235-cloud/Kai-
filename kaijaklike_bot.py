@@ -7299,14 +7299,32 @@ def handle_photo(message):
         return
 
     if uid == ADMIN_ID and step == "await_manual_qr_photo":
-        manual_qr_cfg["photo_id"] = message.photo[-1].file_id
-        _save(MANUAL_QR_FILE, manual_qr_cfg)
-        waiting.pop(uid, None)
-        bot.send_message(uid, "✅ រូប QR បានកំណត់ជោគជ័យ!", parse_mode="HTML",
-                          reply_markup=manual_qr_admin_kb())
+        if not getattr(message, "photo", None):
+            bot.send_message(uid, "⚠️ សូមផ្ញើរូបភាព QR (Photo)។", reply_markup=cancel_kb())
+            return
+        try:
+            manual_qr_cfg["photo_id"] = message.photo[-1].file_id
+            try:
+                _fi = bot.get_file(manual_qr_cfg["photo_id"])
+                _data = bot.download_file(_fi.file_path)
+                with open(_dpath("manual_qr.jpg"), "wb") as _f:
+                    _f.write(_data)
+                manual_qr_cfg["photo_path"] = "manual_qr.jpg"
+            except Exception as _dl:
+                logger.warning(f"[manual_qr] local save failed: {_dl}")
+            _save(MANUAL_QR_FILE, manual_qr_cfg)
+            waiting.pop(uid, None)
+            bot.send_message(uid, "✅ រូប QR បានកំណត់ជោគជ័យ!", parse_mode="HTML",
+                              reply_markup=manual_qr_admin_kb())
+        except Exception as e:
+            logger.error(f"[manual_qr] set photo failed: {e}")
+            bot.send_message(uid, f"⚠️ កំណត់រូប QR បរាជ័យ: {e}", reply_markup=cancel_kb())
         return
 
     if uid == ADMIN_ID and isinstance(step, dict) and step.get("step") == "newbot_manual_qr_photo":
+        if not getattr(message, "photo", None):
+            bot.send_message(uid, "⚠️ សូមផ្ញើរូបភាព QR (Photo)។", parse_mode="HTML", reply_markup=cancel_kb())
+            return
         photo_id = message.photo[-1].file_id
         waiting[uid] = {**step, "step": "newbot_manual_qr_info", "manual_qr_photo_id": photo_id}
         bot.send_message(uid,
@@ -7316,6 +7334,9 @@ def handle_photo(message):
         return
 
     if uid == ADMIN_ID and isinstance(step, dict) and step.get("step") == "cln_pay_qr_photo":
+        if not getattr(message, "photo", None):
+            bot.send_message(uid, "⚠️ សូមផ្ញើ <b>រូបភាព</b> QR (Photo)។", parse_mode="HTML", reply_markup=cancel_kb())
+            return
         photo_id = message.photo[-1].file_id
         waiting[uid] = {**step, "step": "cln_pay_qr_info", "manual_qr_photo_id": photo_id}
         bot.send_message(uid,
