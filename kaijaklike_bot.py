@@ -2699,15 +2699,21 @@ def _try_send(tb, chat_id, text, markup, parse_mode, label):
         return False, err
 
 def _send_with_fallbacks(tb, chat_id, text, markup, parse_mode, label):
-    """Try (1) as is  (2) plain buttons + no <tg-emoji>  (3) plain text  (4) text only. -> (ok, last_error, how)"""
-    attempts = [("full", text, markup, parse_mode)]
+    """Try: plain-buttons first when keyboard present (avoids ENTITY_TEXT_INVALID from premium icons),
+    then full, then plain text. -> (ok, last_error, how)"""
+    attempts = []
+    text_clean = _strip_tg_emoji_tags(text or "")
     if markup is not None:
         pm = _plain_markup(markup)
         if pm is not None:
-            attempts.append(("plain-buttons", _strip_tg_emoji_tags(text), pm, parse_mode))
-    attempts.append(("plain-text", _html_to_plain(text), _plain_markup(markup) if markup is not None else None, None))
-    if markup is not None:   # last resort: the keyboard itself is the problem -> at least deliver the text
-        attempts.append(("text-only", _html_to_plain(text), None, None))
+            # Prefer plain buttons + clean HTML (no tg-emoji, no premium icon on buttons)
+            attempts.append(("plain-buttons", text_clean, pm, parse_mode))
+        attempts.append(("full", text_clean, markup, parse_mode))
+    else:
+        attempts.append(("full", text_clean, None, parse_mode))
+    attempts.append(("plain-text", _html_to_plain(text_clean), _plain_markup(markup) if markup is not None else None, None))
+    if markup is not None:
+        attempts.append(("text-only", _html_to_plain(text_clean), None, None))
     last = ""
     for how, t, m, pmode in attempts:
         ok, err = _try_send(tb, chat_id, t, m, pmode, f"{label}/{how}")
@@ -2732,17 +2738,28 @@ def _notify_via(kind, text, reply_markup=None, parse_mode="HTML"):
     name = "onotify" if kind == "order" else "pnotify"
     tb = order_bot if kind == "order" else pay_bot
     try:
+        # Order/Pay notify: មិនប្រើ <tg-emoji> — Telegram ងាយ ENTITY_TEXT_INVALID
+        # ជាមួយ InlineKeyboard (Done/Reject) + HTML លាយ premium entities។
+        # រក្សា unicode emoji ធម្មតា តែ strip tg-emoji tags បើមាន។
         try:
-            text = _emojify(text) if text else text
-        except Exception as _e:   # a broken emoji map must never swallow the notification
-            logger.warning(f"[{name}] _emojify failed: {_e}")
+            if reply_markup is not None:
+                text = _strip_tg_emoji_tags(text or "")
+            else:
+                text = _emojify(text) if text else text
+                # still avoid nested entity issues in notify bots
+                if tb is not None:
+                    text = _strip_tg_emoji_tags(text or "")
+        except Exception as _e:
+            logger.warning(f"[{name}] text sanitize failed: {_e}")
+            text = _strip_tg_emoji_tags(text or "") if text else text
         if parse_mode is None and text and "<tg-emoji" in str(text):
             parse_mode = "HTML"
         ok = False
         if tb:
             ok, err, how = _send_with_fallbacks(tb, _notify_target_chat_id(kind), text, reply_markup, parse_mode, f"{name}/{kind}_bot")
-            if ok and how != "full":
+            if ok and how in ("plain-text", "text-only"):
                 _notify_diag(kind, f"ℹ️ {kind.title()} Bot: សារមកដល់ ប៉ុន្តែត្រូវផ្ញើបែបសាមញ្ញ ({how}) ព្រោះ Telegram បដិសេធមុន:\n{err}")
+            # plain-buttons is the preferred path for Done/Reject — not an error
             if not ok:
                 _notify_diag(kind, f"⚠️ {kind.title()} Bot ផ្ញើមិនបាន:\n{err}\n\n(ពិនិត្យថា Admin បាន /start {kind.title()} Bot ហើយ Chat ID ត្រឹមត្រូវ)")
         if not ok:
@@ -2809,12 +2826,12 @@ def _make_order_id():
 
 
 def _user_display(uid_str):
-    """បង្កើតឈ្មោះ + username បង្ហាញឲ្យ Admin មើលងាយ (ជំនួសមើលតែលេខ UID
-    ដែលមិនអាចដឹងថាជានរណា)។ ត្រឡប់ ឧ. "Sokha (@sokha123)" ឬ fallback ត្រឹមតែ
-    UID បើគ្មានទិន្នន័យ User។"""
+    """បង្កើតឈ្មោះ + username បង្ហាញឲ្យ Admin មើលងាយ។
+    Escape HTML ក្នុង name/username ដើម្បីកុំ ENTITY_TEXT_INVALID។"""
+    import html as _html
     u = users_db.get(str(uid_str), {})
-    name = (u.get("name") or "").strip()
-    uname = u.get("username") or ""
+    name = _html.escape((u.get("name") or "").strip())
+    uname = _html.escape((u.get("username") or "").strip().lstrip("@"))
     parts = []
     if name:
         parts.append(name)
