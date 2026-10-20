@@ -3708,6 +3708,36 @@ def _send_deposit_qr(uid, amount, promo_code=None, label="💸 ដាក់ល�
         _send_deposit_qr_khpay(uid, amount, promo_code_name=promo_code_name, bonus=bonus,
                                 promo_bonus=promo_bonus, auto_bonus=auto_bonus)
         return
+    if method == "manual":
+        if not (manual_qr_cfg.get("enabled") and (manual_qr_cfg.get("photo_id") or manual_qr_cfg.get("photo_path"))):
+            bot.send_message(uid, "❌ Manual Deposit មិនទាន់មានទេ។", reply_markup=main_kb(uid))
+            return
+        waiting[uid] = {"step": "await_manual_dep_proof", "amount": float(amount)}
+        info = manual_qr_cfg.get("info") or ""
+        caption = (
+            f"🖼 <b>ដាក់លុយ — Manual QR</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"💰 ចំនួន: <b>${float(amount):.2f}</b>\n"
+            + (f"{info}\n" if info else "")
+            + f"━━━━━━━━━━━━━━━━━━\n"
+            f"1️⃣ ស្កេន QR ខាងលើ\n"
+            f"2️⃣ ផ្ទេរប្រាក់ <b>${float(amount):.2f}</b>\n"
+            f"3️⃣ ផ្ញើ <b>Screenshot ភស្តុតាង</b> មកទីនេះ"
+        )
+        try:
+            _pp = manual_qr_cfg.get("photo_path") or ""
+            _full = _dpath(_pp) if _pp else ""
+            if _full and os.path.exists(_full):
+                with open(_full, "rb") as _fh:
+                    bot.send_photo(uid, _fh, caption=caption, parse_mode="HTML", reply_markup=cancel_kb())
+            else:
+                bot.send_photo(uid, manual_qr_cfg["photo_id"], caption=caption,
+                                parse_mode="HTML", reply_markup=cancel_kb())
+        except Exception as e:
+            logger.warning(f"[manual_dep] send photo failed: {e}")
+            bot.send_message(uid, caption + "\n\n⚠️ រូប QR មិនអាចផ្ញើបាន — ទំនាក់ Admin",
+                             parse_mode="HTML", reply_markup=cancel_kb())
+        return
 
     uid_str       = str(uid)
     promo_applied = promo_code_name
@@ -3760,126 +3790,16 @@ def _send_deposit_qr(uid, amount, promo_code=None, label="💸 ដាក់ល�
     if auto_bonus > 0:
         bonus_bits.append(f"🎁 Auto Bonus ({dep_bonus_cfg.get('pct',5):.0f}%): <b>+${auto_bonus:.2f}</b>")
     bonus_line = ("\n" + "\n".join(bonus_bits)) if bonus_bits else ""
-    cap = (f"💸 <b>SMM Panel — បញ្ចូលលុយ</b>{bonus_line}\n"
-           f"💰 Amount: <b>${amount:.2f}</b>\n"
-           f"🔖 Ref: <code>{ref_short}</code>\n"
-           f"⏱ Expires in: <b>5 minutes</b>\n"
-           f"✅ <i>ប្រព័ន្ធ auto-detect — Balance update ភ្លាមៗ!</i>")
-
-    # Generate branded KHQR card
-    img_buf = None
-    if qr_str:
-        img_buf = _build_qr_image(
-            qr_str,
-            amount=amount,
-            ref=ref_short,
-            label="SMM TOPUP",
-            subtitle="SMM Panel Deposit · ដាក់លុយ",
-        )
-
-    # ── ផ្ញើ QR ភ្លាមៗសិន (កុំឲ្យ deposit យឺត ដោយ deeplink API) ──
-    if _gen_msg:
-        try: bot.delete_message(uid, _gen_msg.message_id)
-        except Exception as _e: logger.debug(f"[silent] {_e}")
-    if img_buf:
-        try:
-            sent_msg = bot.send_photo(uid, img_buf, caption=cap, parse_mode="HTML")
-        except Exception as e:
-            logger.warning(f"[deposit_qr] send_photo failed: {e}")
-            sent_msg = bot.send_message(uid, cap, parse_mode="HTML")
-    else:
-        sent_msg = bot.send_message(uid, cap, parse_mode="HTML")
-
-    # ── Deep Link button ចូល App ធនាគារស្វ័យប្រវត្តិ — ធ្វើនៅ background thread
-    #    ដើម្បីកុំឲ្យរង់ចាំ bank deeplink API (រហូតដល់ 10s) ធ្វើឲ្យ QR ចេញយឺត/មិនចេញ ──
-    def _attach_bank_button():
-        try:
-            aba_pay = _aba_mobile_https_link(qr_str) if qr_str else None
-            if not aba_pay:
-                return
-            kb_pay = InlineKeyboardMarkup()
-            if aba_pay:
-                kb_pay.add(InlineKeyboardButton("🏦 បើក ABA → Pay", url=aba_pay, color="active"))
-            new_cap = cap + ("\n📱 <i>ចុច «បើក ABA → Pay» ដើម្បីចូលអេក្រង់ទូទាត់ភ្លាម។ "
-                              "បើមិនចូល App សូម ••• → បើកក្នុង Safari/Chrome</i>")
-            if img_buf:
-                bot.edit_message_caption(new_cap, chat_id=uid, message_id=sent_msg.message_id,
-                                         parse_mode="HTML", reply_markup=kb_pay)
-            else:
-                bot.edit_message_text(new_cap, chat_id=uid, message_id=sent_msg.message_id,
-                                      parse_mode="HTML", reply_markup=kb_pay)
-        except Exception as e:
-            logger.warning(f"[deposit_qr] attach_bank_button failed: {e}")
-
-    threading.Thread(target=_attach_bank_button, daemon=True).start()
-
-    threading.Thread(target=_watch_deposit,
-                     args=(uid, uid_str, dep_id, amount, reference), daemon=True).start()
-
-def _send_deposit_qr_aba(uid, amount, promo_code_name=None, bonus=0.0, promo_bonus=0.0, auto_bonus=0.0):
-    """Create payment via ABA PayWay (KHMER SYSTEM) → send QR/card image ដែល khmer-system.com
-    បង្កើតរួចជាស្រេច (v12) — ខុសពី CamRapidPay ត្រង់ khmer-system.com ត្រឡប់ card_image
-    (base64 ឬ URL) ដោយផ្ទាល់ ជាជាងឲ្យ bot ខ្លួនឯង render ពី raw KHQR string ។"""
-    uid_str       = str(uid)
-    promo_applied = promo_code_name
-    username      = users_db.get(uid_str, {}).get("username") or f"tg{uid}"
-
-    # ── ជូនដំណឹង User ថាកំពុងបង្កើត QR (ABA PayWay / khmer-system.com អាចចំណាយពេលបន្តិច) ──
-    _gen_msg = None
-    try:
-        _gen_msg = bot.send_message(uid, "⏳ <b>កំពុងបង្កើត QR...</b>\nសូមរង់ចាំបន្តិច",
-                                    parse_mode="HTML")
-    except Exception as _e: logger.debug(f"[silent] {_e}")
-
-    data = _aba_create(uid, amount, username)
-    if not data:
-        if _gen_msg:
-            try: bot.delete_message(uid, _gen_msg.message_id)
-            except Exception as _e: logger.debug(f"[silent] {_e}")
-        bot.send_message(uid, "⚠️ <b>មានបញ្ហា Generate QR (ABA PayWay)!</b>\nសូមព្យាយាមម្តងទៀត ឬ ទំនាក់ Admin",
-                         parse_mode="HTML")
-        try:
-            pnotify(
-                f"⚠️ <b>ABA PayWay បរាជ័យ (aba_generate_qr)</b>\n👤 <code>{uid_str}</code> — ${amount:.2f}\n"
-                f"🔎 <code>{_last_aba_error[:500]}</code>")
-        except Exception as _e: logger.debug(f"[silent] {_e}")
-        return
-
-    payment_id   = data.get("payment_id", "")
-    card_image   = data.get("card_image") or data.get("qr_image")
-    pay_url      = data.get("pay_url")
-    aba_app_link = _build_aba_app_deeplink(data)
-
-    dep_id = f"dep_{uid}_{int(time.time())}"
-    reference = payment_id or f"ABA{uid}_{int(time.time())}"[:50]
-    smm_deps[dep_id] = {
-        "uid":         uid_str,
-        "amount":      amount,
-        "status":      "pending",
-        "bonus":       bonus,
-        "promo_bonus": promo_bonus,
-        "auto_bonus":  auto_bonus,
-        "promo":       promo_applied or "",
-        "reference":   reference,
-        "payment_url": pay_url or "",
-        "method":      "aba",
-        "created_ts":  time.time(),
-    }
-    _save(SMM_DEP_FILE, smm_deps)
-
-    ref_short = reference[-12:] if len(reference) > 12 else reference
-    bonus_bits = []
-    if promo_bonus > 0:
-        bonus_bits.append(f"🎟️ Promo Bonus: <b>+${promo_bonus:.2f}</b> ({promo_applied})")
-    if auto_bonus > 0:
-        bonus_bits.append(f"🎁 Auto Bonus ({dep_bonus_cfg.get('pct',5):.0f}%): <b>+${auto_bonus:.2f}</b>")
-    bonus_line = ("\n" + "\n".join(bonus_bits)) if bonus_bits else ""
-    cap = (f"💸 <b>SMM Panel — បញ្ចូលលុយ</b>{bonus_line}\n"
-           f"💳 វិធីទូទាត់: <b>ABA PayWay</b>\n"
-           f"💰 Amount: <b>${amount:.2f}</b>\n"
-           f"🔖 Ref: <code>{ref_short}</code>\n"
-           f"⏱ Expires in: <b>5 minutes</b>\n"
-           f"✅ <i>ប្រព័ន្ធ auto-detect — Balance update ភ្លាមៗ!</i>")
+    cap = (
+        f"💳 <b>ABA PayWay — បញ្ចូលលុយ</b>{bonus_line}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"💰 ចំនួន: <b>${amount:.2f}</b>\n"
+        f"🔖 Ref: <code>{ref_short}</code>\n"
+        f"⏱ ផុតកំណត់: <b>5 នាទី</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"✅ ស្កេន QR ឬចុច «បើក ABA → Pay»\n"
+        f"<i>Balance នឹងចូលស្វ័យប្រវត្តិបន្ទាប់ពីបង់ជោគជ័យ</i>"
+    )
 
     # ⚠️ Telegram Bot API only accepts http(s):// or tg:// URLs on inline-button `url`
     # fields — custom app schemes like abamobilebank:// are rejected outright with
@@ -4126,24 +4046,45 @@ def _process_deposit(uid, uid_str, amount, promo_code=None, method=None):
     if method is None:
         available = []
         if camrapid_ok: available.append(("camrapid", "🔄 CamRapidPay KHQR", "active"))
-        if aba_ok:      available.append(("aba", "💳 ABA PayWay", "primary"))
-        if khpay_ok:    available.append(("khpay", "💠 KHPAY", "progress"))
+        if aba_ok:      available.append(("aba", "💳 ABA PayWay · Auto QR", "primary"))
+        if khpay_ok:    available.append(("khpay", "💠 KHPAY · Auto QR", "progress"))
+        try:
+            if manual_qr_cfg.get("enabled") and (manual_qr_cfg.get("photo_id") or manual_qr_cfg.get("photo_path")):
+                available.append(("manual", "🖼 Manual QR · ផ្ញើភស្តុតាង", "progress"))
+        except Exception:
+            pass
         if len(available) > 1:
             _pending_dep_choice[uid] = {"amount": amount, "promo_code": promo_code}
             lang = get_lang(uid)
             kb = InlineKeyboardMarkup()
             for mid, label, color in available:
                 kb.add(InlineKeyboardButton(label, callback_data=f"depm:{mid}", color=color))
-            bot.send_message(uid,
-                f"💳 <b>{'ជ្រើសរើសវិធីទូទាត់' if lang=='kh' else 'Choose payment method'}</b> — ${amount:.2f}",
-                parse_mode="HTML", reply_markup=kb)
+            if lang == "kh":
+                tip = (
+                    f"💳 <b>ជ្រើសរើសវិធីទូទាត់</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"💰 ចំនួន: <b>${amount:.2f}</b>\n\n"
+                    f"• <b>ABA / KHPAY</b> — ស្កេន QR · Balance ចូលស្វ័យប្រវត្តិ\n"
+                    f"• <b>Manual QR</b> — ស្កេនរូប · ផ្ញើ screenshot ភស្តុតាង\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"⏱ QR ស្វ័យប្រវត្តិ ~5 នាទី"
+                )
+            else:
+                tip = (
+                    f"💳 <b>Choose payment method</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"💰 Amount: <b>${amount:.2f}</b>\n\n"
+                    f"• <b>ABA / KHPAY</b> — scan QR · auto credit\n"
+                    f"• <b>Manual QR</b> — scan then send proof\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"⏱ Auto QR expires in ~5 minutes"
+                )
+            bot.send_message(uid, tip, parse_mode="HTML", reply_markup=kb)
             return
         if not available:
             lang = get_lang(uid)
             _dbg = (
                 f"pref={os.getenv('PAY_METHOD') or 'auto'} | "
-                f"camrapid_key={'Y' if _effective_camrapid_key() else 'N'} "
-                f"toggle={is_pay_method_enabled('camrapid')} | "
                 f"aba={'Y' if has_aba_payway() else 'N'} "
                 f"toggle={is_pay_method_enabled('aba')} | "
                 f"khpay={'Y' if has_khpay() else 'N'} "
@@ -4151,20 +4092,21 @@ def _process_deposit(uid, uid_str, amount, promo_code=None, method=None):
             )
             logger.warning(f"[deposit] no method uid={uid} {_dbg}")
             bot.send_message(uid,
-                ("⚠️ <b>មិនមានវិធីទូទាត់ស្វ័យប្រវត្តិណាមួយបើកនៅពេលនេះទេ។</b>\n"
-                 "សូមទំនាក់ Admin ដើម្បីជំនួយ\n\n"
-                 f"<code>{_dbg}</code>")
+                ("⚠️ <b>មិនមានវិធីទូទាត់នៅពេលនេះទេ។</b>\n"
+                 "សូមទំនាក់ Admin ឬព្យាយាមម្ដងទៀតនៅពេលក្រោយ។")
                 if lang == "kh" else
-                ("⚠️ <b>No automatic payment method is available right now.</b>\n"
-                 "Please contact Admin\n\n"
-                 f"<code>{_dbg}</code>"),
+                ("⚠️ <b>No payment method is available right now.</b>\n"
+                 "Please contact Admin or try again later."),
                 parse_mode="HTML")
             try:
                 pnotify(
-                    f"🚨 <b>User ព្យាយាមដាក់លុយ ${amount:.2f} តែវិធីទូទាត់ទាំងអស់ត្រូវបានបិទ/មិនទាន់កំណត់!</b>\n"
-                    f"👤 <code>{uid_str}</code>\nសូមចុច 🔀 វិធីទូទាត់ ដើម្បីពិនិត្យ")
-            except Exception as _e: logger.debug(f"[silent] {_e}")
+                    f"🚨 <b>User ព្យាយាមដាក់លុយ ${amount:.2f} — វិធីទូទាត់ទាំងអស់បិទ/មិនទាន់កំណត់!</b>\n"
+                    f"👤 <code>{uid_str}</code>\n<code>{_dbg}</code>\n"
+                    f"សូមកំណត់ ABA / KHPAY / Manual QR")
+            except Exception as _e:
+                logger.debug(f"[silent] {_e}")
             return
+
         method = available[0][0]
 
     lang  = get_lang(uid)
@@ -6035,19 +5977,23 @@ def _finish_manual_reject(uid, tb, step, text):
         logger.warning(f"[reject refund] {e}")
     # Notify user with reason
     try:
+        import html as _html
+        _lab = _html.escape(str(o.get("label") or "?"))
+        _rsn = _html.escape(str(reason))
         bot.send_message(
             int(user_uid or o["uid"]),
-            f"❌ <b>Order ត្រូវបាន Reject!</b>\n"
+            f"❌ <b>Order ត្រូវបាន Reject</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"🆔 <code>{oid}</code>\n"
-            f"📊 {o.get('label','?')}\n"
+            f"📦 {_lab}\n"
             f"🔢 {o.get('qty',0):,}\n"
-            f"📝 មូលហេតុ: <b>{reason}</b>\n"
-            f"💳 លុយ ${price:.4f} ត្រូវបានសងវិញ\n"
+            f"📝 មូលហេតុ: <b>{_rsn}</b>\n"
+            f"💳 បានសង <b>${price:.4f}</b> វិញ\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"ទំនាក់ Admin: {_admin_contact()}",
+            f"សួរ Admin: {_admin_contact()}",
             parse_mode="HTML",
         )
+
     except Exception as e:
         logger.warning(f"[reject notify user] {e}")
     # Channel optional note
@@ -9542,17 +9488,17 @@ def handle_msg(message):
 
             if is_tiktok_promote:
                 admin_msg = (
-                    f"🎵 <b>ប្រតិបត្តិការ — TikTok Promote</b>\n"
+                    f"🎵 <b>Order — TikTok Khmer</b>\n"
                     f"━━━━━━━━━━━━━━━━━━\n"
-                    f"🆔 Order: <code>{oid}</code>\n"
+                    f"🆔 <code>{oid}</code>\n"
                     f"👤 {udisp}\n"
                     f"💰 <b>${price:.2f}</b>{admin_disc}\n"
                     f"{_link_disp}\n"
                     f"━━━━━━━━━━━━━━━━━━\n"
-                    f"📋 <b>Admin Steps:</b>\n"
-                    f"1️⃣ ចូល TikTok → video → Promote\n"
-                    f"2️⃣ ជ្រើស budget → ផ្ញើ invite\n"
-                    f"3️⃣ User Accept → ចុច ✅ Done"
+                    f"📋 <b>ធ្វើ:</b>\n"
+                    f"1️⃣ TikTok → Promote\n"
+                    f"2️⃣ Budget → Invite\n"
+                    f"3️⃣ User Accept → ✅ Done"
                 )
             else:
                 admin_msg = (
