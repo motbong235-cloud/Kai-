@@ -1896,17 +1896,166 @@ def cmd_top(message):
 #  JSON ក្នុង DATA_DIR)
 # ═══════════════════════════════════════════════════════════
 def _build_backup_zip():
-    """បង្កើត Backup Zip (ប្រើរួមគ្នាទាំង /backup ដោយដៃ និង Auto-backup
-    ស្វ័យប្រវត្តិខាងក្រោម) — return (BytesIO buf, file_count) ឬ (None, 0)"""
-    files = [f for f in os.listdir(DATA_DIR) if f.endswith(".json")]
-    if not files:
-        return None, 0
+    """Backup Master + គ្រប់ Clone ទៅ zip តែមួយ — data មិនលាយគ្នា។
+
+    โครงสร้างក្នុង zip:
+      master/<file>.json          → DATA_DIR របស់ Master
+      clones/<clone_name>/<file>  → bot_clones/<clone_name>/
+      meta.json                   → {version, master, clones: [...], ts}
+
+    Clone នីមួយៗមាន folder ដាច់ដោយឡែក — restore មិនជាន់ data Master/clone ផ្សេង។
+    """
     buf = io.BytesIO()
+    n = 0
+    clone_names = []
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for f in files:
-            zf.write(os.path.join(DATA_DIR, f), arcname=f)
+        # ── Master JSON (root DATA_DIR only, not subdirs) ──
+        try:
+            for f in sorted(os.listdir(DATA_DIR)):
+                if not f.endswith(".json"):
+                    continue
+                full = os.path.join(DATA_DIR, f)
+                if not os.path.isfile(full):
+                    continue
+                zf.write(full, arcname=f"master/{f}")
+                # legacy flat path too (old restore compatibility)
+                zf.write(full, arcname=f)
+                n += 1
+        except Exception as e:
+            logger.warning(f"[backup] master list failed: {e}")
+
+        # ── Each clone under bot_clones/<name>/ ──
+        clones_root = CLONES_DIR if "CLONES_DIR" in dir() else os.path.join(DATA_DIR, "bot_clones")
+        if os.path.isdir(clones_root):
+            for name in sorted(os.listdir(clones_root)):
+                cdir = os.path.join(clones_root, name)
+                if not os.path.isdir(cdir):
+                    continue
+                # skip empty / invalid names
+                if not name or name.startswith("."):
+                    continue
+                clone_names.append(name)
+                for root, dirs, files in os.walk(cdir):
+                    # do not pack huge log files beyond a cap
+                    dirs[:] = [d for d in dirs if not d.startswith(".")]
+                    for fn in files:
+                        if fn.startswith("."):
+                            continue
+                        # include json + small configs; skip huge bot.log tails optional — include log if < 2MB
+                        full = os.path.join(root, fn)
+                        try:
+                            if fn.endswith(".log") and os.path.getsize(full) > 2_000_000:
+                                continue
+                        except OSError:
+                            continue
+                        rel = os.path.relpath(full, cdir).replace("\\", "/")
+                        arc = f"clones/{name}/{rel}"
+                        try:
+                            zf.write(full, arcname=arc)
+                            n += 1
+                        except Exception as e:
+                            logger.warning(f"[backup] skip {arc}: {e}")
+
+        meta = {
+            "version": 2,
+            "ts": datetime.datetime.utcnow().isoformat() + "Z",
+            "master": True,
+            "clones": clone_names,
+            "note": "master/* = Master DATA_DIR; clones/<name>/* = isolated clone data",
+        }
+        zf.writestr("meta.json", json.dumps(meta, ensure_ascii=False, indent=2))
+        n += 1
+
+    if n <= 1:  # only meta
+        return None, 0
     buf.seek(0)
-    return buf, len(files)
+    return buf, n
+
+
+def _restore_backup_zip(raw_bytes):
+    """Restore zip ពី /backup — គាំទ្រ version 2 (master/ + clones/) និង legacy flat JSON។
+    Clone data សរសេរតែចូល bot_clones/<name>/ មិនលាយ Master។
+    Return (master_count, clone_count, clone_names).
+    """
+    import shutil as _shutil
+    master_n = 0
+    clone_n = 0
+    clone_names = set()
+    clones_root = CLONES_DIR if "CLONES_DIR" in dir() else os.path.join(DATA_DIR, "bot_clones")
+    safety_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    safety_dir = os.path.join(DATA_DIR, f"_pre_restore_{safety_ts}")
+    os.makedirs(safety_dir, exist_ok=True)
+
+    with zipfile.ZipFile(io.BytesIO(raw_bytes), "r") as zf:
+        names = zf.namelist()
+        has_v2 = any(n.startswith("master/") or n.startswith("clones/") for n in names)
+
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            name = info.filename.replace("\\", "/").lstrip("/")
+            if name in ("meta.json",) or name.endswith("/"):
+                continue
+            # security: no path escape
+            if ".." in name.split("/"):
+                logger.warning(f"[restore] skip unsafe path {name}")
+                continue
+
+            data = zf.read(info)
+
+            if has_v2 and name.startswith("master/"):
+                base = os.path.basename(name)
+                if not base.endswith(".json"):
+                    continue
+                dest = os.path.join(DATA_DIR, base)
+                # safety copy
+                if os.path.isfile(dest):
+                    try:
+                        _shutil.copy2(dest, os.path.join(safety_dir, base))
+                    except Exception:
+                        pass
+                with open(dest, "wb") as out:
+                    out.write(data)
+                master_n += 1
+
+            elif has_v2 and name.startswith("clones/"):
+                # clones/<clone_name>/...
+                parts = name.split("/")
+                if len(parts) < 3:
+                    continue
+                cname = parts[1]
+                if not cname or cname.startswith("."):
+                    continue
+                rel = "/".join(parts[2:])
+                if not rel or ".." in rel.split("/"):
+                    continue
+                cdir = os.path.join(clones_root, cname)
+                os.makedirs(cdir, exist_ok=True)
+                dest = os.path.join(cdir, rel.replace("/", os.sep))
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                with open(dest, "wb") as out:
+                    out.write(data)
+                clone_n += 1
+                clone_names.add(cname)
+
+            elif not has_v2:
+                # Legacy: flat *.json → master DATA_DIR only (never dump into clones)
+                base = os.path.basename(name)
+                if not base.endswith(".json"):
+                    continue
+                if base == "meta.json":
+                    continue
+                dest = os.path.join(DATA_DIR, base)
+                if os.path.isfile(dest):
+                    try:
+                        _shutil.copy2(dest, os.path.join(safety_dir, base))
+                    except Exception:
+                        pass
+                with open(dest, "wb") as out:
+                    out.write(data)
+                master_n += 1
+
+    return master_n, clone_n, sorted(clone_names)
 
 @bot.message_handler(commands=["backup"])
 def cmd_backup(message):
@@ -1920,11 +2069,25 @@ def cmd_backup(message):
             return
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         buf.name = f"kaijaklike_backup_{ts}.zip"
+        # count clones in zip
+        _clones = []
+        try:
+            with zipfile.ZipFile(buf, "r") as _zf:
+                for _n in _zf.namelist():
+                    if _n.startswith("clones/") and _n.count("/") >= 2:
+                        _clones.append(_n.split("/")[1])
+            _clones = sorted(set(_clones))
+            buf.seek(0)
+        except Exception:
+            _clones = []
+        _cnote = (f"\n🤖 Clones: <b>{len(_clones)}</b> — " + ", ".join(f"<code>{c}</code>" for c in _clones[:12])
+                  + ("…" if len(_clones) > 12 else "")) if _clones else "\n🤖 Clones: <i>គ្មាន</i>"
         bot.send_document(ADMIN_ID, buf,
-            caption=f"💾 <b>Backup ទិន្នន័យ</b> — {n} files\n"
-                    f"🗓️ {ts}\n\n"
-                    f"👉 រក្សាទុក file នេះឲ្យបានល្អ។ ដើម្បីយកទៅប្រើលើ Server ថ្មី "
-                    f"ផ្ញើ file នេះមកវិញ ព្រម <code>/restore</code>",
+            caption=f"💾 <b>Backup Master + Clones</b> — {n} files\n"
+                    f"🗓️ {ts}{_cnote}\n\n"
+                    f"📁 <code>master/</code> = data Master\n"
+                    f"📁 <code>clones/&lt;name&gt;/</code> = data clone នីមួយៗ (មិនលាយ)\n\n"
+                    f"👉 ផ្ញើ file នេះមកវិញ + <code>/restore</code> លើ Server ថ្មី",
             parse_mode="HTML")
     except Exception as e:
         logger.error(f"[backup] {e}")
@@ -2073,7 +2236,7 @@ def handle_document(message):
                 new_content = raw
             else:
                 with zipfile.ZipFile(io.BytesIO(raw), "r") as zf:
-                    svc_names = [n for n in zf.namelist() if n == "smm_services.json" or n.endswith("/smm_services.json")]
+                    svc_names = [n for n in zf.namelist() if n == "smm_services.json" or n.endswith("/smm_services.json") or n == "master/smm_services.json"]
                     if not svc_names:
                         bot.send_message(uid, "❌ រកមិនឃើញ <code>smm_services.json</code> ក្នុង zip នេះទេ។ ផ្ញើម្តងទៀត ឬ ✕ Cancel។",
                                           parse_mode="HTML", reply_markup=cancel_kb())
@@ -2117,31 +2280,24 @@ def handle_document(message):
     try:
         file_info = bot.get_file(doc.file_id)
         raw = bot.download_file(file_info.file_path)
-        buf = io.BytesIO(raw)
-        with zipfile.ZipFile(buf, "r") as zf:
-            names = [n for n in zf.namelist() if n.endswith(".json") and "/" not in n and ".." not in n]
-            if not names:
-                bot.send_message(uid, "❌ រកមិនឃើញ file .json ក្នុង zip នេះទេ។ ផ្ញើម្តងទៀត ឬ ✕ Cancel។",
-                                  reply_markup=cancel_kb())
-                return
-            # ចម្លងទុកមុនសិន (safety backup) មុននឹងសរសេរជាន់
-            safety_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            safety_dir = _dpath(f"_pre_restore_backup_{safety_ts}")
-            os.makedirs(safety_dir, exist_ok=True)
-            for f in os.listdir(DATA_DIR):
-                if f.endswith(".json"):
-                    try:
-                        import shutil as _shutil
-                        _shutil.copy(os.path.join(DATA_DIR, f), os.path.join(safety_dir, f))
-                    except Exception: pass
-            for n in names:
-                zf.extract(n, DATA_DIR)
+        master_n, clone_n, clone_list = _restore_backup_zip(raw)
+        if master_n == 0 and clone_n == 0:
+            bot.send_message(uid, "❌ រកមិនឃើញ data ក្នុង zip នេះទេ។ ផ្ញើម្តងទៀត ឬ ✕ Cancel។",
+                              reply_markup=cancel_kb())
+            return
         waiting.pop(uid, None)
+        cnote = ""
+        if clone_list:
+            cnote = ("\n🤖 Clones restored: <b>%d</b> — " % len(clone_list)
+                     + ", ".join(f"<code>{c}</code>" for c in clone_list[:15])
+                     + ("…" if len(clone_list) > 15 else ""))
         bot.send_message(uid,
-            f"✅ <b>Restore ជោគជ័យ!</b> ({len(names)} files)\n"
-            f"🛡️ Data ចាស់បានចម្លងទុកនៅ <code>{os.path.basename(safety_dir)}</code> ជាមុនសិន (ការពារបញ្ហា)\n\n"
-            f"🔄 <b>កំពុង Restart Bot ស្វ័យប្រវត្តិ...</b> (ត្រូវការ ដើម្បីអោយ Data ថ្មីចូល RAM — "
-            f"គ្រាន់តែសរសេរជាន់ file មិនគ្រប់គ្រាន់ទេ)។ រង់ចាំ ~5 វិនាទី រួចសាកល្បង /start វិញ។",
+            f"✅ <b>Restore ជោគជ័យ!</b>\n"
+            f"📦 Master: <b>{master_n}</b> files\n"
+            f"🤖 Clone files: <b>{clone_n}</b>{cnote}\n"
+            f"🛡️ Data ចាស់ Master បានចម្លងទុកក្នុង <code>_pre_restore_*</code>\n"
+            f"📁 Clone data ស្ថិតក្នុង <code>bot_clones/&lt;name&gt;/</code> (មិនលាយ Master)\n\n"
+            f"🔄 <b>កំពុង Restart Bot...</b> រង់ចាំ ~5s រួច /start វិញ។",
             parse_mode="HTML")
         def _auto_restart():
             time.sleep(1.5)
