@@ -375,7 +375,7 @@ KHPAY_CHECK_URL    = os.getenv("KHPAY_CHECK_URL", f"{KHPAY_BASE_URL}/qr/check")
 KHPAY_EXPIRE_SEC   = int(os.getenv("KHPAY_EXPIRE_SEC", "180"))
 KHPAY_MERCHANT_ID  = os.getenv("KHPAY_MERCHANT_ID", "")  # optional mch_...
 
-DEPOSIT_EXPIRE_SEC = 300   # 5 minutes (CamRapidPay expire 5 min)
+DEPOSIT_EXPIRE_SEC = int(os.getenv("DEPOSIT_EXPIRE_SEC", "600"))  # default 10 min poll window
 POLL_INTERVAL      = 8
 SMM_ORDER_POLL_INTERVAL = 180   # 3 minutes — Poll ស្ថានភាព Order ពី SMM API
 
@@ -7469,7 +7469,7 @@ def _do_broadcast(admin_uid, message):
     bot.send_message(admin_uid,
         f"📢 កំពុងផ្សព្វផ្សាយទៅ <b>{total}</b> users\n"
         f"<i>(skip banned + blocked)</i>\n"
-        f"⏱ ~{max(1, total // 20)} វិនាទី",
+        f"⏱ ~{max(1, total // 25)}–{max(2, total // 12)} វិនាទី (លឿនជាងមុន)",
         parse_mode="HTML")
     sent = failed = blocked_n = 0
     for i, u_id in enumerate(targets, 1):
@@ -7484,13 +7484,37 @@ def _do_broadcast(admin_uid, message):
                 bot.send_message(int(u_id), message.text or "", parse_mode="HTML")
             sent += 1
         except Exception as e:
+            err = str(e)
             if _is_block_error(e):
                 _mark_user_blocked(u_id, True)
                 blocked_n += 1
+            elif "retry after" in err.lower() or "Too Many Requests" in err or "Flood" in err:
+                # Telegram FloodWait — pause then retry once
+                import re as _re
+                m = _re.search(r"retry after (\d+)", err, _re.I)
+                wait = int(m.group(1)) if m else 3
+                wait = min(max(wait, 1), 30)
+                time.sleep(wait)
+                try:
+                    if message.photo:
+                        bot.send_photo(int(u_id), message.photo[-1].file_id, caption=message.caption or "")
+                    elif message.video:
+                        bot.send_video(int(u_id), message.video.file_id, caption=message.caption or "")
+                    elif message.voice:
+                        bot.send_voice(int(u_id), message.voice.file_id, caption=message.caption or "")
+                    else:
+                        bot.send_message(int(u_id), message.text or "", parse_mode="HTML")
+                    sent += 1
+                except Exception as e2:
+                    if _is_block_error(e2):
+                        _mark_user_blocked(u_id, True)
+                        blocked_n += 1
+                    else:
+                        failed += 1
             else:
                 failed += 1
-        time.sleep(0.05)
-        if i % 100 == 0 and i < total:
+        time.sleep(0.035)  # ~25–28 msg/s soft limit — លឿនជាង 0.05
+        if i % 50 == 0 and i < total:
             try:
                 bot.send_message(admin_uid,
                     f"⏳ Progress: {i}/{total} (✅{sent} 🚫{blocked_n} ❌{failed})")
@@ -10340,6 +10364,73 @@ def _auto_backup_scheduler():
                     caption=f"🕒 <b>Auto Backup ប្រចាំថ្ងៃ</b> — {n} files — {today}")
         except Exception as e:
             logger.warning(f"⚠️ Auto-backup scheduler error: {e}")
+
+
+def _resume_pending_deposits():
+    """បន្ទាប់ restart / restore — បន្ត poll QR deposit ដែលនៅ pending
+    (បើមិនមាន thread នេះ លុយអ្នកប្រើបង់ហើយមិនចូល balance)."""
+    try:
+        n = 0
+        now = time.time()
+        for dep_id, dep in list(smm_deps.items()):
+            if not isinstance(dep, dict):
+                continue
+            if dep.get("status") != "pending":
+                continue
+            created = _dep_created_ts(dep_id, dep)
+            # allow longer window than DEPOSIT_EXPIRE for resume (max 1h from create)
+            max_age = max(DEPOSIT_EXPIRE_SEC, int(os.getenv("KHPAY_EXPIRE_SEC", "180")) or 180, 600) + 120
+            if created and (now - created) > max_age:
+                dep["status"] = "expired"
+                continue
+            uid_str = str(dep.get("uid") or "")
+            try:
+                uid = int(uid_str)
+            except (TypeError, ValueError):
+                continue
+            amount = float(dep.get("amount") or 0)
+            ref = str(dep.get("reference") or "").strip()
+            if not ref or amount <= 0:
+                continue
+            method = (dep.get("method") or "").lower()
+            checker = None
+            if method in ("khpay", "khp"):
+                checker = _khpay_check
+            elif method in ("aba", "abapay", "aba_payway"):
+                checker = _aba_check
+            elif method in ("camrapid", "camrapidpay"):
+                checker = _camrapid_check
+            else:
+                # auto-detect by available gateways
+                if has_khpay():
+                    checker = _khpay_check
+                elif has_aba_payway():
+                    checker = _aba_check
+                else:
+                    checker = _camrapid_check
+            threading.Thread(
+                target=_watch_deposit,
+                args=(uid, uid_str, dep_id, amount, ref),
+                kwargs={"checker": checker},
+                daemon=True,
+            ).start()
+            n += 1
+        if n:
+            _save(SMM_DEP_FILE, smm_deps)
+            logger.info(f"[resume_deposits] resumed {n} pending deposit watcher(s)")
+            try:
+                bot.send_message(
+                    ADMIN_ID,
+                    f"♻️ <b>Resume pending deposits:</b> {n}\n"
+                    f"(បន្ទាប់ restart — បន្តតាមដាន QR ដែលមិនទាន់បង់)",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+        else:
+            logger.info("[resume_deposits] no pending deposits to resume")
+    except Exception as e:
+        logger.error(f"[resume_deposits] {e}")
 
 # ═══════════════════════════════════════════════════════════
 #  MAIN
