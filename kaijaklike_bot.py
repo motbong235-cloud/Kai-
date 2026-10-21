@@ -133,12 +133,7 @@ def _entities_for_emoji_text(text):
         if m:
             ch = m.group(1)
             length = len(ch.encode("utf-16-le")) // 2
-            eid = EMOJI_MAP.get(ch)
-            if not eid:
-                for k, v in EMOJI_MAP.items():
-                    if v and k.replace("️", "") == ch.replace("️", ""):
-                        eid = v
-                        break
+            eid = _lookup_emoji_id(ch)
             if eid:
                 entities.append(_MessageEntity(type="custom_emoji", offset=utf16_pos,
                                                 length=length, custom_emoji_id=str(eid)))
@@ -150,12 +145,43 @@ def _entities_for_emoji_text(text):
             idx += 1
     return entities
 
+def _norm_emoji(ch):
+    """Strip VS16 (U+FE0F) for tolerant key match."""
+    if not ch:
+        return ch
+    return ch.replace("\ufe0f", "").replace("️", "")
+
+def _lookup_emoji_id(ch):
+    """Resolve custom_emoji_id for a unicode emoji char (FE0F-tolerant)."""
+    if not ch:
+        return None
+    eid = EMOJI_MAP.get(ch)
+    if eid:
+        return str(eid)
+    n = _norm_emoji(ch)
+    for k, v in EMOJI_MAP.items():
+        if not v:
+            continue
+        if k == ch or _norm_emoji(k) == n:
+            return str(v)
+    return None
+
 def _leading_emoji(s):
-    """បើ string ចាប់ផ្ដើមដោយ emoji ណាមួយក្នុង EMOJI_MAP សូមត្រឡប់តួនោះមកវិញ។"""
+    """Leading emoji in EMOJI_MAP — FE0F-tolerant (⚙️ == ⚙)."""
     if not s or not isinstance(s, str):
         return None
     m = _LEADING_EMOJI_RE.match(s)
-    return m.group(1) if m else None
+    if m:
+        return m.group(1)
+    for ch in _EMOJI_CHARS_SORTED:
+        if not ch:
+            continue
+        if s.startswith(ch):
+            return ch
+        nch = _norm_emoji(ch)
+        if nch and s.startswith(nch):
+            return ch
+    return None
 
 def _strip_leading_emoji_text(text, ch):
     """ដកចេញ emoji ធម្មតា (ch) ពីដើម text បើ icon_custom_emoji_id ត្រូវបានប្រើ
@@ -178,19 +204,7 @@ class InlineKeyboardButton(_IKB_orig):
     def _resolve_emoji_id(self):
         if self._emoji_id:
             return str(self._emoji_id)
-        ch = self._emoji_char
-        if not ch:
-            return None
-        eid = EMOJI_MAP.get(ch)
-        if eid:
-            return str(eid)
-        # VS16-tolerant lookup
-        for k, v in EMOJI_MAP.items():
-            if not v:
-                continue
-            if k.replace("️", "") == ch.replace("️", ""):
-                return str(v)
-        return None
+        return _lookup_emoji_id(self._emoji_char)
 
     def to_dict(self):
         d = super().to_dict()
@@ -235,18 +249,7 @@ class KeyboardButton(_KB_orig):
     def _resolve_emoji_id(self):
         if self._emoji_id:
             return str(self._emoji_id)
-        ch = self._emoji_char
-        if not ch:
-            return None
-        eid = EMOJI_MAP.get(ch)
-        if eid:
-            return str(eid)
-        for k, v in EMOJI_MAP.items():
-            if not v:
-                continue
-            if k.replace("️", "") == ch.replace("️", ""):
-                return str(v)
-        return None
+        return _lookup_emoji_id(self._emoji_char)
 
     def to_dict(self):
         d = super().to_dict()
@@ -502,10 +505,31 @@ def _save(path, data):
 # EMOJI_MAP ត្រូវបានកំណត់ default (None) ខាងលើ — ឥឡូវ merge ជាមួយតម្លៃ
 # ដែលធ្លាប់រក្សាទុកនៅក្នុងឯកសារ (បើមាន) ដើម្បីឲ្យ /setemojis រក្សាទុកជាអចិន្ត្រៃយ៍
 _EMOJI_DEFAULTS = dict(EMOJI_MAP)
-EMOJI_MAP.update(_load(EMOJI_FILE, {}))
-# ensure newly added chars exist even if emoji.json is older
+_loaded_emoji = _load(EMOJI_FILE, {}) or {}
+# Merge file → map; also mirror value onto FE0F / non-FE0F twin keys so UI text always hits
+for _k, _v in list(_loaded_emoji.items()):
+    if not _k:
+        continue
+    EMOJI_MAP[_k] = _v
+    _nk = _k.replace("\ufe0f", "").replace("️", "")
+    if _v:
+        if _k not in EMOJI_MAP or not EMOJI_MAP.get(_k):
+            EMOJI_MAP[_k] = _v
+        if _nk and _nk != _k:
+            EMOJI_MAP.setdefault(_nk, _v)
+            # if list has FE0F form, fill it too
+            if not _k.endswith("\ufe0f") and not _k.endswith("️"):
+                EMOJI_MAP.setdefault(_k + "️", _v)
 for _ch in _EMOJI_CHAR_LIST:
     EMOJI_MAP.setdefault(_ch, None)
+    # if twin form has id, copy
+    _nv = EMOJI_MAP.get(_ch)
+    if not _nv:
+        _nk = _ch.replace("\ufe0f", "").replace("️", "")
+        for _k2, _v2 in list(EMOJI_MAP.items()):
+            if _v2 and _k2.replace("\ufe0f", "").replace("️", "") == _nk:
+                EMOJI_MAP[_ch] = _v2
+                break
 # rebuild sorted patterns so new chars are emojified in messages
 _EMOJI_CHARS_SORTED = sorted([c for c in EMOJI_MAP.keys() if c], key=len, reverse=True)
 _LEADING_EMOJI_RE = _re.compile(
@@ -2705,10 +2729,10 @@ def _send_with_fallbacks(tb, chat_id, text, markup, parse_mode, label):
     text_clean = _strip_tg_emoji_tags(text or "")
     if markup is not None:
         pm = _plain_markup(markup)
-        if pm is not None:
-            # Prefer plain buttons + clean HTML (no tg-emoji, no premium icon on buttons)
-            attempts.append(("plain-buttons", text_clean, pm, parse_mode))
+        # Prefer FULL first (premium icons) — only fall back to plain-buttons if Telegram rejects
         attempts.append(("full", text_clean, markup, parse_mode))
+        if pm is not None:
+            attempts.append(("plain-buttons", text_clean, pm, parse_mode))
     else:
         attempts.append(("full", text_clean, None, parse_mode))
     attempts.append(("plain-text", _html_to_plain(text_clean), _plain_markup(markup) if markup is not None else None, None))
@@ -4173,7 +4197,7 @@ def main_kb(uid=None):
     e = EMOJI_MAP
     # emoji_id ត្រូវប្រើ key ជាតួ emoji ពិត (👤/💸/...) — មិនមែន "account"/"topup"
     if lang == "en":
-        kb.row(KeyboardButton("👤 My Account", emoji_id=e.get("👤"), color="active"),
+        kb.row(KeyboardButton("👤 My Account", emoji_id=e.get("👤") or None, color="active"),
                KeyboardButton("💸 Top Up",      emoji_id=e.get("💸"), color="progress"))
         kb.row(KeyboardButton("🛒 Order Service", emoji_id=e.get("🛒"), color="active"))
         kb.row(KeyboardButton("📋 Order History", emoji_id=e.get("📋"), color="active"),
@@ -4181,7 +4205,7 @@ def main_kb(uid=None):
         kb.row(KeyboardButton("💬 Support", emoji_id=e.get("💬"), color="active"),
                KeyboardButton("💡 How to Use",  emoji_id=e.get("💡"), color="progress"))
     else:
-        kb.row(KeyboardButton("👤 គណនី",            emoji_id=e.get("👤"), color="active"),
+        kb.row(KeyboardButton("👤 គណនី",            emoji_id=e.get("👤") or None, color="active"),
                KeyboardButton("💸 បញ្ចូលលុយ",       emoji_id=e.get("💸"), color="progress"))
         kb.row(KeyboardButton("🛒 បញ្ជាទិញសេវា", emoji_id=e.get("🛒"), color="active"))
         kb.row(KeyboardButton("📋 ប្រវត្តិការបញ្ជាទិញ", emoji_id=e.get("📋"), color="active"),
@@ -4863,6 +4887,9 @@ def _apply_setemojis(src_msg):
                                        # ត្រង់ៗ ធ្វើឲ្យខកខានផ្គូផ្គង emoji ត្រឹមត្រូវ)
         if key:
             EMOJI_MAP[key] = eid
+            _nk = key.replace("\ufe0f", "").replace("️", "")
+            if _nk and _nk != key:
+                EMOJI_MAP[_nk] = eid
             lines.append(f"{key} → <code>{eid}</code>")
         else:
             unknown.append((ch, eid))
@@ -7339,7 +7366,12 @@ def handle_photo(message):
             # ✅ ទទួល emoji ណាក៏បាន (មិនតម្រូវឲ្យដូច ch ដើមទេ — តាមសំណើអ្នកប្រើ)
             match_eid = found[0][1]
             EMOJI_MAP[ch] = match_eid
-            _save(EMOJI_FILE, EMOJI_MAP)
+            _nch = ch.replace("\ufe0f", "").replace("️", "")
+            if _nch and _nch != ch:
+                EMOJI_MAP[_nch] = match_eid
+            if not ch.endswith("️"):
+                EMOJI_MAP[ch + "️"] = match_eid
+            _save(EMOJI_FILE, {k: v for k, v in EMOJI_MAP.items() if v})
             waiting.pop(uid, None)
             remaining = [c for c, v in EMOJI_MAP.items() if not v]
             done_n = sum(1 for v in EMOJI_MAP.values() if v)
@@ -7593,7 +7625,12 @@ def handle_msg(message):
             # ✅ ទទួល emoji ណាក៏បាន (មិនតម្រូវឲ្យដូច ch ដើមទេ — តាមសំណើអ្នកប្រើ)
             match_eid = found[0][1]
             EMOJI_MAP[ch] = match_eid
-            _save(EMOJI_FILE, EMOJI_MAP)
+            _nch = ch.replace("\ufe0f", "").replace("️", "")
+            if _nch and _nch != ch:
+                EMOJI_MAP[_nch] = match_eid
+            if not ch.endswith("️"):
+                EMOJI_MAP[ch + "️"] = match_eid
+            _save(EMOJI_FILE, {k: v for k, v in EMOJI_MAP.items() if v})
             waiting.pop(uid, None)
             remaining = [c for c, v in EMOJI_MAP.items() if not v]
             done_n = sum(1 for v in EMOJI_MAP.values() if v)
