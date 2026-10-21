@@ -3866,7 +3866,7 @@ def _send_deposit_qr(uid, amount, promo_code=None, label="💸 ដាក់ល�
         f"🔖 Ref: <code>{ref_short}</code>\n"
         f"⏱ ផុតកំណត់: <b>5 នាទី</b>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"✅ ស្កេន QR ឬចុច «បើក ABA → Pay»\n"
+        f"✅ ស្កេន QR ឬចុច «OPEN ABA Mobile»\n"
         f"<i>Balance នឹងចូលស្វ័យប្រវត្តិបន្ទាប់ពីបង់ជោគជ័យ</i>"
     )
 
@@ -3893,7 +3893,7 @@ def _send_deposit_qr(uid, amount, promo_code=None, label="💸 ដាក់ល�
     if aba_https or pay_url:
         kb_pay = InlineKeyboardMarkup()
         if aba_https:
-            kb_pay.add(InlineKeyboardButton("🏦 បើក ABA → Pay", url=aba_https, color="active"))
+            kb_pay.add(InlineKeyboardButton("🏦 OPEN ABA Mobile", url=aba_https, color="active"))
         if pay_url:
             kb_pay.add(InlineKeyboardButton("🌐 បើកទំព័រទូទាត់", url=pay_url, color="progress"))
 
@@ -3999,7 +3999,7 @@ def _send_deposit_qr_khpay(uid, amount, promo_code_name=None, bonus=0.0, promo_b
         f"💰 ចំនួន: <b>${amount:.2f}</b>{bonus_txt}\n"
         f"🆔 Txn: <code>{reference}</code>\n"
         f"⏱ ផុតក្នុង: <b>{expires_in}s</b>\n━━━━━━━━━━━━━━━━━━\n"
-        f"📱 ស្កេន QR ឬ ចុចប៊ូតុងបើក ABA Mobile\n"
+        f"📱 ស្កេន QR ឬ ចុចប៊ូតុង OPEN ABA Mobile\n"
         f"✅ បន្ទាប់ពីបង់រួច Bot នឹងបញ្ចូល Balance ស្វ័យប្រវត្តិ"
     )
 
@@ -4008,9 +4008,9 @@ def _send_deposit_qr_khpay(uid, amount, promo_code_name=None, bonus=0.0, promo_b
     kb_pay = InlineKeyboardMarkup()
     has_btn = False
     if aba_https:
-        kb_pay.add(InlineKeyboardButton("🏦 បើក ABA → Pay", url=aba_https, color="active"))
+        kb_pay.add(InlineKeyboardButton("🏦 OPEN ABA Mobile", url=aba_https, color="active"))
         has_btn = True
-    # payment_url button លុប — User ប្រើតែ «បើក ABA → Pay» ឬ ស្កេន QR
+    # payment_url button លុប — User ប្រើតែ «OPEN ABA Mobile» ឬ ស្កេន QR
     if not has_btn:
         kb_pay = None
 
@@ -4058,10 +4058,10 @@ def _send_deposit_qr_khpay(uid, amount, promo_code_name=None, bonus=0.0, promo_b
                 return
             kb2 = InlineKeyboardMarkup()
             if aba_link:
-                kb2.add(InlineKeyboardButton("🏦 បើក ABA → Pay", url=aba_link, color="active"))
+                kb2.add(InlineKeyboardButton("🏦 OPEN ABA Mobile", url=aba_link, color="active"))
             # payment_url button លុបពី KHPAY
             new_cap = caption + (
-                "\n📱 <i>ចុច «បើក ABA → Pay» — ចូលអេក្រង់ទូទាត់ភ្លាម។ បើមិនចូល សូមបើកក្នុង Safari/Chrome "
+                "\n📱 <i>ចុច «OPEN ABA Mobile» — ចូលអេក្រង់ទូទាត់ភ្លាម។ បើមិនចូល សូមបើកក្នុង Safari/Chrome "
                 "(មិនមែន in-app browser របស់ Telegram)</i>")
             if photo_sent:
                 bot.edit_message_caption(
