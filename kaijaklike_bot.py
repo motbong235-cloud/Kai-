@@ -3017,6 +3017,24 @@ def _try_send(tb, chat_id, text, markup, parse_mode, label):
         logger.warning(f"[{label}] send failed chat={chat_id} err={err}")
         return False, err
 
+
+def _tg_escape(s, limit=400):
+    """Escape text for Telegram HTML — block API HTML error pages (!DOCTYPE)."""
+    import html as _html
+    if s is None:
+        return ""
+    s = str(s)
+    low = s.lower()
+    if "<!doctype" in low or "<html" in low or "<body" in low:
+        s = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", s)
+        s = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", s)
+        s = re.sub(r"(?is)<[^>]+>", " ", s)
+        s = re.sub(r"\s+", " ", s).strip() or "(HTML error page from payment API)"
+    s = _html.escape(s, quote=False)
+    if limit and len(s) > limit:
+        s = s[:limit] + "…"
+    return s
+
 def _send_with_fallbacks(tb, chat_id, text, markup, parse_mode, label):
     """Try: plain-buttons first when keyboard present (avoids ENTITY_TEXT_INVALID from premium icons),
     then full, then plain text. -> (ok, last_error, how)"""
@@ -3057,6 +3075,9 @@ def _notify_via(kind, text, reply_markup=None, parse_mode="HTML"):
     name = "onotify" if kind == "order" else "pnotify"
     tb = order_bot if kind == "order" else pay_bot
     try:
+        if text and ("<!DOCTYPE" in text or "<!doctype" in text or "<html" in (text or "").lower()):
+            text = _tg_escape(text, 1500)
+            parse_mode = None
         # Order/Pay notify: មិនប្រើ <tg-emoji> — Telegram ងាយ ENTITY_TEXT_INVALID
         # ជាមួយ InlineKeyboard (Done/Reject) + HTML លាយ premium entities។
         # រក្សា unicode emoji ធម្មតា តែ strip tg-emoji tags បើមាន។
@@ -3567,7 +3588,7 @@ def _aba_create(uid, amount, username, _attempt=1):
             data = r.json()
         except Exception:
             body = r.text.strip()
-            _last_aba_error = f"HTTP {r.status_code} (non-JSON): {body[:300]}"
+            _last_aba_error = f"HTTP {r.status_code} (non-JSON): {_tg_escape(body, 200)}"
             logger.error(f"[aba_create] {_last_aba_error}")
             if r.status_code >= 500 and _attempt < 2:
                 time.sleep(1.5)
@@ -3678,7 +3699,7 @@ def _khpay_create(uid, amount, note=""):
         try:
             data = r.json()
         except Exception:
-            _last_khpay_error = f"HTTP {r.status_code}: {r.text[:300]}"
+            _last_khpay_error = f"HTTP {r.status_code}: {_tg_escape(r.text, 200)}"
             return None
         if data.get("success") and isinstance(data.get("data"), dict):
             return data["data"]
@@ -4212,7 +4233,7 @@ def _send_deposit_qr_khpay(uid, amount, promo_code_name=None, bonus=0.0, promo_b
             except Exception: pass
         bot.send_message(uid, "⚠️ <b>មានបញ្ហា Generate QR (KHPAY)!</b>\nសូមព្យាយាមម្តងទៀត ឬ ទំនាក់ Admin", parse_mode="HTML")
         try:
-            pnotify(f"⚠️ <b>KHPAY បរាជ័យ</b>\n👤 <code>{uid_str}</code> — ${amount:.2f}\n🔎 <code>{_last_khpay_error[:500]}</code>")
+            pnotify(f"⚠️ <b>KHPAY បរាជ័យ</b>\n👤 <code>{uid_str}</code> — ${amount:.2f}\n🔎 <code>{_tg_escape(_last_khpay_error, 400)}</code>")
         except Exception: pass
         return
     txn_id = data.get("transaction_id") or data.get("id") or ""
@@ -7389,7 +7410,7 @@ def cb_set_aba(call):
             f"{'✅' if ok else '❌'} <b>ABA PayWay Test (Generate QR)</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"🌐 URL: <code>{ABA_CREATE_URL}</code>\n"
-            f"📋 Response: <code>{str(test_data if ok else _last_aba_error)[:500]}</code>\n"
+            f"📋 Response: <code>{_tg_escape(test_data if ok else _last_aba_error, 400)}</code>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             + ("✅ QR គួរតែចេញបានធម្មតា!" if ok else
                "❌ សូមអានសារ Error ខាងលើ (ឧ. Key/Merchant ID មិនត្រឹមត្រូវ, service down ។ល។)"),
@@ -7423,7 +7444,7 @@ def cb_set_khpay(call):
         bot.send_message(uid, "⏳ កំពុង Test Generate QR ជាមួយ KHPAY ($0.10)...")
         test_data = _khpay_create(uid, 0.10, note="KHPAY test")
         ok = bool(test_data)
-        detail = str(test_data if ok else _last_khpay_error)[:500]
+        detail = _tg_escape(test_data if ok else _last_khpay_error, 400)
         mid = _effective_khpay_merchant() or "(default)"
         msg = (
             "%s <b>KHPAY Test (Generate QR)</b>\n"
