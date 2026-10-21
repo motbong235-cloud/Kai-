@@ -571,6 +571,11 @@ _EMOJI_ANY_RE = _re.compile(
 
 EMOJI_KEYS = list(_EMOJI_DEFAULTS.keys())   # បញ្ជី emoji ទាំងអស់ដែល bot ស្គាល់ (សម្រាប់ reference)
 
+_n_prem = sum(1 for _v in EMOJI_MAP.values() if _v)
+print(f"[emoji] premium ids configured: {_n_prem} / {len(EMOJI_MAP)}")
+if _n_prem == 0:
+    print("[emoji] WARNING: no premium custom_emoji_id set — run Admin → 😊 កំណត់ Emoji")
+
 wallets      = _load(WALLETS_FILE,   {})
 users_db     = _load(USERS_FILE,     {})
 user_lang    = _load(LANG_FILE,      {})
@@ -918,20 +923,30 @@ def _wrap_safe_call(fn, text_kw=None, text_pos=None):
             # (button "ស្ងាត់" ជានិច្ច)។ ឥឡូវ retry ក៏កើតឡើងបើ markup មាន
             # icon_custom_emoji_id ណាមួយផងដែរ ទោះ error text មិននិយាយពី emoji
             # ដោយផ្ទាល់ក៏ដោយ។
-            if not _looks_emoji_related(e) and not (emojified or has_icon_markup):
+            # Only strip premium on emoji/icon-related rejection — NOT on every error
+            # when markup merely *has* icons (old logic stripped premium on ANY failure).
+            if not _looks_emoji_related(e):
                 raise
-            logger.warning(f"⚠️ Premium emoji/icon ត្រូវបានបដិសេធដោយ Telegram — fallback ទៅ unicode ធម្មតា: {e}")
-            if emojified:
-                if text_kw is not None and text_kw in kwargs:
-                    kwargs[text_kw] = orig_text
-                elif text_pos is not None:
-                    args[text_pos] = orig_text
+            logger.warning(f"⚠️ Premium emoji/icon rejected by Telegram — fallback unicode: {e}")
+            # Retry 1: keep caption/text premium, strip button icons only
             _strip_markup_icons(markup)
             try:
                 return fn(*args, **kwargs)
             except Exception as e2:
-                logger.error(f"❌ Fallback (គ្មាន icon) ក៏បរាជ័យដែរ — សារនេះនឹងមិនផ្ញើចេញ: {e2}")
-                raise
+                if not _looks_emoji_related(e2) and not emojified:
+                    logger.error(f"❌ Fallback failed: {e2}")
+                    raise
+                # Retry 2: strip tg-emoji tags too
+                if emojified:
+                    if text_kw is not None and text_kw in kwargs:
+                        kwargs[text_kw] = orig_text
+                    elif text_pos is not None and text_pos < len(args):
+                        args[text_pos] = orig_text
+                try:
+                    return fn(*args, **kwargs)
+                except Exception as e3:
+                    logger.error(f"❌ Full unicode fallback failed: {e3}")
+                    raise
     return wrapper
 
 bot.send_message        = _wrap_safe_call(bot.send_message,        "text", 1)
