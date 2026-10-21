@@ -477,10 +477,36 @@ def _load(path, default):
                 return data
             except Exception:
                 pass
+        # try any recent .corrupted_* that is still valid JSON (manual recovery path)
         try:
-            corrupt_copy = f"{path}.corrupted_{int(time.time())}"
-            os.replace(path, corrupt_copy)
-            logger.error(f"🚨 {path} ខូច ({e}) — គ្មាន .bak, ទុកទុកជា {corrupt_copy}")
+            parent = os.path.dirname(path) or "."
+            base = os.path.basename(path)
+            cands = []
+            for fn in os.listdir(parent):
+                if fn.startswith(base + ".corrupted_") or fn == base + ".bak":
+                    cands.append(os.path.join(parent, fn))
+            cands.sort(key=lambda p: os.path.getmtime(p) if os.path.isfile(p) else 0, reverse=True)
+            for cp in cands:
+                try:
+                    with open(cp, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    logger.error(f"⚠️ {path} ខូច ({e}) — restored ពី {cp}")
+                    try:
+                        with open(path, "w", encoding="utf-8") as out:
+                            json.dump(data, out, ensure_ascii=False, indent=2)
+                    except Exception:
+                        pass
+                    _alert_admin_corruption(path, e, recovered_from_bak=True)
+                    return data
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        try:
+            if os.path.isfile(path):
+                corrupt_copy = f"{path}.corrupted_{int(time.time())}"
+                os.replace(path, corrupt_copy)
+                logger.error(f"🚨 {path} ខូច ({e}) — ទុកជា {corrupt_copy}")
         except Exception:
             logger.error(f"🚨 {path} ខូច ({e}) — មិនអាចរក្សា copy ខូចបានទេ")
         _alert_admin_corruption(path, e, recovered_from_bak=False)
@@ -510,26 +536,94 @@ def _alert_admin_corruption(path, err, recovered_from_bak):
     except Exception:
         pass
 
+# Per-path locks — ការពារ race ពេល thread ច្រើន _save file តែមួយ (users/wallets/orders)
+_save_locks = {}
+_save_locks_guard = threading.Lock()
+
+def _lock_for_path(path):
+    with _save_locks_guard:
+        lk = _save_locks.get(path)
+        if lk is None:
+            lk = threading.Lock()
+            _save_locks[path] = lk
+        return lk
+
 def _save(path, data):
-    """សរសេរបែប Atomic (tmp file → os.replace) ដើម្បីកុំឲ្យ file ដាច់ពាក់
-    កណ្ដាល ពេល Disk ជិតពេញ ឬ Bot crash/restart កណ្ដាលការសរសេរ (root cause
-    នៃ Data Loss ដែលកើតឡើងពីមុន)។ ទុក .bak ជា copy ល្អចុងក្រោយ ដើម្បីឲ្យ
-    _load() អាច fallback បើ file ថ្មីខូច។"""
-    try:
-        tmp = f"{path}.tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        if os.path.exists(path):
+    """Atomic save: unique tmp → fsync → replace។ Lock តាម path ការពារ race។
+    បើ replace បរាជ័យ សាក retry / write ត្រង់ៗ — កុំបញ្ជូន alert 'ខូច' ក្លែងក្លាយ។"""
+    lk = _lock_for_path(path)
+    with lk:
+        try:
+            parent = os.path.dirname(path) or "."
+            os.makedirs(parent, exist_ok=True)
+            # unique tmp per call — កុំឲ្យ thread ពីរប្រើ path.tmp តែមួយ
+            tmp = f"{path}.tmp.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass
+            if not os.path.isfile(tmp):
+                raise FileNotFoundError(f"tmp missing after write: {tmp}")
+            # backup good file
+            if os.path.isfile(path):
+                try:
+                    # copy2 keeps original until replace succeeds better than replace→bak when concurrent
+                    import shutil as _sh
+                    _sh.copy2(path, path + ".bak")
+                except Exception:
+                    try:
+                        os.replace(path, path + ".bak")
+                    except Exception:
+                        pass
             try:
-                os.replace(path, path + ".bak")
+                os.replace(tmp, path)
+            except FileNotFoundError:
+                # rare race / FS hiccup — retry once
+                time.sleep(0.05)
+                if os.path.isfile(tmp):
+                    os.replace(tmp, path)
+                else:
+                    raise
+            # cleanup stray old-style .tmp if any
+            try:
+                old_tmp = f"{path}.tmp"
+                if os.path.isfile(old_tmp):
+                    os.remove(old_tmp)
             except Exception:
                 pass
-        os.replace(tmp, path)
-    except Exception as e:
-        logger.error(f"Save {path}: {e}")
-        _alert_admin_corruption(path, e, recovered_from_bak=False)
+        except Exception as e:
+            logger.error(f"Save {path}: {e}")
+            # last resort: direct write (non-atomic) so data is not lost in RAM only
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                    f.flush()
+                logger.warning(f"Save {path}: recovered via direct write after atomic failure")
+            except Exception as e2:
+                logger.error(f"Save {path} DIRECT also failed: {e2}")
+                try:
+                    b = globals().get("bot")
+                    admin_id = globals().get("ADMIN_ID")
+                    if b and admin_id:
+                        b.send_message(
+                            admin_id,
+                            f"🚨 <b>Save បរាជ័យ</b>\n<code>{os.path.basename(path)}</code>\n"
+                            f"<code>{e}</code> → <code>{e2}</code>\n"
+                            f"ពិនិត្យ Disk /var/data និង permission។",
+                            parse_mode="HTML",
+                        )
+                except Exception:
+                    pass
+            finally:
+                # remove orphan tmp
+                try:
+                    if "tmp" in dir() and os.path.isfile(tmp):
+                        os.remove(tmp)
+                except Exception:
+                    pass
 
 # ─── Load all state ───
 # EMOJI_MAP ត្រូវបានកំណត់ default (None) ខាងលើ — ឥឡូវ merge ជាមួយតម្លៃ
