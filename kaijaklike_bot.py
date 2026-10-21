@@ -191,6 +191,25 @@ def _strip_leading_emoji_text(text, ch):
         return text
     if text.startswith(ch):
         return text[len(ch):].lstrip()
+    # FE0F twin at start
+    n = ch.replace("\ufe0f", "").replace("️", "")
+    if n and text.startswith(n):
+        return text[len(n):].lstrip()
+    if n and text.startswith(n + "️"):
+        return text[len(n)+1:].lstrip()
+    return text
+
+def _strip_emoji_once(text, ch):
+    """Remove first occurrence of emoji (or FE0F twin) from text — used when icon id
+    comes from a non-leading emoji in the label (e.g. heart inside TikTok pack label)."""
+    if not text or not ch:
+        return text
+    for v in (ch, ch.replace("\ufe0f", "").replace("️", ""), ch + "️"):
+        if not v:
+            continue
+        i = text.find(v)
+        if i >= 0:
+            return (text[:i] + text[i + len(v):]).replace("  ", " ").strip()
     return text
 
 class InlineKeyboardButton(_IKB_orig):
@@ -215,7 +234,18 @@ class InlineKeyboardButton(_IKB_orig):
         if eid:
             d["icon_custom_emoji_id"] = eid
             if "text" in d:
-                d["text"] = _strip_leading_emoji_text(d["text"], self._emoji_char)
+                # Strip the emoji we turned into an icon (leading, or first match for explicit id)
+                stripped = _strip_leading_emoji_text(d["text"], self._emoji_char)
+                if stripped == d["text"] and self._emoji_char:
+                    stripped = _strip_emoji_once(d["text"], self._emoji_char)
+                # If emoji_id was set for a different char than leading, try strip by map reverse
+                if stripped == d["text"]:
+                    for k, v in EMOJI_MAP.items():
+                        if v and str(v) == str(eid):
+                            stripped = _strip_emoji_once(d["text"], k)
+                            if stripped != d["text"]:
+                                break
+                d["text"] = stripped or d["text"]
         return d
 
 # ⚠️ កំណត់ត្រា (កែនៅ 2026-08-06 លើកទី ២): ការយល់ដឹងមុននេះខុស — Telegram
@@ -4399,6 +4429,48 @@ def admin_bal_amt_kb(target, kind):
         callback_data=f"balamt:{kind}:{target}:custom", color="progress")])
     return InlineKeyboardMarkup(btns)
 
+
+def _first_premium_in_text(text):
+    """Return (char, custom_emoji_id) for the first emoji in text that has a premium id set.
+    Prefer leftmost occurrence in the label so the icon matches what users see first."""
+    if not text:
+        return None, None
+    best = None  # (pos, ch, eid)
+    for ch in _EMOJI_CHARS_SORTED:
+        try:
+            eid = _lookup_emoji_id(ch)
+        except Exception:
+            eid = EMOJI_MAP.get(ch)
+        if not eid:
+            n = ch.replace("\ufe0f", "").replace("️", "")
+            for k, v in EMOJI_MAP.items():
+                if v and k.replace("\ufe0f", "").replace("️", "") == n:
+                    eid = v
+                    break
+        if not eid:
+            continue
+        # find earliest position of ch or FE0F twin
+        pos = -1
+        for v in {ch, ch.replace("\ufe0f", ""), ch + "️"}:
+            if not v:
+                continue
+            i = text.find(v)
+            if i >= 0 and (pos < 0 or i < pos):
+                pos = i
+        if pos >= 0:
+            if best is None or pos < best[0]:
+                best = (pos, ch, str(eid))
+    if best:
+        return best[1], best[2]
+    return None, None
+
+def _ikb_premium(label, **kwargs):
+    """InlineKeyboardButton with best available premium icon from label text."""
+    ch, eid = _first_premium_in_text(label)
+    if eid:
+        return InlineKeyboardButton(label, emoji_id=eid, **kwargs)
+    return InlineKeyboardButton(label, **kwargs)
+
 def smm_cat_kb():
     PLATFORM_ICONS = {
         "tiktok khmer": "🇰🇭",
@@ -4409,16 +4481,18 @@ def smm_cat_kb():
     cats = _smm_get_categories()
     btns = []
     for cat in cats:
-        # បើ cat ចាប់ផ្តើមដោយ emoji ស្រាប់ (ឧ. "🇰🇭 TikTok Khmer") កុំបន្ថែម icon
-        # ថ្មីទៀត — ការពារ icon ស្ទួន (ឧ. 🇰🇭🇰🇭) ដែលធ្លាប់កើតឡើងពីមុន
         if _leading_emoji(cat):
-            btns.append([InlineKeyboardButton(cat, callback_data=f"smmcat:{cat}", color="active")])
-            continue
-        icon = "📱"
-        for key, ico in PLATFORM_ICONS.items():
-            if key in cat.lower(): icon = ico; break
-        btns.append([InlineKeyboardButton(f"{icon}  {cat}", callback_data=f"smmcat:{cat}", color="active")])
-    btns.append([InlineKeyboardButton("🔙 Back", callback_data="back:main", color="inactive")])
+            label = cat
+        else:
+            icon = "📱"
+            for key, ico in PLATFORM_ICONS.items():
+                if key in cat.lower():
+                    icon = ico
+                    break
+            label = f"{icon}  {cat}"
+        # Use first *configured* premium emoji in label as button icon
+        btns.append([_ikb_premium(label, callback_data=f"smmcat:{cat}", color="active")])
+    btns.append([_ikb_premium("🔙 Back", callback_data="back:main", color="inactive")])
     return InlineKeyboardMarkup(btns)
 
 def smm_svc_kb(cat):
@@ -4431,16 +4505,16 @@ def smm_svc_kb(cat):
     btns = []
     for slug, s in svcs:
         label = s.get("label", slug)
-        # បើ label ចាប់ផ្តើមដោយ emoji ស្រាប់ (ឧ. "🇰🇭 ❤️ 500-1K...") កុំបន្ថែម
-        # icon ថ្មីទៀត — ការពារ icon ស្ទួន (ឧ. 👁️👁️) ដែលធ្លាប់កើតឡើងពីមុន
-        if _leading_emoji(label):
-            btns.append([InlineKeyboardButton(label, callback_data=f"smmsvc:{slug}", color="active")])
-            continue
-        icon = "⚡"
-        for key, ico in SVC_ICONS.items():
-            if key in label.lower(): icon = ico; break
-        btns.append([InlineKeyboardButton(f"{icon}  {label}", callback_data=f"smmsvc:{slug}", color="active")])
-    btns.append([InlineKeyboardButton("🔙 Back", callback_data="back:smmcats", color="inactive")])
+        if not _leading_emoji(label):
+            icon = "⚡"
+            for key, ico in SVC_ICONS.items():
+                if key in label.lower():
+                    icon = ico
+                    break
+            label = f"{icon}  {label}"
+        # Prefer premium icon for ❤️ / 👁️ / 👤 / 🇰🇭 whichever admin has set
+        btns.append([_ikb_premium(label, callback_data=f"smmsvc:{slug}", color="active")])
+    btns.append([_ikb_premium("🔙 Back", callback_data="back:smmcats", color="inactive")])
     return InlineKeyboardMarkup(btns)
 
 def smm_qty_kb(slug, s, uid=None):
