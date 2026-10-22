@@ -4249,18 +4249,12 @@ def _send_deposit_qr_aba(uid, amount, promo_code_name=None, bonus=0.0, promo_bon
                     break
 
     kb_pay = None
-    if aba_https or pay_url:
+    if aba_https:
         kb_pay = InlineKeyboardMarkup()
-        if aba_https:
-            try:
-                kb_pay.add(InlineKeyboardButton("🏦 OPEN ABA Mobile", url=aba_https, color="active"))
-            except TypeError:
-                kb_pay.add(InlineKeyboardButton("🏦 OPEN ABA Mobile", url=aba_https))
-        if pay_url:
-            try:
-                kb_pay.add(InlineKeyboardButton("🌐 បើកទំព័រទូទាត់", url=pay_url, color="progress"))
-            except TypeError:
-                kb_pay.add(InlineKeyboardButton("🌐 បើកទំព័រទូទាត់", url=pay_url))
+        try:
+            kb_pay.add(InlineKeyboardButton("🏦 OPEN ABA Mobile", url=aba_https, color="active"))
+        except TypeError:
+            kb_pay.add(InlineKeyboardButton("🏦 OPEN ABA Mobile", url=aba_https))
 
     photo_payload = None
     if card_image:
