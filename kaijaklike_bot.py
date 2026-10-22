@@ -948,7 +948,7 @@ def _strip_markup_icons(markup):
         pass
     return markup
 
-_EMOJI_ERROR_HINTS = ("EMOJI", "ICON", "PREMIUM", "STICKER")
+_EMOJI_ERROR_HINTS = ("EMOJI", "ICON", "PREMIUM", "STICKER", "ENTITY_TEXT_INVALID")
 
 def _looks_emoji_related(exc):
     return any(h in str(exc).upper() for h in _EMOJI_ERROR_HINTS)
@@ -1023,6 +1023,10 @@ def _wrap_safe_call(fn, text_kw=None, text_pos=None):
                 raise
             logger.warning(f"⚠️ Premium emoji/icon rejected by Telegram — fallback unicode: {e}")
             # Retry 1: keep caption/text premium, strip button icons only
+            # FIX: ENTITY_TEXT_INVALID -> resend without premium-emoji entities (plain emoji)
+            for _k in ("entities", "caption_entities"):
+                if kwargs.get(_k):
+                    kwargs[_k] = None
             _strip_markup_icons(markup)
             try:
                 return fn(*args, **kwargs)
