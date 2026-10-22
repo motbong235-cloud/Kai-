@@ -3567,7 +3567,10 @@ def has_aba_payway():
 def _aba_create(uid, amount, username, _attempt=1):
     """Create ABA PayWay payment (KHMER SYSTEM) — returns response dict ពេលជោគជ័យ
     (keys ប្រហែល: payment_id, qr_image/card_image, pay_url, qr_string...), ឬ None ពេលបរាជ័យ
-    (មើល _last_aba_error សម្រាប់មូលហេតុ)"""
+    (មើល _last_aba_error សម្រាប់មូលហេតុ)
+
+    khmer-system.com ជួនកាលឆ្លើយយឺត → timeout 60s + retry 3 ដង (ReadTimeout / 5xx).
+    """
     global _last_aba_error
     api_key      = _effective_aba_key()
     merchant_id  = _effective_aba_merchant()
@@ -3575,6 +3578,9 @@ def _aba_create(uid, amount, username, _attempt=1):
         _last_aba_error = "ABA_API_KEY / ABA_MERCHANT_ID មិនបានកំណត់ (env var ឬ Settings → ABA PayWay Key)"
         logger.error(f"[aba_create] {_last_aba_error}")
         return None
+    # (connect timeout, read timeout) — provider sometimes slow
+    _timeout = (10, int(os.getenv("ABA_READ_TIMEOUT", "60") or 60))
+    _max_try = int(os.getenv("ABA_CREATE_RETRIES", "3") or 3)
     try:
         r = http.post(
             ABA_CREATE_URL,
@@ -3584,35 +3590,55 @@ def _aba_create(uid, amount, username, _attempt=1):
                 "username":    username,
                 "amount":      round(float(amount), 2),
             },
-            headers={"Content-Type": "application/json", "Accept": "application/json"},
-            timeout=20,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                ),
+            },
+            timeout=_timeout,
         )
-        logger.info(f"[aba_create] uid={uid} HTTP {r.status_code}")
+        logger.info(f"[aba_create] uid={uid} attempt={_attempt} HTTP {r.status_code}")
         try:
             data = r.json()
         except Exception:
             body = r.text.strip()
             _last_aba_error = f"HTTP {r.status_code} (non-JSON): {_tg_escape(body, 200)}"
             logger.error(f"[aba_create] {_last_aba_error}")
-            if r.status_code >= 500 and _attempt < 2:
-                time.sleep(1.5)
-                return _aba_create(uid, amount, username, _attempt=2)
+            if r.status_code >= 500 and _attempt < _max_try:
+                time.sleep(1.5 * _attempt)
+                return _aba_create(uid, amount, username, _attempt=_attempt + 1)
             return None
-        logger.info(f"[aba_create] resp={data}")
+        # log without huge image fields
+        _log = {k: v for k, v in (data or {}).items() if k not in ("qr_image", "card_image", "qr")}
+        if data and (data.get("qr_image") or data.get("card_image")):
+            _log["has_image"] = True
+        logger.info(f"[aba_create] resp={_log}")
         if data.get("ok"):
             return data
         _last_aba_error = f"HTTP {r.status_code} [{data.get('code', '?')}]: {data.get('message') or data}"
         logger.error(f"[aba_create] failed: {_last_aba_error}")
-        if r.status_code >= 500 and _attempt < 2:
-            time.sleep(1.5)
-            return _aba_create(uid, amount, username, _attempt=2)
+        if r.status_code >= 500 and _attempt < _max_try:
+            time.sleep(1.5 * _attempt)
+            return _aba_create(uid, amount, username, _attempt=_attempt + 1)
         return None
     except Exception as e:
         _last_aba_error = f"{type(e).__name__}: {e}"
-        logger.error(f"[aba_create] exception: {e}")
-        if _attempt < 2:
-            time.sleep(1.5)
-            return _aba_create(uid, amount, username, _attempt=2)
+        logger.error(f"[aba_create] exception attempt={_attempt}: {e}")
+        # Retry on timeout / connection errors
+        _retryable = (
+            "Timeout" in type(e).__name__
+            or "timeout" in str(e).lower()
+            or "Connection" in type(e).__name__
+        )
+        if _retryable and _attempt < _max_try:
+            time.sleep(2.0 * _attempt)
+            return _aba_create(uid, amount, username, _attempt=_attempt + 1)
+        if _attempt < _max_try:
+            time.sleep(1.5 * _attempt)
+            return _aba_create(uid, amount, username, _attempt=_attempt + 1)
         return None
 
 def _aba_check_detail(payment_id) -> dict:
@@ -3625,8 +3651,12 @@ def _aba_check_detail(payment_id) -> dict:
             ABA_CHECK_URL,
             json={"api_key": _effective_aba_key(), "merchant_id": _effective_aba_merchant(),
                   "payment_id": payment_id},
-            headers={"Content-Type": "application/json", "Accept": "application/json"},
-            timeout=10,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0 (compatible; KaiBot/1.0)",
+            },
+            timeout=(8, 25),
         )
         data = r.json() if r.content else {}
         out["raw"] = data if isinstance(data, dict) else {}
