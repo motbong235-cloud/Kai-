@@ -4079,98 +4079,155 @@ def _send_deposit_qr(uid, amount, promo_code=None, label="💸 ដាក់ល�
                              parse_mode="HTML", reply_markup=cancel_kb())
         return
 
-    uid_str       = str(uid)
-    promo_applied = promo_code_name
-    reference     = f"KZ{uid}_{int(time.time())}"[:50]
 
-    # ── ជូនដំណឹង User ថាកំពុងបង្កើត QR (CamRapidPay API អាចចំណាយពេលបន្តិច) ──
+    # Unknown / removed method (CamRapidPay removed)
+    bot.send_message(
+        uid,
+        "⚠️ វិធីទូទាត់នេះមិនអាចប្រើបានទេ។ សូមជ្រើស <b>ABA PayWay</b> ឬ <b>KHPAY</b>។",
+        parse_mode="HTML",
+    )
+    return
+
+
+
+def _send_deposit_qr_aba(uid, amount, promo_code_name=None, bonus=0.0, promo_bonus=0.0, auto_bonus=0.0):
+    """Create ABA PayWay (KHMER SYSTEM) payment QR and send to user."""
+    uid_str = str(uid)
+    promo_applied = promo_code_name
     _gen_msg = None
     try:
-        _gen_msg = bot.send_message(uid, "⏳ <b>កំពុងបង្កើត QR...</b>\nសូមរង់ចាំបន្តិច",
-                                    parse_mode="HTML")
-    except Exception as _e: logger.debug(f"[silent] {_e}")
+        _gen_msg = bot.send_message(uid, "⏳ <b>កំពុងបង្កើត QR (ABA PayWay)...</b>", parse_mode="HTML")
+    except Exception as _e:
+        logger.debug(f"[silent] {_e}")
 
-    # Call CamRapidPay API to create KHQR
-    resp = _camrapid_create(uid, amount, reference)
-    if not resp:
+    username = ""
+    try:
+        u = users.get(uid_str) or {}
+        username = (u.get("username") or u.get("name") or f"tg{uid}")[:40]
+    except Exception:
+        username = f"tg{uid}"
+
+    data = _aba_create(uid, amount, username)
+    if not data:
         if _gen_msg:
-            try: bot.delete_message(uid, _gen_msg.message_id)
-            except Exception as _e: logger.debug(f"[silent] {_e}")
-        bot.send_message(uid, "⚠️ <b>មានបញ្ហា Generate QR!</b>\nសូមព្យាយាមម្តងទៀត ឬ ទំនាក់ Admin",
-                         parse_mode="HTML")
+            try:
+                bot.delete_message(uid, _gen_msg.message_id)
+            except Exception:
+                pass
+        err = globals().get("_last_aba_error") or "unknown"
+        bot.send_message(
+            uid,
+            "⚠️ <b>មិនអាចបង្កើត QR បានទេ</b>\n"
+            f"<code>{_tg_escape(str(err), 200)}</code>\n"
+            "សូមទំនាក់ Admin ឬព្យាយាមម្តងទៀត។",
+            parse_mode="HTML",
+        )
+        try:
+            pnotify(
+                f"⚠️ <b>ABA QR បរាជ័យ</b>\n👤 <code>{uid_str}</code> — ${amount:.2f}\n"
+                f"🔎 <code>{_tg_escape(str(err), 400)}</code>"
+            )
+        except Exception:
+            pass
         return
 
-    qr_str      = resp.get("qr_code", "")
-    payment_url = resp.get("payment_url", "")
+    payment_id = (
+        data.get("payment_id")
+        or data.get("tran_id")
+        or data.get("transaction_id")
+        or data.get("id")
+        or ""
+    )
+    card_image = (
+        data.get("card_image")
+        or data.get("qr_image")
+        or data.get("qrImage")
+        or data.get("image")
+        or ""
+    )
+    pay_url = data.get("pay_url") or data.get("payment_url") or data.get("checkout_url") or ""
+    aba_app_link = _build_aba_app_deeplink(data) if "_build_aba_app_deeplink" in globals() else None
+    if not aba_app_link:
+        aba_app_link = (
+            data.get("abapay_deeplink")
+            or data.get("aba_deeplink")
+            or data.get("deeplink")
+            or data.get("deep_link")
+            or ""
+        )
 
+    reference = str(payment_id or f"ABA{uid}_{int(time.time())}")[:50]
     dep_id = f"dep_{uid}_{int(time.time())}"
     smm_deps[dep_id] = {
-        "uid":         uid_str,
-        "amount":      amount,
-        "status":      "pending",
-        "bonus":       bonus,
+        "uid": uid_str,
+        "amount": amount,
+        "status": "pending",
+        "bonus": bonus,
         "promo_bonus": promo_bonus,
-        "auto_bonus":  auto_bonus,
-        "promo":       promo_applied or "",
-        "reference":   reference,
-        "payment_url": payment_url,
-        "created_ts":  time.time(),
+        "auto_bonus": auto_bonus,
+        "promo": promo_applied or "",
+        "reference": reference,
+        "payment_url": pay_url or "",
+        "method": "aba",
+        "created_ts": time.time(),
     }
     _save(SMM_DEP_FILE, smm_deps)
 
-    # ចំណាំ: Promo Code មិន confirm_promo() (consume) នៅទីនេះទេ — រង់ចាំរហូតដល់ Payment
-    # ពិតជាបានបញ្ជាក់ (_watch_deposit / Admin manual confirm) ដើម្បីកុំឲ្យ User ខាត Promo Code
-    # ដោយឥតបានការ បើ QR ផុតកំណត់ ឬ User មិនបានបង់ប្រាក់ជាដុំ។
-
-    # Caption text (shown below card photo)
-    ref_short = reference[-12:] if len(reference) > 12 else reference
     bonus_bits = []
     if promo_bonus > 0:
         bonus_bits.append(f"🎟️ Promo Bonus: <b>+${promo_bonus:.2f}</b> ({promo_applied})")
     if auto_bonus > 0:
-        bonus_bits.append(f"🎁 Auto Bonus ({dep_bonus_cfg.get('pct',5):.0f}%): <b>+${auto_bonus:.2f}</b>")
+        bonus_bits.append(
+            f"🎁 Auto Bonus ({dep_bonus_cfg.get('pct', 5):.0f}%): <b>+${auto_bonus:.2f}</b>"
+        )
     bonus_line = ("\n" + "\n".join(bonus_bits)) if bonus_bits else ""
+    ref_short = reference[-12:] if len(reference) > 12 else reference
+    expire_min = max(1, int(globals().get("DEPOSIT_EXPIRE_SEC", 3600) // 60))
     cap = (
         f"💳 <b>ABA PayWay — បញ្ចូលលុយ</b>{bonus_line}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"💰 ចំនួន: <b>${amount:.2f}</b>\n"
         f"🔖 Ref: <code>{ref_short}</code>\n"
-        f"⏱ ផុតកំណត់: <b>5 នាទី</b>\n"
+        f"⏱ ផុតកំណត់: <b>{expire_min} នាទី</b>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"✅ ស្កេន QR ឬចុច «OPEN ABA Mobile»\n"
         f"<i>Balance នឹងចូលស្វ័យប្រវត្តិបន្ទាប់ពីបង់ជោគជ័យ</i>"
     )
 
-    # ⚠️ Telegram Bot API only accepts http(s):// or tg:// URLs on inline-button `url`
-    # fields — custom app schemes like abamobilebank:// are rejected outright with
-    # "Bad Request: ... Unsupported URL protocol", which crashes the whole send here.
-    # So _build_aba_app_deeplink()'s custom-scheme fallback is only usable for a button
-    # when khmer-system.com happens to return an http(s) wrapper link; otherwise we
-    # silently drop the button (the QR image/pay_url are still enough for the user).
-    # Telegram មិនទទួល abamobilebank:// — ប្រើ /open-aba → ចូល ABA Pay screen
     aba_https = None
     if aba_app_link:
-        if aba_app_link.lower().startswith(("http://", "https://", "tg://")):
-            aba_https = aba_app_link
+        link = str(aba_app_link).strip()
+        if link.lower().startswith(("http://", "https://", "tg://")):
+            aba_https = link
         else:
-            aba_https = _aba_mobile_https_link(aba_app_link)
+            try:
+                aba_https = _aba_mobile_https_link(link)
+            except Exception:
+                aba_https = None
     if not aba_https:
         for _k in ("qr_string", "qrString", "qr_code", "qr"):
             if data.get(_k):
-                aba_https = _aba_mobile_https_link(data.get(_k))
-                break
+                try:
+                    aba_https = _aba_mobile_https_link(data.get(_k))
+                except Exception:
+                    aba_https = None
+                if aba_https:
+                    break
 
     kb_pay = None
     if aba_https or pay_url:
         kb_pay = InlineKeyboardMarkup()
         if aba_https:
-            kb_pay.add(InlineKeyboardButton("🏦 OPEN ABA Mobile", url=aba_https, color="active"))
+            try:
+                kb_pay.add(InlineKeyboardButton("🏦 OPEN ABA Mobile", url=aba_https, color="active"))
+            except TypeError:
+                kb_pay.add(InlineKeyboardButton("🏦 OPEN ABA Mobile", url=aba_https))
         if pay_url:
-            kb_pay.add(InlineKeyboardButton("🌐 បើកទំព័រទូទាត់", url=pay_url, color="progress"))
+            try:
+                kb_pay.add(InlineKeyboardButton("🌐 បើកទំព័រទូទាត់", url=pay_url, color="progress"))
+            except TypeError:
+                kb_pay.add(InlineKeyboardButton("🌐 បើកទំព័រទូទាត់", url=pay_url))
 
-    # khmer-system.com ត្រឡប់ card_image ជា http(s) URL ធម្មតា ឬ base64 string (មានពេលមាន
-    # prefix "data:image/...;base64," មានពេលគ្មាន) — ត្រូវ decode ជា raw bytes មុននឹងផ្ញើ
-    # ដើម្បីកុំឲ្យ Telegram បដិសេធជា "MESSAGE_TOO_LONG" ពេល string វែងពេក។
     photo_payload = None
     if card_image:
         img_str = str(card_image).strip()
@@ -4186,8 +4243,10 @@ def _send_deposit_qr(uid, amount, promo_code=None, label="💸 ដាក់ល�
                 photo_payload = None
 
     if _gen_msg:
-        try: bot.delete_message(uid, _gen_msg.message_id)
-        except Exception as _e: logger.debug(f"[silent] {_e}")
+        try:
+            bot.delete_message(uid, _gen_msg.message_id)
+        except Exception as _e:
+            logger.debug(f"[silent] {_e}")
 
     sent_ok = False
     if photo_payload:
@@ -4197,22 +4256,44 @@ def _send_deposit_qr(uid, amount, promo_code=None, label="💸 ដាក់ល�
         except Exception as e:
             logger.warning(f"[deposit_qr_aba] send_photo failed: {e}")
     if not sent_ok:
-        bot.send_message(uid, cap, parse_mode="HTML", reply_markup=kb_pay)
+        # try build QR from string fields
+        qr_str = data.get("qr_string") or data.get("qrString") or data.get("qr_code") or data.get("qr") or ""
+        if qr_str and not str(qr_str).startswith("http"):
+            try:
+                import qrcode
+                img = qrcode.make(str(qr_str))
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                buf.seek(0)
+                bot.send_photo(uid, buf, caption=cap, parse_mode="HTML", reply_markup=kb_pay)
+                sent_ok = True
+            except Exception as e:
+                logger.warning(f"[deposit_qr_aba] qrcode fallback: {e}")
+        if not sent_ok:
+            bot.send_message(uid, cap, parse_mode="HTML", reply_markup=kb_pay)
 
     if not payment_id:
-        bot.send_message(uid, "⚠️ <b>ABA PayWay មិនបាន Return payment_id!</b>\nសូមទំនាក់ Admin ជូនវិក័យប័ត្រផ្ទាល់",
-                         parse_mode="HTML")
+        bot.send_message(
+            uid,
+            "⚠️ <b>ABA PayWay មិនបាន Return payment_id!</b>\nសូមទំនាក់ Admin",
+            parse_mode="HTML",
+        )
         return
 
     try:
         pnotify(
             f"🆕 <b>QR ត្រូវបានបង្កើត (ABA PayWay)</b>\n👤 <code>{uid_str}</code>\n"
-            f"💵 ${amount:.2f}\n🔖 <code>{payment_id}</code>")
-    except Exception as _e: logger.debug(f"[silent] {_e}")
+            f"💵 ${amount:.2f}\n🔖 <code>{payment_id}</code>"
+        )
+    except Exception as _e:
+        logger.debug(f"[silent] {_e}")
 
-    threading.Thread(target=_watch_deposit,
-                     args=(uid, uid_str, dep_id, amount, reference),
-                     kwargs={"checker": _aba_check}, daemon=True).start()
+    threading.Thread(
+        target=_watch_deposit,
+        args=(uid, uid_str, dep_id, amount, reference),
+        kwargs={"checker": _aba_check},
+        daemon=True,
+    ).start()
 
 
 def _send_deposit_qr_khpay(uid, amount, promo_code_name=None, bonus=0.0, promo_bonus=0.0, auto_bonus=0.0):
