@@ -1,0 +1,76 @@
+# KaiJakLike Bot + KaiPay — Render Blueprint
+# Dashboard: New → Blueprint → connect repo containing this file
+# Or paste services manually.
+
+services:
+  # ── 1) KaiJakLike Telegram Bot ───────────────────────────
+  - type: web
+    name: kaijaklike-bot
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: pip install -r requirements.txt
+    startCommand: python kaijaklike_bot.py
+    healthCheckPath: /health
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_ID
+        sync: false
+      - key: KAIPAY_URL
+        sync: false
+      - key: KAIPAY_API_KEY
+        sync: false
+      - key: CONTROL_KEY
+        generateValue: true
+      - key: BOT_DISPLAY_NAME
+        value: KaiJakLike
+      - key: DEP_QR_COOLDOWN_SEC
+        value: "15"
+      # Optional ABA PayWay (KHMER SYSTEM)
+      - key: ABA_API_KEY
+        sync: false
+      - key: ABA_MERCHANT_ID
+        sync: false
+      # Optional Bakong deep link
+      - key: BAKONG_API_TOKEN
+        sync: false
+      - key: PYTHON_VERSION
+        value: "3.11.0"
+
+  # ── 2) KaiPay (payment API website) ──────────────────────
+  - type: web
+    name: kaipay
+    runtime: python
+    plan: free
+    region: singapore
+    rootDir: kaipay
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    healthCheckPath: /health
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: BAKONG_TOKEN
+        sync: false
+      - key: BAKONG_ACCOUNT_ID
+        sync: false
+      - key: BAKONG_MERCHANT_NAME
+        value: KaiPay
+      - key: BAKONG_MERCHANT_CITY
+        value: Phnom Penh
+      - key: BAKONG_CURRENCY
+        value: USD
+      - key: QR_PER_USD
+        value: "300"
+      - key: MIN_TOPUP_USD
+        value: "1"
+      - key: FREE_QR_ON_SIGNUP
+        value: "0"
+      - key: PYTHON_VERSION
+        value: "3.11.0"
+# Optional notify bots (persist across restarts):
+# ORDER_BOT_TOKEN=
+# PAY_BOT_TOKEN=
+# ORDER_BOT_CHAT_ID=   # optional group/user id
+# PAY_BOT_CHAT_ID=

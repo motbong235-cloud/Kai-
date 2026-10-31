@@ -1,0 +1,12175 @@
+import os
+"""
+╔══════════════════════════════════════════════════════════════╗
+║     Kaijaklike Bot — カイロゼン SMM  [v11]                ║
+║     SMM Panel · ដាក់លុយ ABA PayWay + KHPAY + Manual QR       ║
+║     Panel Admin · បន្ថែម/កាត់ Balance                       ║
+║     Compatible: Python 3.10+ · Termux / Render / VPS       ║
+║     v10: /newbot — បង្កើត Bot ថ្មីដោយផ្ទាល់ខាងក្នុង Telegram  ║
+║          /mybots — គ្រប់គ្រង Bot រងទាំងអស់ (start/stop/del)  ║
+╚══════════════════════════════════════════════════════════════╝
+ដំឡើង:
+  pip install pyTelegramBotAPI requests flask qrcode pillow --break-system-packages
+"""
+
+import json, logging, time, re, threading, io, os, sys, subprocess, datetime, base64
+import shutil
+import zipfile
+from decimal import Decimal as _Decimal, ROUND_HALF_UP as _ROUND_HALF_UP
+import requests as http_req
+from dotenv import load_dotenv
+load_dotenv()
+import telebot
+from telebot import apihelper as _apihelper
+# ── Retry លំនាំដើមរបស់ telebot គ្មាន retry លើ connection error ទេ (ខុសពី
+# `http` session ខាងក្រោមដែលមាន Retry+backoff រួចហើយ) — នេះជាមូលហេតុចម្បង
+# នៃ "Connection aborted / RemoteDisconnected" ពេល Render ខាត់ connection
+# ចោលភ្លាមៗពេលកំពុង bot.send_message/send_photo ។ បើក RETRY_ON_ERROR ដើម្បីឲ្យ
+# telebot ខ្លួនឯង retry ស្វ័យប្រវត្តិមុននឹង raise exception ចេញទៅ handler ។
+_apihelper.RETRY_ON_ERROR = True
+_apihelper.CONNECT_TIMEOUT = 15
+_apihelper.READ_TIMEOUT   = 20
+from telebot.types import (
+    ReplyKeyboardMarkup, KeyboardButton as _KB_orig,
+    InlineKeyboardMarkup, InlineKeyboardButton as _IKB_orig,
+    MessageEntity as _MessageEntity
+)
+import re as _re
+
+# ── Colored / Premium-emoji buttons (Telegram Bot API 9.4+) ───────────────
+# Injects 'style' + 'icon_custom_emoji_id' into JSON so any pyTelegramBotAPI
+# version works, regardless of whether the installed lib already knows them.
+#
+# ⚠️ សំខាន់ (រកឃើញនិងកែនៅ 2026-08-06): Telegram Bot API 9.4 កំណត់ត្រឹមតែ
+#    field ឈ្មោះ "style" ប៉ុណ្ណោះ (មិនមែន "color" ទេ) ហើយតម្លៃត្រូវជា
+#    "danger" (ក្រហម) | "primary" (ខៀវ) | "success" (បៃតង) ប៉ុណ្ណោះ។
+#    កូដចាស់ប្រើ field ឈ្មោះ "color" ខុស + តម្លៃប្រឌិតឡើងផ្ទាល់ខ្លួន
+#    ("active"/"inactive"/"progress") ដែល Telegram មិនស្គាល់ទាល់តែសោះ —
+#    មានន័យថា ពណ៌ button មិនដែលដំណើរការជាក់ស្តែងទេ តាំងពីដើមមក។
+#    _COLOR_MAP ខាងក្រោមបកប្រែឈ្មោះ semantic ចាស់ (ប្រើពាសពេញកូដរាប់រយកន្លែង)
+#    ទៅជាតម្លៃ enum ត្រឹមត្រូវ ដោយមិនចាំបាច់កែ call site ណាមួយឡើយ។
+_COLOR_MAP = {
+    "active":   "success",   # បៃតង — action ធម្មតា/ជ្រើសរើសបាន
+    "progress": "primary",   # ខៀវ — highlighted / ជំហានបន្ទាប់ / custom
+    "danger":   "danger",    # ក្រហម — លុប/បដិសេធ (បើប្រើផ្ទាល់)
+    "inactive": None,        # គ្មាន style ពិសេស — មើលទៅដូច button ធម្មតា
+    "default":  None,
+}
+def _to_style(color):
+    if not color:
+        return None
+    return _COLOR_MAP.get(color, color if color in ("danger", "primary", "success") else None)
+# គំនិត: លែងត្រូវចងចាំ "semantic key" ដូចមុនទៀតហើយ (account/topup/...) —
+# ឥឡូវ key គឺជា emoji unicode character ពិតដែលប្រើក្នុង bot (👤 💸 🛒 ...).
+# តម្លៃ = custom_emoji_id (premium) បើកំណត់រួច, None = មិនទាន់មាន → fallback
+# ទៅ unicode emoji ធម្មតា។ EMOJI_MAP គ្របដណ្តប់គ្រប់ jang emoji ដែលប្រើក្នុង
+# ⇒ reply-keyboard buttons, inline buttons, និង អត្ថបទសារ (message text) ទាំងអស់។
+# របៀបកំណត់: /setemojis (reply ទៅសារណាមួយមាន premium emoji, លំដាប់ណាក៏បាន —
+# bot ស្គាល់ automatically តាម emoji ធម្មតាដែលនៅក្រោម premium icon នីមួយៗ)
+# ចំណាំ: កុំកសាង list នេះឡើងវិញដោយ iterate លើ string តែមួយបន្ត — flag emoji
+# (🇰🇭 ។ល។) និង variation-selector emoji (✏️ ។ល។) មាន 2 code points/តួ ដូច្នេះ
+# ត្រូវសរសេរជា element ដាច់ពីគ្នាក្នុង list ដូចខាងក្រោម ដើម្បីកុំឲ្យខូច។
+_EMOJI_CHAR_LIST = [
+    '🇰🇭', '🇬🇧', '🇺🇸', '❌', '✅', '💰', '→', '👤', '📊', '💳',
+    '✏️', '📋', '💸', '⚠️', '🚫', '💡', '📝', '🗑️', '👥', '❤️',
+    '👁️', '🔗', '🛒', '🔍', '💬', '🔢', '🎟️', '📂', '📦', '💔',
+    '🔄', '🔑', '💵', '🌐', '🙏', '📢', '🤖', '😊', '⚙️', '🔙',
+    '💙', '➕', '✍️', '🔔', '🎵', '📱', '🟢', '🔴', '🛑', '✕',
+    '👈', '🏠', '🎉', '📌', '💹', '🧪', '🐦', '👋', '👇', '❓',
+    '🖼️', '📘', '📸', '⚡', '📭', '📞', '🔖', '👜', '🙍', '🛠️',
+    '★', '🎁', '🧵', '👀', '😍', '🛡️', '📏', '📎', '🔓', '⬅️',
+    '✨', '➡️', '🔌', '🔵', '🟡', '📤', '🔕', '📁', '🚀', '←',
+    '⏱', '🆔', '▶️', '🏦',
+    # ⚠️ បន្ថែម 2026-08-17 — Emoji ថ្មីៗពី feature ថ្មីៗ (Daily Report, Preview,
+    # Top Services, Backup, Profit Report, Manual Deposit) ដែលមុននេះមិនស្ថិត
+    # ក្នុងបញ្ជីនេះទេ ធ្វើឲ្យមិនអាចប្តូរជា Premium Emoji បាន — រកឃើញដោយស្កេន
+    # ប៊ូតុងទាំងអស់ក្នុងកូដ ធៀបនឹងបញ្ជីនេះ។
+    '⏰', '🎨', '🏆', '💾', '📈', '📷', '🧾',
+    # ⚠️ បន្ថែម 2026-08-31 — ស្កេនប៊ូតុងទាំងអស់ម្តងទៀត រកឃើញ emoji ថ្មីៗពី
+    # feature ថ្មីៗ (បិទ/បើកវិធីទូទាត់, QR Cooldown, ប្តូរ Step ទូទាត់,
+    # Manual QR) ដែលមិនធ្លាប់នៅក្នុងបញ្ជីនេះ — ធ្វើឲ្យ Admin មិនអាចកំណត់
+    # ជា Premium Emoji បាន (គ្មានកន្លែង setup ក្នុង /setemojis grid)។
+    '🔀', '⏳', '🔁', '🖼',
+    '🕐', '♻️', '💲', '🧭', '⭐', '🌟', '🔥', '💎', '🪙',
+
+    # ⚠️ បន្ថែម 2026-09-09 — ស្កេនប៊ូតុង/សារទាំងអស់ម្តងទៀត (ដោយប្រៀបធៀប emoji
+    # ពិតប្រាកដទាំងអស់ក្នុងកូដ ធៀបនឹងបញ្ជីនេះ) រកឃើញ emoji ជាច្រើនកន្លែងដែល
+    # Admin កំណត់ custom premium emoji ហើយ ប៉ុន្តែមិនដែលបង្ហាញ ព្រោះ char
+    # ទាំងនោះមិនស្ថិតក្នុងបញ្ជីនេះទាល់តែសោះ (EMOJI_MAP គ្មាន key នេះ ⇒ /setemojis
+    # មិនអាចផ្តល់ជម្រើសកំណត់បាន ⇒ _emojify() រំលងវាជានិច្ច)។
+    '⭕', '🎬', '🏪', '👉', '📅', '📆', '📡', '📥', '🔎', '🔒',
+    '🔘', '🔧', '🕑', '👁', '🗓️', '🚨', '🥇', '🥈', '🥉', '✓', '⬜',
+    # ⚠️ បន្ថែម 2026-09-18 — ស្កេនប៊ូតុង/សារទាំងអស់ម្តងទៀត រកឃើញ emoji
+    # ដែលប្រើក្នុង UI ប៉ុន្តែមិនទាន់ស្ថិតក្នុងបញ្ជី (មិនអាចកំណត់ Premium Emoji):
+    # 🏷️ (បញ្ចុះតម្លៃ User), 🕒 (Auto Backup), និង keycap 0️⃣–9️⃣ (ជំហាន wizard /
+    # how-to / payment steps)។
+    '🏷️', '🕒', '🆕',
+    '0️⃣', '1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣',
+    # ⚠️ បន្ថែម 2026-10-20 — emoji ដែលប្រើក្នុង UI តែមិនទាន់ក្នុង map (KHPAY, mute, scroll, target)
+    '💠', '🔇', '📜', '🎯',
+]
+EMOJI_MAP = {ch: None for ch in _EMOJI_CHAR_LIST}
+
+def _valid_emoji_id(eid):
+    if eid is None:
+        return None
+    s = str(eid).strip()
+    if not s or s.lower() in ("none", "null", "0"):
+        return None
+    if s.isdigit() and len(s) >= 10:
+        return s
+    try:
+        n = int(float(s))
+        if n > 0:
+            return str(n)
+    except Exception:
+        pass
+    return s if len(s) >= 8 else None
+
+# ធ្វើ regex pattern មួយសម្រាប់ចាប់ emoji នៅដើម string (រួមទាំង variation
+# selector ﻿(\uFE0F) និង flag ២-តួ) ដើម្បីប្រើក្នុងការ auto-detect ខាងក្រោម។
+_EMOJI_CHARS_SORTED = sorted(EMOJI_MAP.keys(), key=len, reverse=True)
+_LEADING_EMOJI_RE = _re.compile(
+    "^(" + "|".join(_re.escape(c) for c in _EMOJI_CHARS_SORTED) + ")"
+)
+# Pattern ដូចគ្នា ប៉ុន្តែគ្មាន anchor '^' — ប្រើសម្រាប់ស្កេន emoji នៅកន្លែង
+# ណាមួយក៏បានក្នុង string (មិនមែនត្រឹមតែដើម) សម្រាប់ caption/សារវែងៗ។
+_EMOJI_ANY_RE = _re.compile(
+    "(" + "|".join(_re.escape(c) for c in _EMOJI_CHARS_SORTED) + ")"
+)
+
+def _entities_for_emoji_text(text):
+    """ត្រឡប់ list of MessageEntity(type='custom_emoji') សម្រាប់រាល់ emoji ក្នុង
+    text ណាដែលមាន custom_emoji_id កំណត់រួចនៅ EMOJI_MAP (កន្លែង /setemojis) —
+    emoji ណាមិនទាន់កំណត់ត្រូវទុកចោល (fallback ទៅ unicode ធម្មតាដដែល)។
+    គណនា offset/length ជា UTF-16 code units ដូចលក្ខណៈពិតរបស់ Telegram
+    MessageEntity (សំខាន់សម្រាប់ emoji ក្រៅ BMP)."""
+    if not text:
+        return []
+    entities, utf16_pos, idx = [], 0, 0
+    while idx < len(text):
+        m = _EMOJI_ANY_RE.match(text, idx)
+        if m:
+            ch = m.group(1)
+            length = len(ch.encode("utf-16-le")) // 2
+            eid = _lookup_emoji_id(ch)
+            if eid:
+                entities.append(_MessageEntity(type="custom_emoji", offset=utf16_pos,
+                                                length=length, custom_emoji_id=str(eid)))
+            utf16_pos += length
+            idx += len(ch)
+        else:
+            c = text[idx]
+            utf16_pos += len(c.encode("utf-16-le")) // 2
+            idx += 1
+    return entities
+
+def _norm_emoji(ch):
+    """Strip VS16 (U+FE0F) for tolerant key match."""
+    if not ch:
+        return ch
+    return ch.replace("\ufe0f", "").replace("️", "")
+
+def _lookup_emoji_id(ch):
+    """Resolve custom_emoji_id for a unicode emoji char (FE0F-tolerant)."""
+    if not ch:
+        return None
+    eid = _valid_emoji_id(EMOJI_MAP.get(ch))
+    if eid:
+        return eid
+    n = _norm_emoji(ch)
+    for k, v in EMOJI_MAP.items():
+        eid = _valid_emoji_id(v)
+        if not eid:
+            continue
+        if k == ch or _norm_emoji(k) == n:
+            return eid
+    return None
+
+def _leading_emoji(s):
+    """Leading emoji in EMOJI_MAP — FE0F-tolerant (⚙️ == ⚙)."""
+    if not s or not isinstance(s, str):
+        return None
+    m = _LEADING_EMOJI_RE.match(s)
+    if m:
+        return m.group(1)
+    for ch in _EMOJI_CHARS_SORTED:
+        if not ch:
+            continue
+        if s.startswith(ch):
+            return ch
+        nch = _norm_emoji(ch)
+        if nch and s.startswith(nch):
+            return ch
+    return None
+
+def _strip_leading_emoji_text(text, ch):
+    """ដកចេញ emoji ធម្មតា (ch) ពីដើម text បើ icon_custom_emoji_id ត្រូវបានប្រើ
+    ជំនួសរួចហើយ — បើមិនដូច្នេះទេ Telegram នឹងបង្ហាញទាំង icon premium (មុន
+    button) ព្រមទាំង emoji ធម្មតា (ក្នុង label) ក្នុងពេលតែមួយ ដែលមើលទៅដូចស្ទួន។"""
+    if not text or not isinstance(text, str) or not ch:
+        return text
+    if text.startswith(ch):
+        return text[len(ch):].lstrip()
+    # FE0F twin at start
+    n = ch.replace("\ufe0f", "").replace("️", "")
+    if n and text.startswith(n):
+        return text[len(n):].lstrip()
+    if n and text.startswith(n + "️"):
+        return text[len(n)+1:].lstrip()
+    return text
+
+def _strip_emoji_once(text, ch):
+    """Remove first occurrence of emoji (or FE0F twin) from text — used when icon id
+    comes from a non-leading emoji in the label (e.g. heart inside TikTok pack label)."""
+    if not text or not ch:
+        return text
+    for v in (ch, ch.replace("\ufe0f", "").replace("️", ""), ch + "️"):
+        if not v:
+            continue
+        i = text.find(v)
+        if i >= 0:
+            return (text[:i] + text[i + len(v):]).replace("  ", " ").strip()
+    return text
+
+class InlineKeyboardButton(_IKB_orig):
+    def __init__(self, *args, color: str = None, emoji_id: str = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._color = color
+        label = kwargs.get("text") if "text" in kwargs else (args[0] if args else None)
+        self._emoji_char = _leading_emoji(label)
+        self._emoji_id = emoji_id  # may be None — resolve live in to_dict()
+
+    def _resolve_emoji_id(self):
+        if self._emoji_id:
+            return _valid_emoji_id(self._emoji_id)
+        return _lookup_emoji_id(self._emoji_char)
+
+    def to_dict(self):
+        d = super().to_dict()
+        style = _to_style(self._color)
+        if style:
+            d["style"] = style
+        eid = self._resolve_emoji_id()
+        if eid:
+            d["icon_custom_emoji_id"] = eid
+            if "text" in d:
+                # Strip the emoji we turned into an icon (leading, or first match for explicit id)
+                stripped = _strip_leading_emoji_text(d["text"], self._emoji_char)
+                if stripped == d["text"] and self._emoji_char:
+                    stripped = _strip_emoji_once(d["text"], self._emoji_char)
+                # If emoji_id was set for a different char than leading, try strip by map reverse
+                if stripped == d["text"]:
+                    for k, v in EMOJI_MAP.items():
+                        if v and str(v) == str(eid):
+                            stripped = _strip_emoji_once(d["text"], k)
+                            if stripped != d["text"]:
+                                break
+                d["text"] = stripped or d["text"]
+        return d
+
+# ⚠️ កំណត់ត្រា (កែនៅ 2026-08-06 លើកទី ២): ការយល់ដឹងមុននេះខុស — Telegram
+#    Bot API 9.4 ពិតជា support "icon_custom_emoji_id" + "style" លើ
+#    KeyboardButton (reply keyboard) ដែរ ដូចគ្នានឹង InlineKeyboardButton
+#    (មើល core.telegram.org/bots/api → KeyboardButton object). មូលហេតុពិត
+#    ដែល emoji premium មិនបង្ហាញ គឺ to_dict() ចាស់ **មិនដែលដាក់ field នេះ
+#    ចូល JSON ទាល់តែសោះ**។
+#    ⚠️ លក្ខខណ្ឌចាំបាច់ពី Telegram: bot owner ត្រូវមាន Telegram Premium
+#    សកម្ម (ឬ bot ទិញ additional username លើ Fragment) មិនដូច្នេះទេ
+#    Telegram នឹងមិនបង្ហាញ icon នេះឡើយ ទោះកូដត្រឹមត្រូវក៏ដោយ។
+#
+#    ឥឡូវនេះកូដខាងក្រោមកាត់ emoji unicode ចេញពី text ដូច InlineKeyboardButton
+#    ដែរ (ដើម្បីកុំឲ្យស្ទួន icon+emoji) ប៉ុន្ដែ ដើម្បីកុំឲ្យ button ធ្លាក់ចូល
+#    fallback ("មិនស្គាល់ button") នៅពេល Telegram ត្រឡប់ text ដែលកាត់រួច
+#    មកវិញ, យើងកត់ត្រា mapping "text ដែលកាត់ → text ដើម (មាន emoji)" ក្នុង
+#    _STRIPPED_TEXT_MAP ។ MAIN MESSAGE HANDLER ត្រូវ restore text ដើមវិញ
+#    មុននឹង match លក្ខខណ្ឌ text == / text in (...) ណាមួយ (មើល "# ── Restore
+#    stripped-emoji text ──" ក្នុង handle_msg)។
+_STRIPPED_TEXT_MAP = {}
+
+class KeyboardButton(_KB_orig):
+    """Reply-keyboard button ដែលអាចដាក់ premium emoji icon បាន (user-side only)."""
+    def __init__(self, *args, color: str = None, emoji_id: str = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._color = color
+        label = kwargs.get("text") if "text" in kwargs else (args[0] if args else None)
+        self._emoji_char = _leading_emoji(label)
+        self._emoji_id = emoji_id  # resolve live in to_dict so /setemojis applies without restart
+
+    def _resolve_emoji_id(self):
+        if self._emoji_id:
+            return _valid_emoji_id(self._emoji_id)
+        return _lookup_emoji_id(self._emoji_char)
+
+    def to_dict(self):
+        d = super().to_dict()
+        style = _to_style(self._color)
+        if style:
+            d["style"] = style
+        eid = self._resolve_emoji_id()
+        if eid and "text" in d:
+            original_text = d["text"]
+            d["icon_custom_emoji_id"] = eid
+            stripped = _strip_leading_emoji_text(original_text, self._emoji_char)
+            if stripped == original_text and self._emoji_char:
+                stripped = _strip_emoji_once(original_text, self._emoji_char)
+            if stripped == original_text:
+                # explicit emoji_id may map to a different char than leading
+                for k, v in EMOJI_MAP.items():
+                    if v and str(v) == str(eid):
+                        stripped = _strip_emoji_once(original_text, k)
+                        if stripped != original_text:
+                            break
+            if stripped != original_text:
+                _STRIPPED_TEXT_MAP[stripped] = original_text
+                d["text"] = stripped or original_text
+        return d
+
+# ─────────────────────────────────────────────────────────────────────────
+from flask import Flask, request as flask_request, jsonify
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+# ─── Auto-install deps ───
+def _ensure_deps():
+    pkgs = {"PIL": "pillow", "qrcode": "qrcode", "numpy": "numpy"}
+    for mod, pkg in pkgs.items():
+        try: __import__(mod)
+        except ImportError:
+            subprocess.run([sys.executable, "-m", "pip", "install", pkg,
+                            "--break-system-packages", "-q"], check=False)
+_ensure_deps()
+
+import qrcode
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+
+logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ═══════════════════════════════════════════════════════════
+#  ╔═══════════════════════════════════════════════════════╗
+#  ║   🛠️  SETUP — បំពេញព័ត៌មាននៅទីនេះ មុនដំណើរការ bot   ║
+#  ╚═══════════════════════════════════════════════════════╝
+#
+#  ដើម្បីដំណើរការ bot ច្រើនច្បាប់ក្នុងពេលតែមួយ៖
+#    1) ចម្លងឯកសារនេះទាំងមូល ដាក់ក្នុង folder ថ្មីដាច់ដោយឡែក
+#       (ឧ. bot_shop2/kaijaklike_bot.py)
+#    2) ប្តូរតម្លៃខាងក្រោម (BOT_TOKEN, ADMIN_ID, CAMRAPID_API_KEY,
+#       CONTROL_PORT) ឱ្យខុសគ្នាពី bot ដទៃ
+#    3) ដំណើរការដោយ `python3 kaijaklike_bot.py` ដាច់ដោយឡែក
+#       ក្នុង terminal/session ផ្សេង (ឬ tmux/screen ផ្សេងគ្នា)
+#    ⚠️ សារសំខាន់: CONTROL_PORT ត្រូវតែខុសគ្នារាល់ bot មួយៗ
+#       ដែលដំណើរការក្នុងម៉ាស៊ីនតែមួយ បើមិនដូច្នេះ bot ទីពីរនឹង
+#       crash ដោយសារ port ប៉ះគ្នា (bot ទីមួយប្រើ 5056 default)
+#
+#  អាចបំពេញផ្ទាល់ខាងក្រោម ឬកំណត់ជា environment variable
+#  (env var នឹងមានអទិភាពជាង តម្លៃ default ខាងក្រោម)
+# ═══════════════════════════════════════════════════════════
+BOT_TOKEN          = os.getenv("BOT_TOKEN", "")   # 👈 Bot Token ពី @BotFather — កំណត់ជា Environment Variable ប៉ុណ្ណោះ (កុំសរសេរផ្ទាល់ក្នុងកូដ)
+ADMIN_ID           = int(os.getenv("ADMIN_ID", "0"))                                    # 👈 Telegram ID អ្នកគ្រប់គ្រង bot នេះ
+INSTANCE_NAME      = os.getenv("INSTANCE_NAME", "")          # មិនទទេ = នេះជា bot រងដែលត្រូវបាន /newbot បង្កើត
+IS_MASTER          = (INSTANCE_NAME == "")                    # bot ដើម (ដែលអ្នករត់ដោយផ្ទាល់) = master, អាចបង្កើត /newbot
+BOT_DISPLAY_NAME   = os.getenv("BOT_DISPLAY_NAME", "")             # ឈ្មោះ bot ដែលបង្ហាញដល់អ្នកប្រើ (ប្តូរបានពី /newbot)
+BOT_WELCOME_MSG    = os.getenv("BOT_WELCOME_MSG", "")              # welcome message custom (ទទេ = ប្រើ default)
+
+# ── Anti-Spam — កំណត់ Cooldown រវាង QR generation ម្តងៗក្នុង User តែម្នាក់ (ការពារ Spam
+#    ចុច "💸 បញ្ចូលលុយ" ជាប់ៗគ្នា ដែលនាំឲ្យហៅ CamRapidPay/ABA API ច្រើនដងឥតប្រយោជន៍ + Flood )
+#    កំណត់តម្លៃដើមពី Environment Variable, ប៉ុន្តែ Admin អាចផ្លាស់ប្តូរផ្ទាល់ក្នុង Bot បាន
+#    (👉 ⚙️ Settings → ⏳ QR Cooldown) — តម្លៃថ្មីរក្សាទុកអចិន្ត្រៃយ៍ក្នុង dep_qr_cooldown.json ។
+DEP_QR_COOLDOWN_SEC = int(os.getenv("DEP_QR_COOLDOWN_SEC", "15"))
+_dep_qr_cooldown    = {}   # uid_str -> unix timestamp នៃ QR generation ចុងក្រោយ
+
+# ── CamRapidPay — Create KHQR + Check transaction ──
+CAMRAPID_API_KEY   = os.getenv("CAMRAPID_API_KEY", "")   # 👈 CamRapidPay API Key — កំណត់ជា Environment Variable ប៉ុណ្ណោះ
+CAMRAPID_CREATE    = "https://pay.camrapidpay.com/api/v1/khqr/create-payments"
+CAMRAPID_CHECK     = "https://pay.camrapidpay.com/check-transaction-api"
+WEBHOOK_URL        = os.getenv("WEBHOOK_URL", "")          # ដាក់ URL webhook (optional)
+
+# ── ABA PayWay (តាម KHMER SYSTEM — khmer-system.com) — ជម្រើសទូទាត់ស្វ័យប្រវត្តិទី ២ ──
+# (v12: បន្ថែម ABA PayWay ស្របជាមួយ CamRapidPay ដែលមានស្រាប់ — មិនលុប/មិនប៉ះពាល់ CamRapidPay ទេ។
+#  បើកំណត់ទាំង CAMRAPID_API_KEY និង ABA_API_KEY ព្រមគ្នា bot នឹងឲ្យ user ជ្រើសរើសវិធីទូទាត់ពេល
+#  ចុច "💸 បញ្ចូលលុយ"។ បើកំណត់តែ ABA bot ប្រើ ABA ដោយស្វ័យប្រវត្តិ។)
+ABA_API_KEY        = os.getenv("ABA_API_KEY", "")          # 👈 Profile Key របស់ KHMER SYSTEM (khmer-system.com/operator/profile)
+ABA_MERCHANT_ID    = os.getenv("ABA_MERCHANT_ID", "")      # 👈 Merchant ID របស់ KHMER SYSTEM (ឧ. r72mCt)
+ABA_BASE_URL       = os.getenv("ABA_BASE_URL", "https://khmer-system.com")
+ABA_CREATE_URL     = os.getenv("ABA_CREATE_URL", f"{ABA_BASE_URL}/aba-api/generate-qr")
+ABA_CHECK_URL      = os.getenv("ABA_CHECK_URL", f"{ABA_BASE_URL}/aba-api/check-payment")
+
+# ── KHPAY (khpay.site) — ជម្រើសទូទាត់ស្វ័យប្រវត្តិទី ៣ ──
+KHPAY_API_KEY      = os.getenv("KHPAY_API_KEY", "")
+KHPAY_BASE_URL     = os.getenv("KHPAY_BASE_URL", "https://khpay.site/api/v1")
+KHPAY_CREATE_URL   = os.getenv("KHPAY_CREATE_URL", f"{KHPAY_BASE_URL}/qr/generate")
+KHPAY_CHECK_URL    = os.getenv("KHPAY_CHECK_URL", f"{KHPAY_BASE_URL}/qr/check")
+KHPAY_EXPIRE_SEC   = int(os.getenv("KHPAY_EXPIRE_SEC", "180"))
+KHPAY_MERCHANT_ID  = os.getenv("KHPAY_MERCHANT_ID", "")  # optional mch_...
+
+DEPOSIT_EXPIRE_SEC = int(os.getenv("DEPOSIT_EXPIRE_SEC", "600"))  # default 10 min poll window
+POLL_INTERVAL      = 8
+SMM_ORDER_POLL_INTERVAL = 180   # 3 minutes — Poll ស្ថានភាព Order ពី SMM API
+
+# Flask Control Server
+# សុវត្ថិភាព: បើមិនកំណត់ CONTROL_KEY ជា env var ទេ បង្កើត key ចៃដន្យ (មិនប្រើ default
+# ដែលគេទាយបាន "change_this_secret" ទៀត) ដើម្បីការពារ /shutdown /restart /broadcast_web
+import secrets as _secrets
+_CONTROL_KEY_ENV = os.getenv("CONTROL_KEY", "")
+if not _CONTROL_KEY_ENV:
+    CONTROL_KEY = _secrets.token_urlsafe(24)
+    logger.warning(
+        "⚠️ CONTROL_KEY មិនបានកំណត់ក្នុង Environment Variable! "
+        "បង្កើត key ចៃដន្យបណ្តោះអាសន្នជំនួស (នឹងផ្លាស់ប្តូររាល់ restart): %s "
+        "→ សូមកំណត់ CONTROL_KEY ជា env var នៅ Render ដើម្បីឲ្យ key ថេរ។", CONTROL_KEY)
+else:
+    CONTROL_KEY = _CONTROL_KEY_ENV
+CONTROL_PORT       = int(os.getenv("CONTROL_PORT", "5056"))   # 👈 ប្តូរ port នេះបើដំណើរការ bot ច្រើនច្បាប់ក្នុងម៉ាស៊ីនតែមួយ (5056, 5057, 5058...)
+
+# ── Startup guard — ការពារកុំឲ្យ deploy ដោយគ្មាន credential សំខាន់ៗ ──────────
+if __name__ == "__main__" and not INSTANCE_NAME:
+    _missing = []
+    if not BOT_TOKEN:  _missing.append("BOT_TOKEN")
+    if not ADMIN_ID:   _missing.append("ADMIN_ID")
+    if _missing:
+        sys.exit(
+            "❌ ខ្វះ Environment Variable ចាំបាច់: " + ", ".join(_missing) +
+            "\nសូមកំណត់ក្នុង Render → Environment (កុំដាក់ផ្ទាល់ក្នុងកូដ)។"
+        )
+
+# ═══════════════════════════════════════════════════════════
+#  FILES  (all persisted on Render Disk so redeploy/restart never wipes data)
+# ═══════════════════════════════════════════════════════════
+DATA_DIR        = os.environ.get("DATA_DIR", "/var/data")
+try:
+    os.makedirs(DATA_DIR, exist_ok=True)
+except Exception:
+    DATA_DIR = "."   # fallback ក្នុងករណី disk មិនមាន (local/Termux test)
+
+# MASTER_DATA_DIR = folder data "ដើម" (bot ដើម) — clone process នីមួយៗទទួល env
+# MASTER_DATA_DIR ពី _spawn_clone() ដូច្នេះទោះបី DATA_DIR ត្រូវបានប្តូរទៅ folder
+# ដាច់ដោយឡែករបស់ clone ក៏ដោយ ចំណុចនេះនៅតែចង្អុលទៅ data ដើមដដែល (សម្រាប់ file
+# ដែលចង់ឲ្យ share រួម ដូចជា smm_emoji.json)
+MASTER_DATA_DIR = os.environ.get("MASTER_DATA_DIR", DATA_DIR)
+
+def _dpath(name):
+    return os.path.join(DATA_DIR, name)
+
+def _mdpath(name):
+    return os.path.join(MASTER_DATA_DIR, name)
+
+WALLETS_FILE    = _dpath("smm_wallets.json")
+USERS_FILE      = _dpath("smm_users.json")
+LANG_FILE       = _dpath("smm_lang.json")
+PROMO_FILE      = _dpath("smm_promos.json")
+SETTINGS_FILE   = _dpath("smm_settings.json")
+NOTIFY_FILE     = _dpath("smm_notify.json")
+NOTIFY_BOTS_FILE = _dpath("smm_notify_bots.json")   # ★ Order Bot / Payment Bot ដាច់ដោយឡែក — token+chat
+
+SMM_API_FILE    = _dpath("smm_api.json")
+SMM_SVC_FILE    = _dpath("smm_services.json")
+SMM_ORD_FILE    = _dpath("smm_orders.json")
+ORDER_SEQ_FILE  = _dpath("smm_order_seq.json")  # sequential Order ID counter (total orders)
+SMM_PROFIT_FILE = _dpath("smm_profit.json")
+SMM_POLL_FILE   = _dpath("smm_poll.json")
+SMM_DEP_FILE    = _dpath("smm_deposits.json")
+REENGAGE_FILE  = _dpath("smm_reengage.json")
+USED_REFS_FILE  = _dpath("smm_used_refs.json")  # payment references already credited (anti double-pay)
+DEP_BONUS_FILE  = _dpath("smm_deposit_bonus.json")
+USER_DISCOUNT_FILE = _dpath("smm_user_discounts.json")  # uid -> {pct, note} — បញ្ចុះតម្លៃសម្រាប់តែ TikTok Khmer
+SUB_ADMIN_FILE  = _dpath("smm_sub_admins.json")
+SUPPORT_CFG_FILE= _dpath("smm_support.json")
+CAMRAPID_CFG_FILE= _dpath("smm_camrapid.json")
+ABA_CFG_FILE    = _dpath("smm_aba.json")
+KHPAY_CFG_FILE  = _dpath("smm_khpay.json")
+WEBHOOK_CFG_FILE = _dpath("smm_webhook.json")
+PAYTOGGLE_CFG_FILE = _dpath("smm_paytoggle.json")   # បិទ/បើក វិធីទូទាត់ម្តងៗ (v13)
+EMOJI_FILE      = _mdpath("smm_emoji.json")   # ចែក share រួមគ្នារវាង bot ដើម និង clone ទាំងអស់ (មិនញែកតាម DATA_DIR ទេ)
+
+def _load(path, default):
+    """ដោះស្រាយ Data Loss ស្ងាត់ៗ (root cause ដែលធ្លាប់កើត Sep 2026)៖
+    - File រកមិនឃើញ (ធម្មតា លើកដំបូង) → return default
+    - File ខូច (disk full mid-write ។ល។) → កុំ silently return default ដែល
+      នឹងត្រូវ _save() សរសេរជាន់លុប Data ចាស់ជារៀងរហូត។ ព្យាយាម restore ពី
+      .bak (កូពីល្អចុងក្រោយ) ជាមុនសិន, ហើយបើគ្មាន .bak — ទុក file ខូចនោះ
+      ជា .corrupted_<ts> សម្រាប់ investigate/manual-repair វិញ, ព្រមទាំង
+      ជូនដំណឹង Admin ភ្លាមៗ (បើ bot object រួចរាល់ហើយ)។"""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return default
+    except Exception as e:
+        bak = path + ".bak"
+        if os.path.exists(bak):
+            try:
+                with open(bak, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                logger.error(f"⚠️ {path} ខូច ({e}) — restored ពី {bak}")
+                _alert_admin_corruption(path, e, recovered_from_bak=True)
+                return data
+            except Exception:
+                pass
+        # try any recent .corrupted_* that is still valid JSON (manual recovery path)
+        try:
+            parent = os.path.dirname(path) or "."
+            base = os.path.basename(path)
+            cands = []
+            for fn in os.listdir(parent):
+                if fn.startswith(base + ".corrupted_") or fn == base + ".bak":
+                    cands.append(os.path.join(parent, fn))
+            cands.sort(key=lambda p: os.path.getmtime(p) if os.path.isfile(p) else 0, reverse=True)
+            for cp in cands:
+                try:
+                    with open(cp, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    logger.error(f"⚠️ {path} ខូច ({e}) — restored ពី {cp}")
+                    try:
+                        with open(path, "w", encoding="utf-8") as out:
+                            json.dump(data, out, ensure_ascii=False, indent=2)
+                    except Exception:
+                        pass
+                    _alert_admin_corruption(path, e, recovered_from_bak=True)
+                    return data
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        try:
+            if os.path.isfile(path):
+                corrupt_copy = f"{path}.corrupted_{int(time.time())}"
+                os.replace(path, corrupt_copy)
+                logger.error(f"🚨 {path} ខូច ({e}) — ទុកជា {corrupt_copy}")
+        except Exception:
+            logger.error(f"🚨 {path} ខូច ({e}) — មិនអាចរក្សា copy ខូចបានទេ")
+        _alert_admin_corruption(path, e, recovered_from_bak=False)
+        return default
+
+def _alert_admin_corruption(path, err, recovered_from_bak):
+    """ជូនដំណឹង Admin ភ្លាមៗពេល file ណាមួយខូច — ដើម្បីដឹងលឿន កុំឲ្យរកឃើញ
+    Data បាត់ក្រោយពី User រាយការណ៍ដូចលើកមុន។ Safe ក្នុងករណី bot មិនទាន់
+    បង្កើត (startup ដំបូង) ព្រោះ _load() អាចត្រូវហៅមុន bot = telebot.TeleBot(...)។"""
+    try:
+        b = globals().get("bot")
+        admin_id = globals().get("ADMIN_ID")
+        if not b or not admin_id:
+            return
+        fname = os.path.basename(path)
+        if recovered_from_bak:
+            txt = (f"⚠️ <b>File ខូច ប៉ុន្តែសង្គ្រោះស្វ័យប្រវត្តិបានហើយ!</b>\n"
+                   f"File: <code>{fname}</code>\nError: <code>{err}</code>\n"
+                   f"→ បានស្តារពី backup (.bak) ចុងក្រោយស្វ័យប្រវត្តិ ✅")
+        else:
+            txt = (f"🚨 <b>File Data ខូច! ត្រូវការជួសជុលដោយដៃ</b>\n"
+                   f"File: <code>{fname}</code>\nError: <code>{err}</code>\n\n"
+                   f"គ្មាន Backup (.bak) ស្វ័យប្រវត្តិសល់ទេ — File ខូចត្រូវបានរក្សាទុក "
+                   f"ជា <code>{fname}.corrupted_...</code> សម្រាប់ជួសជុលនៅពេលក្រោយ។\n"
+                   f"Data ថ្មីនឹងចាប់ផ្តើមពីទទេសម្រាប់ file នេះ។")
+        b.send_message(admin_id, txt, parse_mode="HTML")
+    except Exception:
+        pass
+
+# Per-path locks — ការពារ race ពេល thread ច្រើន _save file តែមួយ (users/wallets/orders)
+_save_locks = {}
+_save_locks_guard = threading.Lock()
+
+def _lock_for_path(path):
+    with _save_locks_guard:
+        lk = _save_locks.get(path)
+        if lk is None:
+            lk = threading.Lock()
+            _save_locks[path] = lk
+        return lk
+
+def _save(path, data):
+    """Atomic save: unique tmp → fsync → replace។ Lock តាម path ការពារ race។
+    បើ replace បរាជ័យ សាក retry / write ត្រង់ៗ — កុំបញ្ជូន alert 'ខូច' ក្លែងក្លាយ។"""
+    lk = _lock_for_path(path)
+    with lk:
+        try:
+            parent = os.path.dirname(path) or "."
+            os.makedirs(parent, exist_ok=True)
+            # unique tmp per call — កុំឲ្យ thread ពីរប្រើ path.tmp តែមួយ
+            tmp = f"{path}.tmp.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass
+            if not os.path.isfile(tmp):
+                raise FileNotFoundError(f"tmp missing after write: {tmp}")
+            # backup good file
+            if os.path.isfile(path):
+                try:
+                    # copy2 keeps original until replace succeeds better than replace→bak when concurrent
+                    import shutil as _sh
+                    _sh.copy2(path, path + ".bak")
+                except Exception:
+                    try:
+                        os.replace(path, path + ".bak")
+                    except Exception:
+                        pass
+            try:
+                os.replace(tmp, path)
+            except FileNotFoundError:
+                # rare race / FS hiccup — retry once
+                time.sleep(0.05)
+                if os.path.isfile(tmp):
+                    os.replace(tmp, path)
+                else:
+                    raise
+            # cleanup stray old-style .tmp if any
+            try:
+                old_tmp = f"{path}.tmp"
+                if os.path.isfile(old_tmp):
+                    os.remove(old_tmp)
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"Save {path}: {e}")
+            # last resort: direct write (non-atomic) so data is not lost in RAM only
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                    f.flush()
+                logger.warning(f"Save {path}: recovered via direct write after atomic failure")
+            except Exception as e2:
+                logger.error(f"Save {path} DIRECT also failed: {e2}")
+                try:
+                    b = globals().get("bot")
+                    admin_id = globals().get("ADMIN_ID")
+                    if b and admin_id:
+                        b.send_message(
+                            admin_id,
+                            f"🚨 <b>Save បរាជ័យ</b>\n<code>{os.path.basename(path)}</code>\n"
+                            f"<code>{e}</code> → <code>{e2}</code>\n"
+                            f"ពិនិត្យ Disk /var/data និង permission។",
+                            parse_mode="HTML",
+                        )
+                except Exception:
+                    pass
+            finally:
+                # remove orphan tmp
+                try:
+                    if "tmp" in dir() and os.path.isfile(tmp):
+                        os.remove(tmp)
+                except Exception:
+                    pass
+
+# ─── Load all state ───
+# EMOJI_MAP ត្រូវបានកំណត់ default (None) ខាងលើ — ឥឡូវ merge ជាមួយតម្លៃ
+# ដែលធ្លាប់រក្សាទុកនៅក្នុងឯកសារ (បើមាន) ដើម្បីឲ្យ /setemojis រក្សាទុកជាអចិន្ត្រៃយ៍
+_EMOJI_DEFAULTS = dict(EMOJI_MAP)
+_loaded_emoji = _load(EMOJI_FILE, {}) or {}
+# Merge file → map; also mirror value onto FE0F / non-FE0F twin keys so UI text always hits
+for _k, _v in list(_loaded_emoji.items()):
+    if not _k:
+        continue
+    EMOJI_MAP[_k] = _v
+    _nk = _k.replace("\ufe0f", "").replace("️", "")
+    if _v:
+        if _k not in EMOJI_MAP or not EMOJI_MAP.get(_k):
+            EMOJI_MAP[_k] = _v
+        if _nk and _nk != _k:
+            EMOJI_MAP.setdefault(_nk, _v)
+            # if list has FE0F form, fill it too
+            if not _k.endswith("\ufe0f") and not _k.endswith("️"):
+                EMOJI_MAP.setdefault(_k + "️", _v)
+for _ch in _EMOJI_CHAR_LIST:
+    EMOJI_MAP.setdefault(_ch, None)
+    # if twin form has id, copy
+    _nv = EMOJI_MAP.get(_ch)
+    if not _nv:
+        _nk = _ch.replace("\ufe0f", "").replace("️", "")
+        for _k2, _v2 in list(EMOJI_MAP.items()):
+            if _v2 and _k2.replace("\ufe0f", "").replace("️", "") == _nk:
+                EMOJI_MAP[_ch] = _v2
+                break
+# rebuild sorted patterns so new chars are emojified in messages
+_EMOJI_CHARS_SORTED = sorted([c for c in EMOJI_MAP.keys() if c], key=len, reverse=True)
+_LEADING_EMOJI_RE = _re.compile(
+    "^(" + "|".join(_re.escape(c) for c in _EMOJI_CHARS_SORTED) + ")"
+)
+_EMOJI_ANY_RE = _re.compile(
+    "(" + "|".join(_re.escape(c) for c in _EMOJI_CHARS_SORTED) + ")"
+)
+
+EMOJI_KEYS = list(_EMOJI_DEFAULTS.keys())   # បញ្ជី emoji ទាំងអស់ដែល bot ស្គាល់ (សម្រាប់ reference)
+
+_n_prem = sum(1 for _v in EMOJI_MAP.values() if _v)
+print(f"[emoji] premium ids configured: {_n_prem} / {len(EMOJI_MAP)}")
+if _n_prem == 0:
+    print("[emoji] WARNING: no premium custom_emoji_id set — run Admin → 😊 កំណត់ Emoji")
+
+
+def _valid_emoji_id(eid):
+    """Telegram custom_emoji_id is a numeric string (usually 16–20 digits)."""
+    if eid is None:
+        return None
+    s = str(eid).strip()
+    if not s or s.lower() in ("none", "null", "0"):
+        return None
+    if s.isdigit() and len(s) >= 10:
+        return s
+    try:
+        n = int(float(s))
+        if n > 0:
+            return str(n)
+    except Exception:
+        pass
+    return s if len(s) >= 8 else None
+
+
+def _persist_emoji_map():
+    """Save configured ids + rebuild regex patterns (must run after every set)."""
+    global _EMOJI_CHARS_SORTED, _LEADING_EMOJI_RE, _EMOJI_ANY_RE
+    clean = {}
+    fe0f = "️"
+    for k, v in list(EMOJI_MAP.items()):
+        if not k:
+            continue
+        eid = _valid_emoji_id(v)
+        if not eid:
+            continue
+        EMOJI_MAP[k] = eid
+        clean[k] = eid
+        nk = k.replace(fe0f, "")
+        if nk and nk != k:
+            EMOJI_MAP[nk] = eid
+            clean[nk] = eid
+        if not k.endswith(fe0f):
+            twin = k + fe0f
+            EMOJI_MAP[twin] = eid
+            clean[twin] = eid
+    _save(EMOJI_FILE, clean)
+    _EMOJI_CHARS_SORTED = sorted([c for c in EMOJI_MAP.keys() if c], key=len, reverse=True)
+    try:
+        _LEADING_EMOJI_RE = _re.compile(
+            "^(" + "|".join(_re.escape(c) for c in _EMOJI_CHARS_SORTED) + ")"
+        )
+        _EMOJI_ANY_RE = _re.compile(
+            "(" + "|".join(_re.escape(c) for c in _EMOJI_CHARS_SORTED) + ")"
+        )
+    except Exception as e:
+        logger.warning("[emoji] rebuild patterns failed: %s", e)
+    return len(clean)
+
+
+
+wallets      = _load(WALLETS_FILE,   {})
+users_db     = _load(USERS_FILE,     {})
+user_lang    = _load(LANG_FILE,      {})
+promos       = _load(PROMO_FILE,     {})
+settings     = _load(SETTINGS_FILE,  {})
+notify_cfg   = _load(NOTIFY_FILE,    {"channel_id": "-1003930705105", "enabled": True})
+notify_bots_cfg = _load(NOTIFY_BOTS_FILE, {"order_token": "", "pay_token": "", "order_chat_id": "", "pay_chat_id": ""})
+# Render disk ងាយបាត់ — អាច set token តាម env ជាអចិន្ត្រៃយ៍
+for _k_env, _k_cfg in (
+    ("ORDER_BOT_TOKEN", "order_token"),
+    ("PAY_BOT_TOKEN", "pay_token"),
+    ("ORDER_BOT_CHAT_ID", "order_chat_id"),
+    ("PAY_BOT_CHAT_ID", "pay_chat_id"),
+):
+    _v = (os.environ.get(_k_env) or "").strip()
+    if _v:
+        notify_bots_cfg[_k_cfg] = _v
+try:
+    _save(NOTIFY_BOTS_FILE, notify_bots_cfg)
+except Exception:
+    pass
+
+smm_api      = _load(SMM_API_FILE,   {"url": "", "key": ""})
+smm_services = _load(SMM_SVC_FILE,   {})
+smm_orders   = _load(SMM_ORD_FILE,   {})
+reengage_state = _load(REENGAGE_FILE,  {"last_run": 0, "sent": {}})
+smm_profit   = _load(SMM_PROFIT_FILE,{"pct": 20})
+DAILY_REPORT_FILE = _dpath("daily_report_cfg.json")
+daily_report_cfg  = _load(DAILY_REPORT_FILE, {"enabled": True, "hour": 8})
+_KH_TZ = datetime.timezone(datetime.timedelta(hours=7))
+smm_poll     = _load(SMM_POLL_FILE,  {"interval": POLL_INTERVAL})
+smm_deps     = _load(SMM_DEP_FILE,   {})
+used_payment_refs = _load(USED_REFS_FILE, {})  # ref -> {dep_id, uid, amount, ts}
+_pay_credit_lock  = threading.Lock()  # ការពារ double-credit race (poll + webhook + admin)
+
+
+# ── Auto Deposit Bonus — "ដាក់ $1 ឡើងទៅ ទទួល 5% ត្រលប់មកវិញ" ──────────
+# enabled: បើក/បិទ Auto Bonus, min_amount: ចំនួនអប្បបរមាដែលទទួលបាន Bonus,
+# pct: ភាគរយ Bonus (គិតលើចំនួនប្រាក់ដែលដាក់)។ កែបានពី Admin Menu → 🎁 Bonus ដាក់លុយ
+dep_bonus_cfg = _load(DEP_BONUS_FILE, {"enabled": True, "min_amount": 1.0, "pct": 5.0})
+
+# ── User Discount (TikTok Khmer only) — Admin កំណត់ User ណាដែលបានបញ្ចុះតម្លៃ ──
+# structure: { "uid_str": {"pct": 10.0, "note": "VIP"} }
+user_discounts = _load(USER_DISCOUNT_FILE, {})
+
+# ── QR Anti-Spam Cooldown — កែបានពី Admin Menu → ⏳ QR Cooldown (persist ថេរ) ──
+DEP_QR_COOLDOWN_FILE = _dpath("dep_qr_cooldown.json")
+dep_qr_cooldown_cfg  = _load(DEP_QR_COOLDOWN_FILE, {"seconds": DEP_QR_COOLDOWN_SEC})
+
+if IS_MASTER:  # ★ កុំឲ្យ service auto-seed របស់ master ចូលទៅ sub bot (clone) — packages ខាងក្រោមសម្រាប់តែ master bot ប៉ុណ្ណោះ
+    # ── Auto-seed TikTok Promote Khmer packages ──
+    _TIKTOK_PACKAGES = [
+        {
+            "slug":        "manual_tiktok_promote_p1",
+            "label":       "🇰🇭 ❤️ 500-1K + 👁️ 1.8K Views",
+            "description": "❤️ 500-1K Likes + 👁️ 1.8K Views\n⏱ 5-15 នាទី",
+            "flat_price":  0.99,
+        },
+        {
+            "slug":        "manual_tiktok_promote_p2",
+            "label":       "🇰🇭 ❤️ 1K-2K + 👁️ 3.5K Views",
+            "description": "❤️ 1K-2K Likes + 👁️ 3.5K Views\n⏱ 5-15 នាទី",
+            "flat_price":  1.99,
+        },
+        {
+            "slug":        "manual_tiktok_promote_p3",
+            "label":       "🇰🇭 ❤️ 2K-3K + 👁️ 10K Views",
+            "description": "❤️ 2K-3K Likes + 👁️ 10K Views\n⏱ 10-20 នាទី",
+            "flat_price":  3.25,
+        },
+        {
+            "slug":        "manual_tiktok_promote_p4",
+            "label":       "🇰🇭 ❤️ 3K-5K + 👁️ 20K Views",
+            "description": "❤️ 3K-5K Likes + 👁️ 20K Views\n⏱ 15-30 នាទី",
+            "flat_price":  5.49,
+        },
+        {
+            "slug":        "manual_tiktok_promote_p5",
+            "label":       "🇰🇭 ❤️ 500 + 👁️ 1K + 👤 100",
+            "description": "❤️ 500 Likes + 👁️ 1K Views + 👤 100 Followers\n⏱ 5-15 នាទី",
+            "flat_price":  1.99,
+        },
+        {
+            "slug":        "manual_tiktok_promote_view1",
+            "label":       "🇰🇭 👁️ 2K-5K Views",
+            "description": "👁️ 2K-5K Views (Video ណាមួយ)\n⏱ 5-15 នាទី",
+            "flat_price":  0.99,
+        },
+        {
+            "slug":        "manual_tiktok_promote_view2",
+            "label":       "🇰🇭 👁️ 5K-10K Views",
+            "description": "👁️ 5K-10K Views (Video ណាមួយ)\n⏱ 5-15 នាទី",
+            "flat_price":  1.99,
+        },
+        {
+            "slug":        "manual_tiktok_promote_follow1",
+            "label":       "🇰🇭 👤 100-200 Followers",
+            "description": "👤 100-200 Followers\n⏱ 10-20 នាទី",
+            "flat_price":  0.99,
+        },
+        {
+            "slug":        "manual_tiktok_promote_follow2",
+            "label":       "🇰🇭 👤 300-500 Followers",
+            "description": "👤 300-500 Followers\n⏱ 10-20 នាទី",
+            "flat_price":  1.99,
+        },
+    ]
+    _changed = False
+    for _pkg in _TIKTOK_PACKAGES:
+        _slug = _pkg["slug"]
+        if _slug not in smm_services:
+            smm_services[_slug] = {
+                "api_id":      None,
+                "manual":      True,
+                "cost_rate":   0,
+                "min":         1,
+                "max":         1,
+                "label":       _pkg["label"],
+                "category":    "🇰🇭 TikTok Khmer",
+                "flat_price":  _pkg["flat_price"],
+                "preset_qtys": [1],
+                "description": _pkg["description"],
+            }
+            _changed = True
+        else:
+            # ✨ Migration (2026-08-12): រៀបចំ label/description ចាស់ឲ្យស្អាត
+            # ស្របគ្នា (icon នៅមុខលេខជានិច្ច, 👁️ មាន VS16 ត្រឹមត្រូវ, K លាកតួពេញ)
+            # — ធ្វើតែម្តងគត់ ដោយប្រៀបធៀបនឹង label ចាស់ជាក់លាក់ដែលធ្លាប់ seed ស្រាប់,
+            # មិនប៉ះពាល់ admin ដែលធ្លាប់កែ label ដោយខ្លួនឯងរួចហើយទេ
+            _old_labels = {
+                "manual_tiktok_promote_p1":      "🇰🇭 500-1k ❤️ · 1.8k 👁 View",
+                "manual_tiktok_promote_p2":      "🇰🇭 1k-2k ❤️ · 3.5k 👁 View",
+                "manual_tiktok_promote_p3":      "🇰🇭 2k-3k ❤️ · 10k 👁 View",
+                "manual_tiktok_promote_p4":      "🇰🇭 3k-5k ❤️ · 20k 👁 View",
+                "manual_tiktok_promote_p5":      "🇰🇭 500 ❤️ · 1k 👁 · 100 👤 Follow",
+                "manual_tiktok_promote_view1":   "🇰🇭 2k-5k 👁 View",
+                "manual_tiktok_promote_view2":   "🇰🇭 5k-10k 👁 View",
+                "manual_tiktok_promote_follow1": "🇰🇭 100-200 👤 Follow",
+                "manual_tiktok_promote_follow2": "🇰🇭 300-500 👤 Follow",
+            }
+            if smm_services[_slug].get("label") == _old_labels.get(_slug):
+                smm_services[_slug]["label"]       = _pkg["label"]
+                smm_services[_slug]["description"] = _pkg["description"]
+                _changed = True
+    if _changed:
+        _save(SMM_SVC_FILE, smm_services)
+
+    # Remove old single-package slug if exists
+    if "manual_tiktok_promote_khmer" in smm_services:
+        smm_services.pop("manual_tiktok_promote_khmer")
+        _save(SMM_SVC_FILE, smm_services)
+
+
+
+
+waiting      = {}
+lang_cooldown= {}
+
+# ═══════════════════════════════════════════════════════════
+#  BOT + HTTP
+# ═══════════════════════════════════════════════════════════
+# ── Global exception handler — ការពារ "ស្ងាត់ស្ងៀម" ──────────────────────
+# បើ handler ណាមួយ (message/callback) throw exception ណាមួយដែលមិនត្រូវបាន
+# catch ដោយ try/except ក្នុង handler ខ្លួនឯង, pyTelegramBotAPI លំនាំដើម
+# គ្រាន់តែ log ទៅ console ប៉ុណ្ណោះ ដោយគ្មានឆ្លើយតបអ្វីមក User ទាល់តែសោះ —
+# នេះជាមូលហេតុចម្បងបំផុតដែល "ចុចប៊ូតុងហើយគ្មានអ្វីកើតឡើង" ។ Handler
+# ខាងក្រោមចាប់ error ទាំងអស់ដែលរួចផុតពី try/except ក្នុងស្រុក ហើយ (1) log
+# stack trace ពេញលេញ (2) ជូនដំណឹង Admin ជាសារខ្លីៗ ដើម្បីកុំឲ្យ bug
+# ត្រូវលាក់កំបាំងទៀតតទៅ។
+class _GlobalExceptionHandler(telebot.ExceptionHandler):
+    _last_409_notify = 0
+
+    def handle(self, exception):
+        import traceback as _tb
+        msg = str(exception)
+        is_409 = ("409" in msg) or ("Conflict" in msg and "getUpdates" in msg)
+        if is_409:
+            # 409 មិនមែន bug handler — ជា process ពីរប្រើ token តែមួយ
+            logger.error(
+                "❌ 409 Conflict (exception_handler) instance=%s — sleep 45s, clear webhook",
+                INSTANCE_NAME or "master",
+            )
+            try:
+                bot.delete_webhook(drop_pending_updates=False)
+            except Exception:
+                pass
+            time.sleep(45)
+            # កុំ spam Admin រាល់វិនាទី
+            now = time.time()
+            if now - _GlobalExceptionHandler._last_409_notify > 300:
+                _GlobalExceptionHandler._last_409_notify = now
+                try:
+                    bot.send_message(
+                        ADMIN_ID,
+                        "⚠️ <b>409 Conflict</b> — bot token កំពុងរត់ <b>2 instances</b>\n"
+                        f"instance: <code>{INSTANCE_NAME or 'master'}</code>\n\n"
+                        "ធ្វើ:\n"
+                        "1) Render → មានតែ <b>1 service</b> ប្រើ token នេះ\n"
+                        "2) បិទ Termux/PC បើរត់ bot តែមួយ\n"
+                        "3) Sub-bot ត្រូវ token <b>ខុស</b> master\n"
+                        "4) ORDER_BOT / PAY_BOT កុំដូច token មេ",
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
+            return True
+
+        trace = _tb.format_exc()
+        logger.error(f"❌ Unhandled exception ក្នុង bot handler:\n{trace}")
+        try:
+            bot.send_message(ADMIN_ID,
+                f"⚠️ <b>Bot Error (internal, User មិនឃើញ)</b>\n"
+                f"<code>{msg[:500]}</code>\n\n"
+                f"<i>មើល log ពេញលេញនៅ Render console</i>",
+                parse_mode="HTML")
+        except Exception:
+            pass
+        return True
+
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode=None, exception_handler=_GlobalExceptionHandler())
+
+_BOT_USERNAME_CACHE = {"v": None}
+def _bot_username():
+    """យក username របស់ bot បច្ចុប្បន្ន (cache) — ត្រូវការសម្រាប់ clone bot នីមួយៗ
+    ដែលមាន username ខុសៗគ្នា (មិនអាច hardcode បានទេ)"""
+    if _BOT_USERNAME_CACHE["v"]:
+        return _BOT_USERNAME_CACHE["v"]
+    try:
+        _BOT_USERNAME_CACHE["v"] = bot.get_me().username
+    except Exception as e:
+        logger.warning(f"[bot_username] failed: {e}")
+        _BOT_USERNAME_CACHE["v"] = "KaiJakLikeBot"
+    return _BOT_USERNAME_CACHE["v"]
+
+_BOT_BRAND_CACHE = {"v": None}
+def _bot_brand():
+    """យកឈ្មោះ (display name) របស់ bot បច្ចុប្បន្នដើម្បីប្រើក្នុងសារទាំងឡាយ —
+    ធានាថា Sub Bot នីមួយៗបង្ហាញឈ្មោះខ្លួនឯង មិនមែន 'Kaijaklike' ទេ។"""
+    if _BOT_BRAND_CACHE["v"]:
+        return _BOT_BRAND_CACHE["v"]
+    try:
+        _BOT_BRAND_CACHE["v"] = bot.get_me().first_name or "Kaijaklike"
+    except Exception as e:
+        logger.warning(f"[bot_brand] failed: {e}")
+        _BOT_BRAND_CACHE["v"] = "Kaijaklike"
+    return _BOT_BRAND_CACHE["v"]
+
+_ADMIN_CONTACT_CACHE = {"v": None}
+def _admin_contact():
+    """យក username Telegram របស់ម្ចាស់ bot (ADMIN_ID) បច្ចុប្បន្នដើម្បីប្រើក្នុង Support
+    message ស្វ័យប្រវត្តិ — ធានាថា Sub Bot នីមួយៗបង្ហាញ username ម្ចាស់ខ្លួនឯង
+    (admin_id ផ្ទាល់របស់ clone នោះ) មិនមែន username របស់ master ទេ។ បើម្ចាស់
+    គ្មាន username Telegram (តម្រូវអោយបើក) → fallback ទៅ mention link តាម user ID វិញ។"""
+    if _ADMIN_CONTACT_CACHE["v"]:
+        return _ADMIN_CONTACT_CACHE["v"]
+    try:
+        _chat = bot.get_chat(ADMIN_ID)
+        _uname = getattr(_chat, "username", None)
+        _ADMIN_CONTACT_CACHE["v"] = f"@{_uname}" if _uname else f'<a href="tg://user?id={ADMIN_ID}">Admin</a>'
+    except Exception as e:
+        logger.warning(f"[admin_contact] failed: {e}")
+        _ADMIN_CONTACT_CACHE["v"] = f'<a href="tg://user?id={ADMIN_ID}">Admin</a>'
+    return _ADMIN_CONTACT_CACHE["v"]
+
+
+# ── Premium emoji auto-injection — ជាមួយ AUTO-FALLBACK សុវត្ថិភាព ──────────
+# គ្រោះថ្នាក់ដែលត្រូវការពារ៖ បើ custom_emoji_id ណាមួយខូច/លែងមាន ឬ admin
+# (ADMIN_ID) លែងមាន Telegram Premium ទៀត Telegram server អាច **បដិសេធ
+# request ទាំងមូល** (error) — ដែលនឹងធ្វើឲ្យ send_message/edit_message បរាជ័យ
+# ⇒ សារ ឬ button ទាំងមូលនោះនឹង "មិនដំណើរការ" ទាំងស្រុង។
+# ដំណោះស្រាយ: ព្យាយាមផ្ញើជាមួយ icon/tg-emoji ជាមុនសិន — បើ Telegram បដិសេធ
+# ដោយហេតុផលទាក់ទង emoji/icon/premium ប៉ុណ្ណោះ នោះ retry ដោយ **ដកចេញ** icon
+# ទាំងអស់ (fallback ទៅ unicode emoji ធម្មតាវិញ) ដើម្បីធានាថា message/button
+# តែងតែផ្ញើចេញបានជោគជ័យ — មិនដែលឲ្យ premium emoji ធ្វើឲ្យ button ខូចឡើយ។
+def _emojify(text):
+    """Replace unicode emoji with <tg-emoji> when custom_emoji_id is set in EMOJI_MAP.
+    VS16-tolerant. If text already has some <tg-emoji>, still wrap remaining plain emoji."""
+    if not text or not isinstance(text, str):
+        return text
+    slots = []
+    def _park(m):
+        slots.append(m.group(0))
+        return f"@@TGEMOJI{len(slots)-1}@@"
+    protected = _re.sub(r"<tg-emoji[^>]*>.*?</tg-emoji>", _park, text, flags=_re.DOTALL | _re.I)
+    for ch in _EMOJI_CHARS_SORTED:
+        eid = _valid_emoji_id(EMOJI_MAP.get(ch))
+        if not eid:
+            continue
+        variants = {ch, ch.replace("️", "")}
+        if not ch.endswith("️"):
+            variants.add(ch + "️")
+        variants.discard("")
+        for v in sorted(variants, key=len, reverse=True):
+            if not v or v not in protected:
+                continue
+            protected = protected.replace(v, f'<tg-emoji emoji-id="{eid}">{v}</tg-emoji>')
+    for i, raw in enumerate(slots):
+        protected = protected.replace(f"@@TGEMOJI{i}@@", raw)
+    return protected
+
+def _strip_tg_emoji_tags(text):
+    """ដកចេញ <tg-emoji ...>x</tg-emoji> ទុកតែ x (unicode emoji ធម្មតា)."""
+    if not text or not isinstance(text, str):
+        return text
+    return _re.sub(r'<tg-emoji[^>]*>(.*?)</tg-emoji>', r'\1', text, flags=_re.DOTALL)
+
+def _strip_markup_icons(markup):
+    """ដកចេញ icon_custom_emoji_id ពី button ទាំងអស់ក្នុង keyboard (in place).
+    ត្រូវ clear ទាំង _emoji_id និង _emoji_char — បើទុក char, to_dict() នឹង
+    _lookup_emoji_id ម្តងទៀត ហើយ premium នៅតែជាប់ (fallback មិនដំណើរការ)."""
+    if markup is None:
+        return markup
+    try:
+        rows = getattr(markup, "keyboard", None)
+        if not rows:
+            return markup
+        for row in rows:
+            for btn in row:
+                if hasattr(btn, "_emoji_id"):
+                    btn._emoji_id = None
+                if hasattr(btn, "_emoji_char"):
+                    btn._emoji_char = None
+                # also drop already-serialized field if present
+                if isinstance(getattr(btn, "__dict__", None), dict):
+                    btn.__dict__.pop("icon_custom_emoji_id", None)
+    except Exception:
+        pass
+    return markup
+
+_EMOJI_ERROR_HINTS = ("EMOJI", "ICON", "PREMIUM", "STICKER", "ENTITY_TEXT_INVALID")
+
+def _looks_emoji_related(exc):
+    return any(h in str(exc).upper() for h in _EMOJI_ERROR_HINTS)
+
+def _markup_has_emoji_icon(markup):
+    """True បើ markup មាន button ណាមួយនឹងផ្ញើ icon_custom_emoji_id (resolve live)."""
+    try:
+        rows = getattr(markup, "keyboard", None)
+        if not rows:
+            return False
+        for row in rows:
+            for btn in row:
+                if getattr(btn, "_emoji_id", None):
+                    return True
+                # live resolve from EMOJI_MAP (same as to_dict)
+                if hasattr(btn, "_resolve_emoji_id") and btn._resolve_emoji_id():
+                    return True
+                ch = getattr(btn, "_emoji_char", None)
+                if ch and EMOJI_MAP.get(ch):
+                    return True
+    except Exception:
+        pass
+    return False
+
+def _wrap_safe_call(fn, text_kw=None, text_pos=None):
+    """រុំ bot method មួយ ដើម្បី (1) ដាក់ tg-emoji ចូល text ស្វ័យប្រវត្តិ បើ
+    parse_mode=HTML និង (2) ធានាថា បើ Telegram បដិសេធដោយសារ emoji/icon,
+    retry ដោយគ្មាន icon វិញ ដើម្បីកុំឲ្យ button/message បរាជ័យ។"""
+    def wrapper(*args, **kwargs):
+        args = list(args)
+        orig_text, emojified = None, False
+
+        # Premium emoji via <tg-emoji> requires HTML parse_mode.
+        # Auto-apply whenever text has mapped premium ids (even if caller forgot parse_mode).
+        if text_kw is not None:
+            pm = kwargs.get("parse_mode")
+            if text_kw in kwargs and kwargs[text_kw]:
+                orig_text = kwargs[text_kw]
+                new_text = _emojify(orig_text)
+                if new_text != orig_text:
+                    kwargs[text_kw] = new_text
+                    emojified = True
+                    if not pm:
+                        kwargs["parse_mode"] = "HTML"
+            elif text_pos is not None and len(args) > text_pos and isinstance(args[text_pos], str):
+                orig_text = args[text_pos]
+                new_text = _emojify(orig_text)
+                if new_text != orig_text:
+                    args[text_pos] = new_text
+                    emojified = True
+                    if not pm:
+                        kwargs["parse_mode"] = "HTML"
+
+        markup = kwargs.get("reply_markup")
+        has_icon_markup = _markup_has_emoji_icon(markup)
+
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            # ⚠️ កំណត់ត្រា (កែ 2026-08-13): មុននេះ retry កើតឡើងលុះត្រាតែ error
+            # message *contain* ពាក្យ EMOJI/ICON/PREMIUM/STICKER ច្បាស់ៗ។ ប៉ុន្តែ
+            # Telegram ជួនកាលបដិសេធ request ទាំងមូល ដោយសារ icon_custom_emoji_id
+            # មិនត្រឹមត្រូវ ដោយគ្មានប្រាប់ពាក្យទាំងនោះក្នុង error text ផ្ទាល់ —
+            # ធ្វើឲ្យ retry-check ចាស់ខកខាន, exception ត្រូវ raise ចោល, telebot
+            # គ្រាន់តែ log ទៅ console ដោយគ្មានឆ្លើយតបអ្វីមកអ្នកប្រើទាល់តែសោះ
+            # (button "ស្ងាត់" ជានិច្ច)។ ឥឡូវ retry ក៏កើតឡើងបើ markup មាន
+            # icon_custom_emoji_id ណាមួយផងដែរ ទោះ error text មិននិយាយពី emoji
+            # ដោយផ្ទាល់ក៏ដោយ។
+            # Only strip premium on emoji/icon-related rejection — NOT on every error
+            # when markup merely *has* icons (old logic stripped premium on ANY failure).
+            if not _looks_emoji_related(e):
+                raise
+            logger.warning(f"⚠️ Premium emoji/icon rejected by Telegram — fallback unicode: {e}")
+            # Retry 1: keep caption/text premium, strip button icons only
+            # FIX: ENTITY_TEXT_INVALID -> resend without premium-emoji entities (plain emoji)
+            for _k in ("entities", "caption_entities"):
+                if kwargs.get(_k):
+                    kwargs[_k] = None
+            _strip_markup_icons(markup)
+            try:
+                return fn(*args, **kwargs)
+            except Exception as e2:
+                if not _looks_emoji_related(e2) and not emojified:
+                    logger.error(f"❌ Fallback failed: {e2}")
+                    raise
+                # Retry 2: strip tg-emoji tags too
+                if emojified:
+                    if text_kw is not None and text_kw in kwargs:
+                        kwargs[text_kw] = orig_text
+                    elif text_pos is not None and text_pos < len(args):
+                        args[text_pos] = orig_text
+                try:
+                    return fn(*args, **kwargs)
+                except Exception as e3:
+                    logger.error(f"❌ Full unicode fallback failed: {e3}")
+                    raise
+    return wrapper
+
+bot.send_message        = _wrap_safe_call(bot.send_message,        "text", 1)
+bot.reply_to            = _wrap_safe_call(bot.reply_to,             "text", 1)
+bot.edit_message_text   = _wrap_safe_call(bot.edit_message_text,    "text", 0)
+bot.send_photo          = _wrap_safe_call(bot.send_photo,           "caption", 2)
+bot.edit_message_caption= _wrap_safe_call(bot.edit_message_caption, "caption", 0)
+bot.edit_message_reply_markup = _wrap_safe_call(bot.edit_message_reply_markup, None, None)
+
+# ═══════════════════════════════════════════════════════════
+#  MULTI-BOT  — admin អាចបង្កើត bot ថ្មីពី /newbot ខាងក្នុង Telegram
+#  bot ថ្មីដំណើរការជា process ដាច់ដោយឡែក ដោយប្រើ script នេះឯងជា worker
+# ═══════════════════════════════════════════════════════════
+import subprocess as _subprocess
+CLONES_DIR     = _dpath("bot_clones")    # folder ផ្ទុក data របស់ bot រងនីមួយៗ
+CLONES_REGISTRY= _dpath("bot_clones.json")
+CLONE_BASE_PORT= 5057                   # bot ដើមប្រើ 5056, clone ចាប់ពី 5057
+clone_registry = _load(CLONES_REGISTRY, {})   # name -> {token, admin_id, camrapid_key, port, pid}
+
+# ── Sub-admins, Support config, CamRapidPay config (editable at runtime) ──
+sub_admins   = _load(SUB_ADMIN_FILE,   [])          # list of int UIDs
+try:
+    sub_admins = [int(x) for x in sub_admins]
+except Exception:
+    sub_admins = []
+
+BAN_LOG_FILE = _dpath("smm_ban_log.json")
+ban_log      = _load(BAN_LOG_FILE, [])   # list of {uid, action, by, ts, name}
+BLOCK_LOG_FILE = _dpath("smm_block_log.json")
+block_log    = _load(BLOCK_LOG_FILE, [])  # list of {uid, action, ts, name, username}
+support_cfg  = _load(SUPPORT_CFG_FILE, {"kh": "", "en": ""})   # custom support text per lang
+camrapid_cfg = _load(CAMRAPID_CFG_FILE, {"key": ""})            # live-editable API key
+aba_cfg      = _load(ABA_CFG_FILE, {"key": "", "merchant_id": ""})  # live-editable ABA PayWay (KHMER SYSTEM) key/merchant
+khpay_cfg    = _load(KHPAY_CFG_FILE, {"key": "", "merchant_id": ""})
+webhook_cfg  = _load(WEBHOOK_CFG_FILE, {"url": ""})              # live-editable CamRapidPay webhook URL
+paytoggle_cfg= _load(PAYTOGGLE_CFG_FILE, {"camrapid_enabled": False, "aba_enabled": True, "khpay_enabled": True})  # បិទ/បើក វិធីទូទាត់ (v13)
+paytoggle_cfg["camrapid_enabled"] = False  # hard-disable CamRapidPay
+
+
+# ★ Sync env → runtime cfg (clone spawn ផ្ញើ key តាម env — ធានាថា _effective_* រកឃើញ)
+def _sync_payment_keys_from_env():
+    changed = False
+    if KHPAY_API_KEY and not (khpay_cfg.get("key") or "").strip():
+        khpay_cfg["key"] = KHPAY_API_KEY
+        changed = True
+    if KHPAY_MERCHANT_ID and not (khpay_cfg.get("merchant_id") or "").strip():
+        khpay_cfg["merchant_id"] = KHPAY_MERCHANT_ID
+        changed = True
+    if CAMRAPID_API_KEY and not (camrapid_cfg.get("key") or "").strip():
+        camrapid_cfg["key"] = CAMRAPID_API_KEY
+        changed = True
+    if ABA_API_KEY and not (aba_cfg.get("key") or "").strip():
+        aba_cfg["key"] = ABA_API_KEY
+        changed = True
+    if ABA_MERCHANT_ID and not (aba_cfg.get("merchant_id") or "").strip():
+        aba_cfg["merchant_id"] = ABA_MERCHANT_ID
+        changed = True
+    # បើ PAY_METHOD កំណត់ method តែមួយ → បើក toggle នោះ
+    pref = (os.getenv("PAY_METHOD") or "auto").strip().lower()
+    if pref == "khpay":
+        paytoggle_cfg["khpay_enabled"] = True
+        paytoggle_cfg["camrapid_enabled"] = False
+        paytoggle_cfg["aba_enabled"] = False
+        changed = True
+    elif pref == "aba":
+        paytoggle_cfg["aba_enabled"] = True
+        paytoggle_cfg["camrapid_enabled"] = False
+        paytoggle_cfg["khpay_enabled"] = False
+        changed = True
+    elif pref in ("auto", "camrapid"):
+        if CAMRAPID_API_KEY or camrapid_cfg.get("key"):
+            paytoggle_cfg["camrapid_enabled"] = True
+    if changed:
+        try:
+            if khpay_cfg.get("key"):
+                _save(KHPAY_CFG_FILE, khpay_cfg)
+            if camrapid_cfg.get("key"):
+                _save(CAMRAPID_CFG_FILE, camrapid_cfg)
+            if aba_cfg.get("key"):
+                _save(ABA_CFG_FILE, aba_cfg)
+            _save(PAYTOGGLE_CFG_FILE, paytoggle_cfg)
+        except Exception as e:
+            logger.warning(f"[sync_pay_env] save: {e}")
+        logger.info(f"[sync_pay_env] pref={pref} khpay={bool(khpay_cfg.get('key'))} "
+                    f"camrapid={bool(camrapid_cfg.get('key'))} aba={bool(aba_cfg.get('key'))}")
+
+_sync_payment_keys_from_env()
+
+
+def _effective_camrapid_key():
+    """Return runtime key if set, else fall back to env/default"""
+    return camrapid_cfg.get("key") or CAMRAPID_API_KEY
+
+def _effective_aba_key():
+    """Return runtime ABA PayWay (KHMER SYSTEM) Profile Key if set, else fall back to env/default"""
+    return aba_cfg.get("key") or ABA_API_KEY
+
+def _effective_aba_merchant():
+    """Return runtime ABA PayWay (KHMER SYSTEM) Merchant ID if set, else fall back to env/default"""
+    return aba_cfg.get("merchant_id") or ABA_MERCHANT_ID
+
+def _effective_khpay_key():
+    return khpay_cfg.get("key") or KHPAY_API_KEY
+
+def _effective_khpay_merchant():
+    """Optional KHPAY merchant_id (mch_...) — omit = default merchant in account"""
+    return (khpay_cfg.get("merchant_id") or KHPAY_MERCHANT_ID or "").strip()
+
+def has_khpay():
+    return bool(_effective_khpay_key())
+
+def _log_payment_startup():
+    """Log + (clone) ជូនដំណឹង Admin ពី payment config ពេល start — ជួយ debug QR មិនចេញ"""
+    try:
+        lines = [
+            f"instance={INSTANCE_NAME or 'MASTER'}",
+            f"PAY_METHOD={os.getenv('PAY_METHOD') or 'auto'}",
+            f"camrapid={'YES' if _effective_camrapid_key() else 'NO'} enabled={is_pay_method_enabled('camrapid')}",
+            f"aba={'YES' if has_aba_payway() else 'NO'} enabled={is_pay_method_enabled('aba')}",
+            f"khpay={'YES' if has_khpay() else 'NO'} enabled={is_pay_method_enabled('khpay')} "
+            f"merchant={_effective_khpay_merchant() or '-'}",
+        ]
+        msg = " | ".join(lines)
+        logger.info(f"[payment_startup] {msg}")
+        # បើ clone និងគ្មាន method ណាមួយ — ជូនដំណឹង admin
+        if not IS_MASTER:
+            any_ok = (
+                (bool(_effective_camrapid_key()) and is_pay_method_enabled("camrapid"))
+                or (has_aba_payway() and is_pay_method_enabled("aba"))
+                or (has_khpay() and is_pay_method_enabled("khpay"))
+            )
+            if not any_ok:
+                try:
+                    bot.send_message(
+                        ADMIN_ID,
+                        "🚨 <b>Clone payment មិនទាន់ ready</b>\n"
+                        f"Bot: <code>{INSTANCE_NAME or '?'}</code>\n"
+                        f"<code>{msg}</code>\n\n"
+                        "→ Master: /mybots → ប្តូរ Step ទូទាត់ ឬ\n"
+                        "→ ក្នុង clone: 💠 KHPAY Key / 🔀 វិធីទូទាត់",
+                        parse_mode="HTML",
+                    )
+                except Exception as e:
+                    logger.warning(f"[payment_startup] notify failed: {e}")
+    except Exception as e:
+        logger.warning(f"[payment_startup] {e}")
+
+
+
+PAY_METHOD_LABELS = {"aba": "💳 ABA PayWay", "khpay": "💠 KHPAY"}  # CamRapidPay removed from UI
+
+def is_pay_method_enabled(method):
+    """True បើ admin មិនទាន់បិទវិធីទូទាត់នេះទេ។
+    CamRapidPay ត្រូវបានលុបចេញពី product — តែងតែ False។"""
+    if method in ("camrapid", "auto"):
+        return False
+    return bool(paytoggle_cfg.get(f"{method}_enabled", True))
+
+def set_pay_method_enabled(method, enabled):
+    paytoggle_cfg[f"{method}_enabled"] = bool(enabled)
+    _save(PAYTOGGLE_CFG_FILE, paytoggle_cfg)
+
+def _paytoggle_status_lines():
+    lines = []
+    for method, label in PAY_METHOD_LABELS.items():
+        if method == "camrapid":
+            configured = bool(_effective_camrapid_key())
+        elif method == "aba":
+            configured = has_aba_payway()
+        else:
+            configured = has_khpay()
+        on = is_pay_method_enabled(method)
+        status = "🟢 បើក" if on else "🔴 បិទ"
+        cfg_note = "" if configured else " ⚠️ (មិនទាន់កំណត់ Key)"
+        lines.append(f"{label}: <b>{status}</b>{cfg_note}")
+    return "\n".join(lines)
+
+def _paytoggle_kb():
+    kb = InlineKeyboardMarkup()
+    for method, label in PAY_METHOD_LABELS.items():
+        on = is_pay_method_enabled(method)
+        btn_txt = f"{'🔴 បិទ' if on else '🟢 បើក'} {label}"
+        kb.add(InlineKeyboardButton(btn_txt, callback_data=f"paytoggle:{method}",
+                                    color=("danger" if on else "active")))
+    return kb
+
+def is_admin(uid):
+    """True if uid is master admin OR sub-admin (int-safe)."""
+    try:
+        uid = int(uid)
+    except Exception:
+        return False
+    try:
+        if uid == int(ADMIN_ID):
+            return True
+    except Exception:
+        pass
+    for a in (sub_admins or []):
+        try:
+            if int(a) == uid:
+                return True
+        except Exception:
+            continue
+    return False
+clone_procs    = {}                            # name -> subprocess.Popen (តែក្នុង process នេះប៉ុណ្ណោះ)
+
+def _clone_dir(name):
+    d = os.path.join(CLONES_DIR, name)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _seed_clone_payment_files(wdir, cfg):
+    """សរសេរ payment keys ចូល DATA_DIR របស់ clone មុន spawn —
+    ធានាថា _effective_* ក្នុង clone រកឃើញ key (មិនពឹងតែលើ env តែម្នាក់ឯង)"""
+    try:
+        pay = cfg.get("pay_method", "auto")
+        # CamRapid
+        _save(os.path.join(wdir, "smm_camrapid.json"), {
+            "key": cfg.get("camrapid_key", "") if pay == "auto" else "",
+        })
+        # ABA
+        _save(os.path.join(wdir, "smm_aba.json"), {
+            "key": cfg.get("aba_key", "") if pay == "aba" else "",
+            "merchant_id": cfg.get("aba_merchant", "") if pay == "aba" else "",
+        })
+        # KHPAY
+        _save(os.path.join(wdir, "smm_khpay.json"), {
+            "key": cfg.get("khpay_key", "") if pay == "khpay" else "",
+            "merchant_id": cfg.get("khpay_merchant", "") if pay == "khpay" else "",
+        })
+        # Toggle — បើកតែ method ដែលកំណត់ (បិទផ្សេង)
+        _save(os.path.join(wdir, "smm_paytoggle.json"), {
+            "camrapid_enabled": pay == "auto",
+            "aba_enabled": pay == "aba",
+            "khpay_enabled": pay == "khpay",
+        })
+        # Manual QR (payment method 2).
+        # FIX: a Telegram file_id only works for the bot that received the photo. The QR was uploaded to the
+        # MASTER bot, so a clone (different token) could not send it -> errors / no QR. Download the image once
+        # and store it inside the clone's data dir; the clone sends it as a file.
+        photo_path = ""
+        src_id = cfg.get("manual_qr_photo_id", "") if pay == "manual" else ""
+        if src_id:
+            target = os.path.join(wdir, "manual_qr.jpg")
+            marker = os.path.join(wdir, "manual_qr.src")
+            same = False
+            try:
+                if os.path.exists(target) and os.path.exists(marker):
+                    with open(marker, "r", encoding="utf8") as _mf:
+                        same = _mf.read().strip() == src_id
+            except Exception:
+                same = False
+            if not same:
+                try:
+                    _fi = bot.get_file(src_id)
+                    _data = bot.download_file(_fi.file_path)
+                    os.makedirs(wdir, exist_ok=True)
+                    with open(target, "wb") as _f:
+                        _f.write(_data)
+                    with open(marker, "w", encoding="utf8") as _mf:
+                        _mf.write(src_id)
+                except Exception as _e:
+                    logger.error(f"[clone_seed] manual QR download failed for {os.path.basename(wdir)}: {_e}")
+            if os.path.exists(target):
+                photo_path = "manual_qr.jpg"
+        _save(os.path.join(wdir, "manual_qr.json"), {
+            "enabled": pay == "manual",
+            "photo_id": src_id,
+            "photo_path": photo_path,
+            "info": cfg.get("manual_qr_info", "") if pay == "manual" else "",
+        })
+        logger.info(f"[clone_seed] {os.path.basename(wdir)} pay={pay} "
+                    f"khpay_key={'yes' if cfg.get('khpay_key') else 'no'} "
+                    f"camrapid={'yes' if cfg.get('camrapid_key') else 'no'} "
+                    f"aba={'yes' if cfg.get('aba_key') else 'no'}")
+    except Exception as e:
+        logger.error(f"[clone_seed] failed: {e}")
+
+def _next_clone_port():
+    used = {v.get("port") for v in clone_registry.values()}
+    p = CLONE_BASE_PORT
+    while p in used:
+        p += 1
+    return p
+
+def _clone_is_running(name):
+    proc = clone_procs.get(name)
+    return proc is not None and proc.poll() is None
+
+def _spawn_clone(name, cfg):
+    # បញ្ឈប់ process ចាស់មុន spawn ថ្មី — កាត់ 409
+    try:
+        _stop_clone(name)
+        time.sleep(1.5)
+    except Exception:
+        pass
+    tok = (cfg.get("token") or "").strip()
+    if not tok:
+        raise ValueError(f"clone {name}: empty token")
+    if tok == (BOT_TOKEN or "").strip():
+        raise ValueError(f"clone {name}: token ដូច master BOT_TOKEN — នឹង 409 Conflict")
+    for other, ocfg in list(clone_registry.items()):
+        if other == name:
+            continue
+        if (ocfg.get("token") or "").strip() == tok:
+            raise ValueError(f"clone {name}: token ដូច clone '{other}' — នឹង 409 Conflict")
+    wdir = _clone_dir(name)
+    env = os.environ.copy()
+    # ★ កុំ inherit Order/Pay bot token ពី master — បើ inherit នឹង 409 + role ច្របូកច្របល់
+    for _k in (
+        "ORDER_BOT_TOKEN", "PAY_BOT_TOKEN", "ORDER_BOT_CHAT_ID", "PAY_BOT_CHAT_ID",
+        "WEBHOOK_URL", "INSTANCE_NAME", "BOT_DISPLAY_NAME", "BOT_WELCOME_MSG",
+    ):
+        env.pop(_k, None)
+    env["ORDER_BOT_TOKEN"] = ""
+    env["PAY_BOT_TOKEN"] = ""
+    env["BOT_TOKEN"]        = cfg["token"]
+    _aid = cfg.get("admin_id") or cfg.get("new_admin_id") or 0
+    try:
+        _aid = int(_aid)
+    except Exception:
+        _aid = 0
+    if not _aid:
+        raise ValueError(f"clone {name}: admin_id មិនត្រឹមត្រូវ")
+    env["ADMIN_ID"]         = str(_aid)
+    env["CAMRAPID_API_KEY"] = cfg.get("camrapid_key", "")
+    env["ABA_API_KEY"]      = cfg.get("aba_key", "")
+    env["ABA_MERCHANT_ID"]  = cfg.get("aba_merchant", "")
+    env["KHPAY_API_KEY"]    = cfg.get("khpay_key", "")
+    env["KHPAY_MERCHANT_ID"]= cfg.get("khpay_merchant", "")
+    env["PAY_METHOD"]       = cfg.get("pay_method", "auto")
+    env["CONTROL_PORT"]     = str(cfg["port"])
+    env["CONTROL_KEY"]      = f"ctrl_{name}"
+    env["INSTANCE_NAME"]    = name
+    env["BOT_DISPLAY_NAME"] = cfg.get("display_name", name)
+    env["BOT_WELCOME_MSG"]  = cfg.get("welcome_msg", "")
+    env["DATA_DIR"]         = wdir   # ★ ធ្វើឲ្យ clone នីមួយៗសរសេរ/អាន data (users/wallets/orders/…) ដាច់ដោយឡែកក្នុង bot_clones/<name>/ មិនប៉ះពាល់ bot ដើម ឬ clone ផ្សេងទៀត
+    env["MASTER_DATA_DIR"]  = MASTER_DATA_DIR   # ★ រក្សា smm_emoji.json ជាដើម ឲ្យចង្អុលទៅ data ដើមរួមគ្នា មិនប្រែប្រួលទៅតាម DATA_DIR របស់ clone
+    _seed_clone_payment_files(wdir, cfg)  # seed keys ចូល DATA_DIR មុន start
+    logf = open(os.path.join(wdir, "bot.log"), "a", encoding="utf-8")
+    proc = _subprocess.Popen(
+        [sys.executable, os.path.abspath(__file__)],
+        cwd=wdir, env=env, stdout=logf, stderr=_subprocess.STDOUT,
+    )
+    clone_procs[name] = proc
+    return proc
+
+def _stop_clone(name):
+    proc = clone_procs.get(name)
+    if proc and proc.poll() is None:
+        proc.terminate()
+        try: proc.wait(timeout=8)
+        except _subprocess.TimeoutExpired: proc.kill()
+    clone_procs.pop(name, None)
+
+_clone_restart_ts = {}  # name -> last restart unix
+_clone_fail_count = {}  # name -> consecutive auto-restart failures
+_CLONE_MAX_AUTO_RESTART = 3  # បន្ទាប់ពីនេះ បញ្ឈប់ auto — ត្រូវ admin start ដោយដៃ
+
+def _clone_watchdog():
+    while True:
+        time.sleep(45)
+        for name, cfg in list(clone_registry.items()):
+            if _clone_is_running(name):
+                _clone_fail_count[name] = 0  # healthy
+                continue
+            now = time.time()
+            last = _clone_restart_ts.get(name, 0)
+            fails = int(_clone_fail_count.get(name, 0) or 0)
+            # cooldown កាន់តែយូរពេល fail ច្រើន (3 / 8 / 15 នាទី)
+            cooldown = 180 if fails <= 0 else min(180 * (fails + 1), 900)
+            if now - last < cooldown:
+                logger.warning(
+                    "Clone '%s' down — cooldown %ss (fails=%s) មុន restart",
+                    name, int(cooldown - (now - last)), fails,
+                )
+                continue
+            if fails >= _CLONE_MAX_AUTO_RESTART:
+                # កុំ restart loop រាល់ 3 នាទី — ជាញឹកញាប់ជា 409 token ពីរ
+                if now - last > 3600:
+                    _clone_restart_ts[name] = now
+                    try:
+                        bot.send_message(
+                            ADMIN_ID,
+                            f"🛑 Clone <b>{name}</b> បិទ — auto-restart ឈប់បន្ទាប់ពី "
+                            f"<b>{_CLONE_MAX_AUTO_RESTART}</b> លើក។\n\n"
+                            f"មូលហេតុញឹកញាប់: <b>409 Conflict</b> (token រត់ 2 កន្លែង)\n"
+                            f"Admin ID: <code>{cfg.get('admin_id')}</code>\n\n"
+                            f"ធ្វើ:\n"
+                            f"1) ពិនិត្យ token bot <b>{name}</b> មិនត្រូវដូច master / clone ផ្សេង\n"
+                            f"2) បិទ service/Termux ដែលប្រើ token តែមួយ\n"
+                            f"3) Admin → Clone → Start <b>{name}</b> ដោយដៃ",
+                            parse_mode="HTML",
+                        )
+                    except Exception:
+                        pass
+                continue
+            logger.warning(f"Clone '{name}' not running — starting/restarting (fail#{fails+1})...")
+            try:
+                _clone_restart_ts[name] = now
+                _spawn_clone(name, cfg)
+                _clone_fail_count[name] = fails + 1
+                try:
+                    bot.send_message(
+                        ADMIN_ID,
+                        f"⚠️ Bot <b>{name}</b> ត្រូវបាន (re)start ស្វ័យប្រវត្តិ "
+                        f"(#{fails + 1}/{_CLONE_MAX_AUTO_RESTART})។\n"
+                        f"Admin ID: <code>{cfg.get('admin_id')}</code>\n"
+                        f"(បើ restart ញឹកញាប់ = token <b>409</b> ឬ crash — "
+                        f"ពិនិត្យ token មិនត្រូវរត់ 2 កន្លែង)",
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
+            except Exception as e:
+                _clone_fail_count[name] = fails + 1
+                logger.error(f"Clone watchdog failed for {name}: {e}")
+
+
+def _make_session():
+    s = http_req.Session()
+    r = Retry(total=3, backoff_factor=2, status_forcelist=[500,502,503,504])
+    a = HTTPAdapter(max_retries=r)
+    s.mount("http://", a); s.mount("https://", a)
+    return s
+http = _make_session()
+
+# ═══════════════════════════════════════════════════════════
+#  LANGUAGE
+# ═══════════════════════════════════════════════════════════
+STRINGS = {
+    "kh": {
+        "welcome": (
+            "👋 សួស្តី!\n"
+            "━━━━━━━━━━━━━━\n"
+            "<b>Kaijaklike</b> · SMM Boost\n"
+            "Views · Likes · Followers · TikTok\n"
+            "━━━━━━━━━━━━━━\n"
+            "💰 Balance: <b>${:.2f}</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            "🛒 បញ្ជាទិញ  ·  💸 បញ្ចូលលុយ\n"
+            "📋 ប្រវត្តិ  ·  🔍 តាមដាន order"
+        ),
+        "select_lang":   "🌐 ជ្រើសភាសាដែលអ្នកចូលចិត្ត:",
+        "lang_set":      "✅ ផ្លាស់ប្តូរភាសារួចហើយ!",
+        "menu":          "🏠 ត្រឡប់ Menu",
+        "banned":        "🚫 គណនីរបស់អ្នកត្រូវបាន ban! សូមទំនាក់ Admin ប្រសិនបើមានបញ្ហា។",
+        "cancel_ok":     "🏠 ត្រឡប់ Menu ហើយ! 😊",
+        "no_service":    "❌ មិនទាន់មាន Service ទេ នឹងដាក់ឆាប់ៗ!",
+        "choose_platform": "ជ្រើស Platform ដែលចង់ boost:",
+        "choose_qty":    "ជ្រើស Package:",
+        "send_link":     "ផ្ញើ Link វីដេអូរបស់អ្នកមក:",
+        "low_balance":   "❌ លុយមិនគ្រប់! សូម Top Up ជាមុន 💸",
+        "order_done":    "✅ Order បានទទួលហើយ! នឹងដំណើរការឆាប់ៗ 🙏\nអរគុណដែលប្រើសេវា Kaijaklike! 💙",
+        "deposit_ok":    "✅ ដាក់លុយបានជោគជ័យ! 🎉\nអរគុណច្រើនដែលបន្ថែម Balance! 💙 Kaijaklike",
+        "qr_expired":    "⏰ QR ផុតហើយ! សូម Top Up ម្តងទៀតនៅ",
+        "qr_error":      "⚠️ មានបញ្ហា Generate QR! សូមទំនាក់ Admin 🙏",
+        "track_prompt":  "🔍 វាយ Order ID របស់អ្នក (ឧ: 206406):",
+        "order_notfound":"❌ រកមិនឃើញ Order នេះទេ! ត្រូវប្រាកដ ID ត្រឹមត្រូវ",
+        "no_orders":     "❌ មិនទាន់មាន Order ណាមួយទេ!",
+        "how_to_use": (
+            "💡 <b>របៀបប្រើ Kaijaklike</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "1️⃣ <b>💸 បញ្ចូលលុយ</b> → Scan QR ABA\n"
+            "2️⃣ <b>🛒 បញ្ជាទិញ</b> → ជ្រើស Package → ផ្ញើ Link\n"
+            "3️⃣ <b>🔍 តាមដាន</b> / <b>📋 ប្រវត្តិ</b> → មើលស្ថានភាព\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "❓ មានសំណួរ ទំនាក់ Admin បានគ្រប់ពេល! 😊"
+        ),
+        "support_msg": (
+            "💬 <b>ទំនាក់ Admin Kaijaklike</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "📞 Admin: @smos_sne1\n"
+            "⏱ ទំនាក់បានគ្រប់ពេល!\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "💡 មានបញ្ហា Order ឬ Payment\n"
+            "ផ្ញើ Order ID មកផ្ទាល់ Admin 🙏"
+        ),
+        "fallback": "😊 ប្រើប៊ូតុង Menu ខាងក្រោមបាន!",
+    },
+    "en": {
+        "welcome": (
+            "👋 Hello!\n"
+            "━━━━━━━━━━━━━━\n"
+            "<b>Kaijaklike</b> · SMM Boost\n"
+            "Views · Likes · Followers · TikTok\n"
+            "━━━━━━━━━━━━━━\n"
+            "💰 Balance: <b>${:.2f}</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            "🛒 Order  ·  💸 Top Up\n"
+            "📋 History  ·  🔍 Track"
+        ),
+        "select_lang":   "🌐 Choose your language:",
+        "lang_set":      "✅ Language updated!",
+        "menu":          "🏠 Back to Menu",
+        "banned":        "🚫 Your account has been banned. Contact Admin if you think this is a mistake.",
+        "cancel_ok":     "🏠 Back to Menu!",
+        "no_service":    "❌ No services yet — check back soon!",
+        "choose_platform": "Pick a platform to boost:",
+        "choose_qty":    "Choose a package:",
+        "send_link":     "Send your video link:",
+        "low_balance":   "❌ Not enough balance! Please Top Up first 💸",
+        "order_done":    "✅ Order received! We'll process it shortly 🙏\nThank you for using Kaijaklike! 💙",
+        "deposit_ok":    "✅ Deposit successful! 🎉\nThank you for topping up! 💙 Kaijaklike",
+        "qr_expired":    "⏰ QR expired! Please Top Up again",
+        "qr_error":      "⚠️ QR error! Please contact Admin 🙏",
+        "track_prompt":  "🔍 Send your Order ID (e.g. 206406):",
+        "order_notfound":"❌ Order not found! Make sure the ID is correct.",
+        "no_orders":     "❌ No orders yet!",
+        "how_to_use": (
+            "💡 <b>How to use Kaijaklike</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "1️⃣ Top Up → Tap <b>💸 Top Up</b> → Scan QR\n"
+            "2️⃣ Order → Tap <b>🛒 Order</b> → Pick package → Send link\n"
+            "3️⃣ Track → Tap <b>📋 History</b> → Check status\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "❓ Questions? Contact Admin anytime! 😊"
+        ),
+        "support_msg": (
+            "💬 <b>Contact Kaijaklike Admin</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "📞 Admin: @smos_sne1\n"
+            "⏱ Available anytime!\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "💡 For order or payment issues,\n"
+            "send your Order ID directly to Admin 🙏"
+        ),
+        "fallback": "😊 Use the menu buttons below!",
+    },
+}
+
+def get_lang(uid): return user_lang.get(str(uid), "kh")
+
+def t(uid, key, *args):
+    lang = get_lang(uid)
+    s = STRINGS.get(lang, STRINGS["kh"]).get(key) or STRINGS["kh"].get(key, key)
+    if "Kaijaklike" in s:
+        s = s.replace("Kaijaklike", _bot_brand())
+    if "@smos_sne1" in s:
+        s = s.replace("@smos_sne1", _admin_contact())
+    if args:
+        try: return s.format(*args)
+        except: return s
+    return s
+
+def lang_select_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🇰🇭 ខ្មែរ", callback_data="setlang:kh", color="active"),
+         InlineKeyboardButton("🇬🇧 English", callback_data="setlang:en", color="active")]
+    ])
+
+# ═══════════════════════════════════════════════════════════
+#  WALLET HELPERS
+# ═══════════════════════════════════════════════════════════
+def bal(uid): return float(wallets.get(str(uid), 0))
+def add_bal(uid, amt):
+    wallets[str(uid)] = round(bal(uid) + amt, 2)
+    _save(WALLETS_FILE, wallets)
+def ded_bal(uid, amt):
+    wallets[str(uid)] = max(0, round(bal(uid) - amt, 2))
+    _save(WALLETS_FILE, wallets)
+def set_bal(uid, amt):
+    wallets[str(uid)] = round(float(amt), 2)
+    _save(WALLETS_FILE, wallets)
+
+# ═══════════════════════════════════════════════════════════
+#  REFERRAL — ណែនាំមិត្ត · ទទួល 5% រាល់ដងដែលគេដាក់លុយ
+# ═══════════════════════════════════════════════════════════
+REFERRAL_FILE = _dpath("smm_referrals.json")
+REFERRAL_RATE = float(os.getenv("REFERRAL_RATE", "0.05") or 0.05)  # 5%
+referral_db = _load(REFERRAL_FILE, {"by_user": {}, "rate": REFERRAL_RATE})
+
+def _ref_save():
+    try:
+        referral_db["rate"] = REFERRAL_RATE
+        _save(REFERRAL_FILE, referral_db)
+    except Exception as e:
+        logger.warning(f"[referral] save: {e}")
+
+def _ref_user(uid):
+    uid_str = str(uid)
+    by = referral_db.setdefault("by_user", {})
+    if uid_str not in by or not isinstance(by.get(uid_str), dict):
+        by[uid_str] = {
+            "referrer": None,
+            "joined_ts": 0,
+            "earned": 0.0,
+            "invited_count": 0,
+            "dep_from_refs": 0.0,
+        }
+    return by[uid_str]
+
+def _ref_link(uid):
+    uname = _bot_username()
+    return f"https://t.me/{uname}?start=ref{uid}"
+
+def _ref_bind(new_uid, referrer_uid):
+    """DISABLED — referral feature removed."""
+    return False, "disabled"
+    """Bind referrer once for new user. No self-ref, no overwrite."""
+    try:
+        new_s = str(new_uid)
+        ref_s = str(referrer_uid).strip()
+        if not ref_s.isdigit():
+            return False, "invalid"
+        if new_s == ref_s:
+            return False, "self"
+        if int(ref_s) == int(ADMIN_ID):
+            # allow admin as referrer? yes, or skip — allow
+            pass
+        u = _ref_user(new_s)
+        if u.get("referrer"):
+            return False, "already"
+        # referrer should exist as telegram user ideally — still bind
+        u["referrer"] = ref_s
+        u["joined_ts"] = int(time.time())
+        ru = _ref_user(ref_s)
+        ru["invited_count"] = int(ru.get("invited_count") or 0) + 1
+        _ref_save()
+        logger.info(f"[referral] bound {new_s} <- {ref_s}")
+        return True, "ok"
+    except Exception as e:
+        logger.warning(f"[referral] bind: {e}")
+        return False, "error"
+
+def _ref_pay_commission(depositor_uid, deposit_amount, dep_id=""):
+    """DISABLED — referral feature removed."""
+    return 0
+    """Give referrer REFERRAL_RATE of deposit. Returns commission or 0."""
+    try:
+        amt = round(float(deposit_amount or 0), 2)
+        if amt <= 0:
+            return 0.0
+        u = _ref_user(depositor_uid)
+        ref_s = u.get("referrer")
+        if not ref_s:
+            return 0.0
+        if str(ref_s) == str(depositor_uid):
+            return 0.0
+        rate = float(referral_db.get("rate") or REFERRAL_RATE or 0.05)
+        commission = round(amt * rate, 2)
+        if commission < 0.01:
+            return 0.0
+        add_bal(ref_s, commission)
+        ru = _ref_user(ref_s)
+        ru["earned"] = round(float(ru.get("earned") or 0) + commission, 2)
+        ru["dep_from_refs"] = round(float(ru.get("dep_from_refs") or 0) + amt, 2)
+        _ref_save()
+        try:
+            bot.send_message(
+                int(ref_s),
+                f"🎁 <b>ណែនាំមិត្ត — ទទួលកម្រៃ!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"👤 មិត្តដាក់លុយ: <code>{depositor_uid}</code>\n"
+                f"💰 ដាក់: <b>${amt:.2f}</b>\n"
+                f"✨ កម្រៃ {rate*100:.0f}%: <b>+${commission:.2f}</b>\n"
+                f"💳 Balance: <b>${bal(ref_s):.2f}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"សរុបកម្រៃ: <b>${float(ru.get('earned') or 0):.2f}</b>",
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.debug(f"[referral] notify ref: {e}")
+        try:
+            pnotify(
+                f"🎁 <b>Referral {rate*100:.0f}%</b>\n"
+                f"👤 Ref <code>{ref_s}</code> ← User <code>{depositor_uid}</code>\n"
+                f"💰 Dep ${amt:.2f} → +${commission:.2f}"
+                + (f"\n🆔 {dep_id}" if dep_id else "")
+            )
+        except Exception:
+            pass
+        logger.info(f"[referral] {ref_s} +${commission} from {depositor_uid} dep ${amt}")
+        return commission
+    except Exception as e:
+        logger.warning(f"[referral] commission: {e}")
+        return 0.0
+
+def _ref_rate_pct():
+    return float(referral_db.get("rate") or REFERRAL_RATE or 0.05) * 100
+
+def _ref_share_plain(uid):
+    """Plain text for Telegram native Share — សម្រាប់ Forward / ចែកទៅ Chat."""
+    link = _ref_link(uid)
+    rate = _ref_rate_pct()
+    brand = _bot_brand()
+    return (
+        f"🔥 រកលុយជាមួយ {brand}\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"ចុចតំណ → ចូល Bot → ដាក់លុយ\n"
+        f"មិត្តដែលណែនាំទទួលកម្រៃ {rate:.0f}% រាល់ដង!\n\n"
+        f"⚡ TikTok Khmer · Likes · Views · Followers\n"
+        f"💙 លឿន · Auto · តម្លៃសមរម្យ\n\n"
+        f"👉 ចូលឥឡូវ:\n{link}"
+    )
+
+def _ref_panel_text(uid):
+    """សារស្អាត: ផ្នែកលើ = សម្រាប់ Forward / ផ្នែកក្រោម = ស្ថិតិម្ចាស់."""
+    lang = user_lang.get(str(uid), "kh")
+    u = _ref_user(uid)
+    link = _ref_link(uid)
+    rate = _ref_rate_pct()
+    earned = float(u.get("earned") or 0)
+    invited = int(u.get("invited_count") or 0)
+    dep_sum = float(u.get("dep_from_refs") or 0)
+    my_ref = u.get("referrer") or "—"
+    brand = _bot_brand()
+    if lang == "kh":
+        return (
+            f"🎁 <b>ណែនាំមិត្ត · រកលុយ</b>\n"
+            f"<b>{brand}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n\n"
+            f"✨ ទទួល <b>{rate:.0f}%</b> រាល់ដងដែលមិត្តដាក់លុយ\n"
+            f"⚡ TikTok Khmer · Likes · Views · Followers\n"
+            f"💙 លឿន · សុវត្ថិភាព · Auto\n\n"
+            f"📌 <b>របៀបចែក</b>\n"
+            f"1️⃣ ចុច «ចែករំលែក» ឬ Forward សារនេះ\n"
+            f"2️⃣ មិត្តចុចតំណ → បើក Bot\n"
+            f"3️⃣ គេដាក់លុយ → អ្នកបាន {rate:.0f}% ស្វ័យប្រវត្តិ\n\n"
+            f"🔗 <b>តំណណែនាំរបស់អ្នក</b>\n"
+            f"<code>{link}</code>\n\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"📊 <b>ស្ថិតិរបស់អ្នក</b>\n"
+            f"👥 ណែនាំបាន · <b>{invited}</b> នាក់\n"
+            f"💵 ដាក់ពីមិត្ត · <b>${dep_sum:.2f}</b>\n"
+            f"🎁 សរុបកម្រៃ · <b>${earned:.2f}</b>\n"
+            f"👤 អ្នកណែនាំខ្ញុំ · <code>{my_ref}</code>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"<i>👇 ចុចប៊ូតុងខាងក្រោម ដើម្បីចែក · ចូល Channel / Group</i>"
+        )
+    return (
+        f"🎁 <b>Invite Friends · Earn</b>\n"
+        f"<b>{brand}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n\n"
+        f"✨ Earn <b>{rate:.0f}%</b> on every friend deposit\n"
+        f"⚡ TikTok Khmer · Likes · Views · Followers\n\n"
+        f"📌 <b>How</b>\n"
+        f"1) Tap Share or Forward\n"
+        f"2) Friend opens the bot via your link\n"
+        f"3) They deposit → you get {rate:.0f}% auto\n\n"
+        f"🔗 <b>Your invite link</b>\n"
+        f"<code>{link}</code>\n\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📊 <b>Your stats</b>\n"
+        f"👥 Invited · <b>{invited}</b>\n"
+        f"💵 From refs · <b>${dep_sum:.2f}</b>\n"
+        f"🎁 Earned · <b>${earned:.2f}</b>\n"
+        f"👤 My referrer · <code>{my_ref}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"<i>👇 Use buttons below to share · open Channel / Group</i>"
+    )
+
+def _ref_community_links():
+    """Channel + Group links from force_sub / referral_db / env."""
+    ch = ""
+    grp = ""
+    try:
+        if isinstance(force_sub_cfg, dict):
+            ch = (force_sub_cfg.get("channel_link") or "").strip()
+    except Exception:
+        pass
+    try:
+        if isinstance(referral_db, dict):
+            ch = ch or (referral_db.get("channel_link") or "").strip()
+            grp = (referral_db.get("group_link") or "").strip()
+    except Exception:
+        pass
+    ch = ch or (os.getenv("REFERRAL_CHANNEL_LINK") or os.getenv("CHANNEL_LINK") or "").strip()
+    grp = grp or (
+        os.getenv("REFERRAL_GROUP_LINK")
+        or os.getenv("SUPPORT_GROUP_LINK")
+        or os.getenv("GROUP_LINK")
+        or ""
+    ).strip()
+    def _norm(u):
+        u = (u or "").strip()
+        if not u:
+            return ""
+        if u.startswith("http"):
+            return u
+        if u.startswith("@"):
+            return f"https://t.me/{u[1:]}"
+        if u.startswith("t.me/"):
+            return f"https://{u}"
+        return f"https://t.me/{u}"
+    return _norm(ch), _norm(grp)
+
+def _ref_inline_kb(uid):
+    """ប៊ូតុង: ចែករំលែក · Channel · Group · បើក Bot."""
+    from urllib.parse import quote
+    lang = user_lang.get(str(uid), "kh")
+    link = _ref_link(uid)
+    share_txt = _ref_share_plain(uid)
+    share_url = (
+        "https://t.me/share/url?url="
+        + quote(link, safe="")
+        + "&text="
+        + quote(share_txt, safe="")
+    )
+    ch, grp = _ref_community_links()
+    kb = InlineKeyboardMarkup()
+    if lang == "kh":
+        kb.row(_ikb_premium("📤 ចែករំលែក", url=share_url, color="progress"))
+        row = []
+        if ch:
+            row.append(_ikb_premium("📢 Channel", url=ch, color="active"))
+        if grp:
+            row.append(_ikb_premium("💬 Group", url=grp, color="active"))
+        if row:
+            if len(row) == 2:
+                kb.row(row[0], row[1])
+            else:
+                kb.row(row[0])
+        kb.row(_ikb_premium("🤖 បើកតំណណែនាំ", url=link, color="active"))
+        kb.row(_ikb_premium("📋 របៀប Forward", callback_data="ref:howto", color="inactive"))
+    else:
+        kb.row(_ikb_premium("📤 Share", url=share_url, color="progress"))
+        row = []
+        if ch:
+            row.append(_ikb_premium("📢 Channel", url=ch, color="active"))
+        if grp:
+            row.append(_ikb_premium("💬 Group", url=grp, color="active"))
+        if row:
+            if len(row) == 2:
+                kb.row(row[0], row[1])
+            else:
+                kb.row(row[0])
+        kb.row(_ikb_premium("🤖 Open invite link", url=link, color="active"))
+        kb.row(_ikb_premium("📋 How to forward", callback_data="ref:howto", color="inactive"))
+    return kb
+
+
+
+# ═══════════════════════════════════════════════════════════
+#  PROMO CODE
+# ═══════════════════════════════════════════════════════════
+def apply_promo(uid, code, amount):
+    code = code.strip().upper()
+    p = promos.get(code)
+    if not p: return amount, 0, "❌ Promo Code ខុស!"
+    if p.get("uses", 0) > 0 and p.get("used", 0) >= p["uses"]:
+        return amount, 0, "❌ Promo Code ផុតសិទ្ធហើយ!"
+    user_used = p.get("user_used", {})
+    if str(uid) in user_used:
+        return amount, 0, "❌ អ្នកបានប្រើ Promo Code នេះហើយ!"
+    # ការពារ Double-dip៖ កុំឲ្យ Generate ច្រើន QR ជាមួយ Code ដដែល ខណៈពេលមួយ Pending ចាំបង់ប្រាក់ស្រាប់
+    # (ព្រោះ confirm_promo() ត្រូវបានពន្យារពេលរហូតដល់ Payment ពិតជាបានបញ្ជាក់ មិនមែនពេល Generate QR ទៀតទេ)
+    for d in smm_deps.values():
+        if d.get("uid") == str(uid) and d.get("status") == "pending" and d.get("promo") == code:
+            return amount, 0, "❌ អ្នកមាន QR Pending ដែលប្រើ Promo Code នេះរួចហើយ! សូមបង់ប្រាក់ ឬចាំវាផុតកំណត់សិន។"
+    if p.get("pct", False):
+        discount = round(amount * float(p["discount"]) / 100, 2)
+    else:
+        discount = min(float(p["discount"]), amount)
+    final = max(0, round(amount - discount, 2))
+    return final, discount, None
+
+def confirm_promo(code, uid):
+    code = code.strip().upper()
+    p = promos.get(code)
+    if not p: return
+    p["used"] = p.get("used", 0) + 1
+    uu = p.get("user_used", {})
+    uu[str(uid)] = 1
+    p["user_used"] = uu
+    _save(PROMO_FILE, promos)
+
+# ═══════════════════════════════════════════════════════════
+#  SMM HELPERS
+# ═══════════════════════════════════════════════════════════
+def _smm_get_categories():
+    cats = []
+    for s in smm_services.values():
+        c = s.get("category", "Other")
+        if c not in cats: cats.append(c)
+    return cats
+
+def _smm_get_svcs_in_cat(cat):
+    return [(slug, s) for slug, s in smm_services.items() if s.get("category") == cat]
+
+# ── Link validation (កុំឲ្យ user ដាក់ Link ខុស Platform) ───────────────
+_URL_RE = _re.compile(r"^https?://[^\s/$.?#].[^\s]*$", _re.IGNORECASE)
+
+# ✏️ Platform ស្ដង់ដារ — key ត្រូវបានរក្សាទុកផ្ទាល់ក្នុង Service ("platform" field)
+# ដើម្បីសម្គាល់ Link ដោយច្បាស់លាស់តាមកម្មវិធីនីមួយៗ (មិនទាមទារ guess ពី category ទៀត)
+_PLATFORM_CHOICES = [
+    ("tiktok",    "🎵 TikTok",     ("tiktok.com",)),
+    ("facebook",  "📘 Facebook",   ("facebook.com", "fb.com", "fb.watch")),
+    ("instagram", "📸 Instagram",  ("instagram.com", "instagr.am")),
+    ("youtube",   "▶️ YouTube",    ("youtube.com", "youtu.be")),
+    ("telegram",  "📱 Telegram",   ("t.me", "telegram.me", "telegram.org")),
+    ("twitter",   "🐦 Twitter/X",  ("twitter.com", "x.com")),
+    ("threads",   "🧵 Threads",    ("threads.net",)),
+    ("other",     "🔓 ផ្សេង (មិនកំណត់ Domain)", None),
+]
+_PLATFORM_DOMAINS_BY_KEY = {k: d for k, _label, d in _PLATFORM_CHOICES}
+_PLATFORM_LABEL_BY_KEY   = {k: lbl for k, lbl, _d in _PLATFORM_CHOICES}
+# Category preset (buttons ចាស់) → platform key ស្វ័យប្រវត្តិ (មិនចាំបាច់សួរម្ដងទៀត)
+_CAT_TO_PLATFORM_KEY = {
+    "TikTok": "tiktok", "🇰🇭 TikTok Khmer": "tiktok",
+    "Facebook": "facebook", "Instagram": "instagram", "YouTube": "youtube",
+    "Telegram": "telegram", "Twitter": "twitter",
+}
+# keyword ស្វែងរកនៅក្នុង slug/category/label (fallback សម្រាប់ Service ចាស់ៗ
+# ដែលមិនទាន់មាន "platform" field ជាក់លាក់)
+_PLATFORM_DOMAINS = [
+    (("tiktok",),                 _PLATFORM_DOMAINS_BY_KEY["tiktok"]),
+    (("facebook", "fb "),          _PLATFORM_DOMAINS_BY_KEY["facebook"]),
+    (("instagram", " ig ", "insta"), _PLATFORM_DOMAINS_BY_KEY["instagram"]),
+    (("youtube", " yt "),          _PLATFORM_DOMAINS_BY_KEY["youtube"]),
+    (("telegram", " tg "),         _PLATFORM_DOMAINS_BY_KEY["telegram"]),
+    (("twitter", " x "),           _PLATFORM_DOMAINS_BY_KEY["twitter"]),
+    (("threads",),                 _PLATFORM_DOMAINS_BY_KEY["threads"]),
+]
+
+def _platform_pick_kb(prefix):
+    """ស្ថាបនា Inline Keyboard ជ្រើសរើស Platform (2 columns) សម្រាប់ prefix ដែលបញ្ជាក់"""
+    kb = InlineKeyboardMarkup()
+    row = []
+    for key, label, _d in _PLATFORM_CHOICES:
+        row.append(InlineKeyboardButton(label, callback_data=f"{prefix}:{key}",
+                                         color=("inactive" if key == "other" else "active")))
+        if len(row) == 2:
+            kb.row(*row); row = []
+    if row: kb.row(*row)
+    return kb
+
+def _detect_platform_domains(slug, s):
+    """រកឈ្មោះ Platform ដែលរំពឹងទុក៖ ប្រើ "platform" field ជាក់លាក់ជាមុនសិន
+    (កំណត់ដោយ Admin ពេលបង្កើត Service), បើគ្មាន ត្រឡប់ទៅ guess ពី category/label ចាស់វិញ។"""
+    platform = s.get("platform")
+    if platform:
+        return _PLATFORM_DOMAINS_BY_KEY.get(platform)
+    cat = s.get("category", "")
+    if cat in _CAT_TO_PLATFORM_KEY:
+        return _PLATFORM_DOMAINS_BY_KEY.get(_CAT_TO_PLATFORM_KEY[cat])
+    hay = f" {slug} {cat} {s.get('label','')} ".lower()
+    for keywords, domains in _PLATFORM_DOMAINS:
+        for kw in keywords:
+            if kw.strip() in hay:
+                return domains
+    return None
+
+# domain → platform key, សម្រាប់ Auto-detect Platform ផ្ទាល់ពី Link ដែល User ផ្ញើមក
+_DOMAIN_TO_PLATFORM_KEY = {}
+for _k, _lbl, _doms in _PLATFORM_CHOICES:
+    if _doms:
+        for _d in _doms:
+            _DOMAIN_TO_PLATFORM_KEY[_d] = _k
+
+def _detect_link_platform(link):
+    """ស្គាល់ Platform ពី Domain នៃ Link ខ្លួនឯង។ ត្រឡប់ (key, label) ឬ (None, None) បើមិនស្គាល់។"""
+    try:
+        netloc = link.split("://", 1)[-1].split("/", 1)[0].lower()
+    except Exception:
+        return None, None
+    for dom, key in _DOMAIN_TO_PLATFORM_KEY.items():
+        if netloc == dom or netloc.endswith("." + dom):
+            return key, _PLATFORM_LABEL_BY_KEY.get(key, key)
+    return None, None
+
+def _validate_order_link(link, slug, s):
+    """ត្រឡប់ (True, None) បើ Link ត្រឹមត្រូវ, ឬ (False, error_msg) បើខុស។"""
+    link = (link or "").strip()
+    if not link or " " in link or not _URL_RE.match(link):
+        return False, (
+            "❌ <b>Link មិនត្រឹមត្រូវ!</b>\n"
+            "សូមផ្ញើ Link ដែលចាប់ផ្ដើមដោយ <code>http://</code> ឬ <code>https://</code> "
+            "ដោយគ្មានចន្លោះ (space) ។"
+        )
+    domains = _detect_platform_domains(slug, s)
+    if domains:
+        netloc = link.split("://", 1)[-1].split("/", 1)[0].lower()
+        if not any(netloc == d or netloc.endswith("." + d) for d in domains):
+            expected = " / ".join(domains)
+            _detected_key, detected_label = _detect_link_platform(link)
+            got_line = (f"Link ដែលអ្នកផ្ញើគឺជា Link <b>{detected_label}</b> 👀\n"
+                        if detected_label else
+                        f"Link ដែលអ្នកផ្ញើមកពី Domain <code>{netloc}</code> ដែល Bot មិនស្គាល់ ⚠️\n")
+            return False, (
+                f"❌ <b>Link មិនត្រូវនឹង Service នេះទេ!</b>\n"
+                f"{got_line}"
+                f"Service នេះទាមទារ Link ពី <b>{expected}</b>\n"
+                f"សូមពិនិត្យ Link ឡើងវិញ ហើយផ្ញើម្ដងទៀត។"
+            )
+    return True, None
+
+def _auto_dep_bonus(amount):
+    """ត្រឡប់ Bonus ស្វ័យប្រវត្តិ (USD) សម្រាប់ចំនួនប្រាក់ដែលដាក់ — 0 បើមិនចូលលក្ខខណ្ឌ។"""
+    try:
+        if not dep_bonus_cfg.get("enabled", True):
+            return 0.0
+        amount = float(amount)
+        min_amt = float(dep_bonus_cfg.get("min_amount", 1.0))
+        if amount < min_amt:
+            return 0.0
+        pct = float(dep_bonus_cfg.get("pct", 5.0))
+        if pct <= 0:
+            return 0.0
+        return round(amount * pct / 100, 2)
+    except Exception:
+        return 0.0
+
+def _dep_bonus_status_text():
+    c = dep_bonus_cfg
+    if not c.get("enabled", True):
+        return "🎁 <b>Bonus ដាក់លុយ៖</b> <i>បិទ</i>"
+    return (f"🎁 <b>Bonus ដាក់លុយ៖</b> <b>{float(c.get('pct',5.0)):.0f}%</b> "
+            f"(ដាក់ចាប់ពី <b>${float(c.get('min_amount',1.0)):.2f}</b> ឡើងទៅ)")
+
+def _dep_qr_cooldown_status_text():
+    sec = int(dep_qr_cooldown_cfg.get("seconds", DEP_QR_COOLDOWN_SEC))
+    if sec <= 0:
+        return "⏳ <b>QR Cooldown៖</b> <i>បិទ (គ្មានកំណត់)</i>"
+    return (f"⏳ <b>QR Cooldown៖</b> <b>{sec} វិនាទី</b>\n"
+            f"👉 User ម្នាក់ៗត្រូវរង់ចាំ {sec} វិនាទី មុននឹងបង្កើត QR ថ្មីម្តងទៀត "
+            f"(ការពារ Spam ចុច 💸 បញ្ចូលលុយ ជាប់ៗគ្នា)។ Admin មិនកំណត់ទេ។")
+
+def _user_discount_admin_text():
+    lines = [
+        "🏷️ <b>បញ្ចុះតម្លៃ User — TikTok Khmer តែប៉ុណ្ណោះ</b>",
+        "━━━━━━━━━━━━━━━━━━",
+        "User ដែលកំណត់នៅទីនេះនឹងទទួលបានបញ្ចុះតម្លៃ <b>តែលើ Package 🇰🇭 TikTok Khmer</b> ប៉ុណ្ណោះ "
+        "(មិនអនុវត្តលើ Platform ផ្សេងទេ)។",
+        "",
+    ]
+    if not user_discounts:
+        lines.append("<i>មិនទាន់មាន User ណាទទួលបញ្ចុះតម្លៃទេ</i>")
+    else:
+        lines.append(f"📋 <b>បញ្ជី ({len(user_discounts)} នាក់):</b>")
+        for u_id, cfg in list(user_discounts.items())[:30]:
+            pct = float(cfg.get("pct", 0) or 0)
+            note = cfg.get("note") or ""
+            u = users_db.get(str(u_id), {})
+            name = u.get("name") or u.get("username") or "?"
+            note_txt = f" — {note}" if note else ""
+            lines.append(f"• <code>{u_id}</code> {name} → <b>{pct:.0f}%</b>{note_txt}")
+        if len(user_discounts) > 30:
+            lines.append(f"<i>... និង {len(user_discounts)-30} នាក់ទៀត</i>")
+    return "\n".join(lines)
+
+def _user_discount_admin_kb():
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("➕ បន្ថែម / កែ User", callback_data="udisc:add", color="active"))
+    if user_discounts:
+        kb.add(InlineKeyboardButton("🗑️ លុប User", callback_data="udisc:del", color="danger"))
+    kb.add(InlineKeyboardButton("🔄 Refresh", callback_data="udisc:list", color="progress"))
+    return kb
+
+def _smm_profit_pct(): return float(smm_profit.get("pct", 20))
+
+def _smm_sell_rate(cost, slug=None):
+    s = smm_services.get(slug, {})
+    if s.get("flat_price"): return float(s["flat_price"]) * 1000  # convert to per-1K for display
+    if s.get("custom_price"): return float(s["custom_price"])
+    return round(float(cost) * (1 + _smm_profit_pct() / 100), 4)
+
+def _round_price_01(x):
+    """បង្គត់តម្លៃទៅខ្ទង់ទសភាគទី 1 (0.1$) ដោយប្រើ round-half-up ធម្មតា — ខ្ទង់
+    ទសភាគទី 2 ≥ 5 ត្រូវបង្គត់ឡើង, < 5 បង្គត់ចុះ។ ឧ. $1.23 → $1.2, $1.25 → $1.3,
+    $1.27 → $1.3 ។ ប្រើ Decimal ដើម្បីជៀសវាង floating-point rounding ខុសឆ្គង
+    (round() ធម្មតារបស់ Python ប្រើ banker's rounding ដែលអាចបង្គត់ខុសពីអ្វី
+    ដែលមនុស្សរំពឹងទុក)។
+    ⚠️ Guard (កែ 2026-08-17): បើតម្លៃដើមធំជាង 0 ប៉ុន្តែតូចជាង $0.05, ការបង្គត់
+    ធម្មតានឹងបង្គត់ចុះទៅ <b>$0.00</b> — ធ្វើឲ្យសេវាមួយចំនួន (qty តូច × rate
+    ទាប) បង្ហាញតម្លៃ $0.0000 ខណៈវាមិនមែនឥតគិតថ្លៃទេ។ ក្នុងករណីនេះ បង្គត់ឡើង
+    ទៅ $0.10 ជំនួសវិញ ដើម្បីកុំឲ្យលក់ក្នុងតម្លៃ $0 ។"""
+    r = float(_Decimal(str(x)).quantize(_Decimal("0.1"), rounding=_ROUND_HALF_UP))
+    if r == 0.0 and float(x) > 0:
+        return 0.1
+    return r
+
+def _smm_price_for_order(slug, qty):
+    """Get actual price for an order (handles flat_price services)"""
+    s = smm_services.get(slug, {})
+    if s.get("flat_price"):
+        return float(s["flat_price"])  # flat: តម្លៃកំណត់ដោយ Admin ដោយផ្ទាល់ (ឧ. $0.99) —
+                                        # មិនបង្គត់ទេ ព្រោះជាតម្លៃចិត្តសាស្ត្រដែល Admin
+                                        # ចង់ឲ្យជាក់លាក់ តម្លៃប្រភេទនេះមិនមែនគណនាចេញទេ
+    sr = _smm_sell_rate(s.get("cost_rate", 0), slug)
+    return _round_price_01(round(sr * qty / 1000, 4))
+
+def _is_tiktok_khmer_service(slug, s=None):
+    """True បើ Service នេះជា TikTok Khmer (category ឬ slug) — សម្រាប់ User Discount"""
+    if s is None:
+        s = smm_services.get(slug, {})
+    cat = (s.get("category") or "").lower()
+    if "tiktok khmer" in cat or "🇰🇭" in (s.get("category") or ""):
+        return True
+    if slug and "tiktok_promote" in slug.lower():
+        return True
+    return False
+
+def _user_discount_pct(uid, slug):
+    """ត្រឡប់ % បញ្ចុះតម្លៃសម្រាប់ User នេះ លើ Service នេះ (0 បើគ្មាន ឬមិនមែន TikTok Khmer)"""
+    if not _is_tiktok_khmer_service(slug):
+        return 0.0
+    cfg = user_discounts.get(str(uid))
+    if not cfg:
+        return 0.0
+    try:
+        pct = float(cfg.get("pct", 0) or 0)
+        return max(0.0, min(100.0, pct))
+    except (TypeError, ValueError):
+        return 0.0
+
+def _apply_user_discount(uid, slug, base_price):
+    """អនុវត្តបញ្ចុះតម្លៃ User (TikTok Khmer តែប៉ុណ្ណោះ)។
+    ត្រឡប់ (final_price, discount_amount, pct)"""
+    pct = _user_discount_pct(uid, slug)
+    if pct <= 0:
+        return float(base_price), 0.0, 0.0
+    disc = round(float(base_price) * pct / 100.0, 2)
+    final = max(0.0, round(float(base_price) - disc, 2))
+    return final, disc, pct
+
+def _smm_price_for_user(uid, slug, qty):
+    """តម្លៃ Order បន្ទាប់ពីអនុវត្ត User Discount (បើមាន)"""
+    base = _smm_price_for_order(slug, qty)
+    final, _, _ = _apply_user_discount(uid, slug, base)
+    return final
+
+def _smm_cost_for_order(slug, qty):
+    """គណនាតម្លៃដើម (Provider cost) របស់ Order មួយ — ប្រើ cost_rate បច្ចុប្បន្ន
+    របស់ Service នោះ។ សម្រាប់ Flat/Manual item (flat_price) cost_rate តែងតែ 0
+    ដូច្នេះ profit = 100% នៃតម្លៃលក់ (ដូចគ្នានឹងវិធីគណនា sell-rate ផ្សេងទៀត
+    ក្នុងកូដ — ព្រោះមិនមានតាមដាន cost ដោយឡែកសម្រាប់ទំនិញទាំងនេះ)។"""
+    s = smm_services.get(slug, {})
+    if s.get("flat_price"):
+        return 0.0
+    cost_rate = float(s.get("cost_rate", 0) or 0)
+    return round(cost_rate * qty / 1000, 4)
+
+def _profit_sum(period_days=None):
+    """សរុប (revenue, cost, profit, count, margin%) របស់ SMM Orders ក្នុងចន្លោះ
+    period_days ថ្ងៃចុងក្រោយ (None = គ្រប់ពេល)។ Order ស្ថានភាព rejected/canceled
+    ត្រូវលើកលែង ព្រោះលុយត្រូវបានសងវិញទាំងអស់ — មិនមែនចំណេញពិតប្រាកដទេ។ Order
+    partial គិត Revenue ដកចេញនូវចំនួនលុយដែលបានសងវិញ (refunded) ដើម្បីឲ្យត្រឹមត្រូវ។"""
+    cutoff = int(time.time()) - period_days * 86400 if period_days else 0
+    revenue = cost = 0.0
+    count = 0
+    for o in smm_orders.values():
+        if o.get("status") in ("rejected", "canceled"):
+            continue
+        if o.get("ts", 0) < cutoff:
+            continue
+        price = float(o.get("price", 0) or 0) - float(o.get("refunded", 0) or 0)
+        revenue += price
+        cost += _smm_cost_for_order(o.get("slug", ""), o.get("qty", 0))
+        count += 1
+    profit = revenue - cost
+    margin = (profit / revenue * 100) if revenue else 0.0
+    return revenue, cost, profit, count, margin
+
+def _profit_report_text():
+    """សាងសង់របាយការណ៍ចំណេញពេញលេញ — ថ្ងៃនេះ / សប្តាហ៍នេះ / ខែនេះ / សរុប។"""
+    lines = ["💹 <b>របាយការណ៍ចំណេញ (Profit Report)</b>", "━━━━━━━━━━━━━━━━━━"]
+    for label, days in [("📅 ថ្ងៃនេះ (24ម៉ោង)", 1),
+                         ("🗓️ សប្តាហ៍នេះ (7ថ្ងៃ)", 7),
+                         ("📆 ខែនេះ (30ថ្ងៃ)", 30)]:
+        rev, cost, profit, cnt, margin = _profit_sum(days)
+        lines.append(
+            f"\n{label}\n"
+            f"  🛒 Orders: <b>{cnt}</b>  |  💵 លក់: <b>${rev:.2f}</b>\n"
+            f"  📦 ដើម: <b>${cost:.2f}</b>  |  💹 ចំណេញ: <b>${profit:.2f}</b> ({margin:.1f}%)")
+    rev, cost, profit, cnt, margin = _profit_sum(None)
+    lines.append(
+        f"\n📊 <b>សរុបគ្រប់ពេល</b>\n"
+        f"  🛒 Orders: <b>{cnt}</b>  |  💵 លក់: <b>${rev:.2f}</b>\n"
+        f"  📦 ដើម: <b>${cost:.2f}</b>  |  💹 ចំណេញ: <b>${profit:.2f}</b> ({margin:.1f}%)")
+    lines.append("\n<i>* លុប Order rejected/canceled ចេញ (បានសងលុយវិញទាំងអស់) · Order partial ដកចំនួនសងវិញ · Cost គិតតាមអត្រាបច្ចុប្បន្នរបស់ Service</i>")
+    return "\n".join(lines)
+
+@bot.message_handler(commands=["profit"])
+def cmd_profit(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    bot.reply_to(message, _profit_report_text(), parse_mode="HTML")
+
+def _top_report_text(period_days=30, top_n=5):
+    """សាងសង់របាយការណ៍ Top Services (លក់ដាច់បំផុត) និង Top Clients (ចំណាយច្រើន
+    បំផុត) ក្នុងចន្លោះ period_days ថ្ងៃចុងក្រោយ។ លើកលែង Order rejected/canceled
+    ដូចគ្នានឹង Profit Report ដែរ។"""
+    cutoff = int(time.time()) - period_days * 86400 if period_days else 0
+    svc_stats, client_stats = {}, {}
+    for o in smm_orders.values():
+        if o.get("status") in ("rejected", "canceled"):
+            continue
+        if o.get("ts", 0) < cutoff:
+            continue
+        price = float(o.get("price", 0) or 0) - float(o.get("refunded", 0) or 0)
+        slug  = o.get("slug", "")
+        label = o.get("label", slug)
+        cs = svc_stats.setdefault(slug, [0, 0.0, label])
+        cs[0] += 1; cs[1] += price
+        uid = o.get("uid", "")
+        cu = client_stats.setdefault(uid, [0, 0.0])
+        cu[0] += 1; cu[1] += price
+    top_svcs    = sorted(svc_stats.items(),    key=lambda kv: kv[1][1], reverse=True)[:top_n]
+    top_clients = sorted(client_stats.items(), key=lambda kv: kv[1][1], reverse=True)[:top_n]
+
+    lines = [f"🏆 <b>Top {top_n} — {period_days} ថ្ងៃចុងក្រោយ</b>", "━━━━━━━━━━━━━━━━━━"]
+    lines.append("\n📦 <b>Services លក់ដាច់បំផុត:</b>")
+    if top_svcs:
+        medal = ["🥇", "🥈", "🥉"]
+        for i, (slug, (cnt, rev, label)) in enumerate(top_svcs):
+            m = medal[i] if i < 3 else f"{i+1}."
+            lines.append(f"  {m} {label} — {cnt} orders · ${rev:.2f}")
+    else:
+        lines.append("  <i>គ្មានទិន្នន័យ</i>")
+
+    lines.append("\n👤 <b>Client ចំណាយច្រើនបំផុត:</b>")
+    if top_clients:
+        medal = ["🥇", "🥈", "🥉"]
+        for i, (uid, (cnt, rev)) in enumerate(top_clients):
+            u = users_db.get(str(uid), {})
+            name = u.get("name") or u.get("username") or "?"
+            m = medal[i] if i < 3 else f"{i+1}."
+            lines.append(f"  {m} {name} (<code>{uid}</code>) — {cnt} orders · ${rev:.2f}")
+    else:
+        lines.append("  <i>គ្មានទិន្នន័យ</i>")
+    lines.append("\n<i>* លុប Order rejected/canceled ចេញ</i>")
+    return "\n".join(lines)
+
+def daily_report_kb():
+    on   = daily_report_cfg.get("enabled", True)
+    hour = daily_report_cfg.get("hour", 8)
+    kb = InlineKeyboardMarkup()
+    kb.row(
+        InlineKeyboardButton("🟢 បើក" + (" ✅" if on else ""),  callback_data="dreport:on",  color=("success" if on else "active")),
+        InlineKeyboardButton("🔴 បិទ" + (" ✅" if not on else ""), callback_data="dreport:off", color=("danger" if not on else "active")),
+    )
+    kb.row(InlineKeyboardButton(f"⏰ ម៉ោង: {hour:02d}:00 (ខ្មែរ) — ចុចប្តូរ", callback_data="dreport:hour", color="active"))
+    kb.row(InlineKeyboardButton("📤 សាកល្បងផ្ញើឥឡូវ", callback_data="dreport:test", color="active"))
+    return kb
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("dreport:"))
+def cb_dreport(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID:
+        bot.answer_callback_query(call.id); return
+    action = call.data.split(":", 1)[1]
+    if action == "on":
+        daily_report_cfg["enabled"] = True; _save(DAILY_REPORT_FILE, daily_report_cfg)
+        bot.answer_callback_query(call.id, "✅ បើករួច")
+    elif action == "off":
+        daily_report_cfg["enabled"] = False; _save(DAILY_REPORT_FILE, daily_report_cfg)
+        bot.answer_callback_query(call.id, "🔴 បិទរួច")
+    elif action == "hour":
+        bot.answer_callback_query(call.id)
+        waiting[uid] = "await_dreport_hour"
+        bot.send_message(uid, "⏰ ផ្ញើម៉ោង (0-23) ដែលចង់ឲ្យផ្ញើ Daily Report (ម៉ោងកម្ពុជា):",
+                          reply_markup=cancel_kb())
+        return
+    elif action == "test":
+        bot.answer_callback_query(call.id, "📤 កំពុងផ្ញើ...")
+        txt = (f"⏰ <b>Daily Report (សាកល្បង)</b>\n━━━━━━━━━━━━━━━━━━\n\n"
+               + _profit_report_text() + "\n\n" + _top_report_text(7))
+        bot.send_message(uid, txt, parse_mode="HTML")
+        return
+    try:
+        bot.edit_message_text(
+            f"⏰ <b>Daily Report Auto</b>\nស្ថានភាព: {'🟢 បើក' if daily_report_cfg.get('enabled', True) else '🔴 បិទ'}\n"
+            f"ម៉ោងផ្ញើ: {daily_report_cfg.get('hour', 8):02d}:00 (ម៉ោងកម្ពុជា)\n\n"
+            f"Bot នឹងផ្ញើ 📈 ចំណេញ + 🏆 Top Services/Clients មកអ្នកដោយស្វ័យប្រវត្តិរាល់ថ្ងៃ។",
+            chat_id=uid, message_id=call.message.message_id,
+            parse_mode="HTML", reply_markup=daily_report_kb())
+    except Exception as _e:
+        logger.debug(f"[silent] {_e}")
+
+
+@bot.message_handler(commands=["dailyreport"])
+def cmd_dailyreport(message):
+    """/dailyreport on|off|<hour 0-23> — គ្រប់គ្រង Auto Daily Report"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    parts = message.text.split()
+    if len(parts) < 2:
+        state = "🟢 បើក" if daily_report_cfg.get("enabled", True) else "🔴 បិទ"
+        bot.reply_to(message,
+            f"⏰ <b>Daily Report Auto-Send</b>\n"
+            f"ស្ថានភាព: {state}\n"
+            f"ម៉ោងផ្ញើ: {daily_report_cfg.get('hour', 8):02d}:00 (ម៉ោងកម្ពុជា)\n\n"
+            f"ប្រើ: <code>/dailyreport on</code> ឬ <code>off</code> ឬ <code>/dailyreport 9</code> (ប្តូរម៉ោង)",
+            parse_mode="HTML")
+        return
+    arg = parts[1].lower()
+    if arg == "on":
+        daily_report_cfg["enabled"] = True
+        _save(DAILY_REPORT_FILE, daily_report_cfg)
+        bot.reply_to(message, "✅ បើក Daily Report ស្វ័យប្រវត្តិហើយ។")
+    elif arg == "off":
+        daily_report_cfg["enabled"] = False
+        _save(DAILY_REPORT_FILE, daily_report_cfg)
+        bot.reply_to(message, "🔴 បិទ Daily Report ស្វ័យប្រវត្តិហើយ។")
+    elif arg.isdigit() and 0 <= int(arg) <= 23:
+        daily_report_cfg["hour"] = int(arg)
+        _save(DAILY_REPORT_FILE, daily_report_cfg)
+        bot.reply_to(message, f"⏰ កំណត់ម៉ោងផ្ញើ Daily Report ទៅ {int(arg):02d}:00 (ម៉ោងកម្ពុជា) ជោគជ័យ។")
+    else:
+        bot.reply_to(message, "❌ ប្រើ: /dailyreport on | off | <ម៉ោង 0-23>")
+
+
+@bot.message_handler(commands=["top"])
+def cmd_top(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    parts = message.text.split()
+    days = 30
+    if len(parts) > 1 and parts[1].isdigit():
+        days = int(parts[1])
+    bot.reply_to(message, _top_report_text(days), parse_mode="HTML")
+
+# ═══════════════════════════════════════════════════════════
+#  BACKUP / RESTORE DATA — សម្រាប់ផ្ទេរទៅ Server ថ្មី ដោយមិនបាត់ data
+#  (users, wallets, orders, services, emoji, config ។ល។ — គ្រប់ file
+#  JSON ក្នុង DATA_DIR)
+# ═══════════════════════════════════════════════════════════
+def _build_backup_zip():
+    """Backup Master + គ្រប់ Clone ទៅ zip តែមួយ — data មិនលាយគ្នា។
+
+    โครงสร้างក្នុង zip:
+      master/<file>.json          → DATA_DIR របស់ Master
+      clones/<clone_name>/<file>  → bot_clones/<clone_name>/
+      meta.json                   → {version, master, clones: [...], ts}
+
+    Clone នីមួយៗមាន folder ដាច់ដោយឡែក — restore មិនជាន់ data Master/clone ផ្សេង។
+    """
+    buf = io.BytesIO()
+    n = 0
+    clone_names = []
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        # ── Master JSON (root DATA_DIR only, not subdirs) ──
+        try:
+            for f in sorted(os.listdir(DATA_DIR)):
+                if not f.endswith(".json"):
+                    continue
+                full = os.path.join(DATA_DIR, f)
+                if not os.path.isfile(full):
+                    continue
+                zf.write(full, arcname=f"master/{f}")
+                # legacy flat path too (old restore compatibility)
+                zf.write(full, arcname=f)
+                n += 1
+        except Exception as e:
+            logger.warning(f"[backup] master list failed: {e}")
+
+        # ── Each clone under bot_clones/<name>/ ──
+        clones_root = CLONES_DIR if "CLONES_DIR" in dir() else os.path.join(DATA_DIR, "bot_clones")
+        if os.path.isdir(clones_root):
+            for name in sorted(os.listdir(clones_root)):
+                cdir = os.path.join(clones_root, name)
+                if not os.path.isdir(cdir):
+                    continue
+                # skip empty / invalid names
+                if not name or name.startswith("."):
+                    continue
+                clone_names.append(name)
+                for root, dirs, files in os.walk(cdir):
+                    # do not pack huge log files beyond a cap
+                    dirs[:] = [d for d in dirs if not d.startswith(".")]
+                    for fn in files:
+                        if fn.startswith("."):
+                            continue
+                        # include json + small configs; skip huge bot.log tails optional — include log if < 2MB
+                        full = os.path.join(root, fn)
+                        try:
+                            if fn.endswith(".log") and os.path.getsize(full) > 2_000_000:
+                                continue
+                        except OSError:
+                            continue
+                        rel = os.path.relpath(full, cdir).replace("\\", "/")
+                        arc = f"clones/{name}/{rel}"
+                        try:
+                            zf.write(full, arcname=arc)
+                            n += 1
+                        except Exception as e:
+                            logger.warning(f"[backup] skip {arc}: {e}")
+
+        meta = {
+            "version": 2,
+            "ts": datetime.datetime.utcnow().isoformat() + "Z",
+            "master": True,
+            "clones": clone_names,
+            "note": "master/* = Master DATA_DIR; clones/<name>/* = isolated clone data",
+        }
+        zf.writestr("meta.json", json.dumps(meta, ensure_ascii=False, indent=2))
+        n += 1
+
+    if n <= 1:  # only meta
+        return None, 0
+    buf.seek(0)
+    return buf, n
+
+
+def _restore_backup_zip(raw_bytes):
+    """Restore zip ពី /backup — គាំទ្រ version 2 (master/ + clones/) និង legacy flat JSON។
+    Clone data សរសេរតែចូល bot_clones/<name>/ មិនលាយ Master។
+    Return (master_count, clone_count, clone_names).
+    """
+    import shutil as _shutil
+    master_n = 0
+    clone_n = 0
+    clone_names = set()
+    clones_root = CLONES_DIR if "CLONES_DIR" in dir() else os.path.join(DATA_DIR, "bot_clones")
+    safety_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    safety_dir = os.path.join(DATA_DIR, f"_pre_restore_{safety_ts}")
+    os.makedirs(safety_dir, exist_ok=True)
+
+    with zipfile.ZipFile(io.BytesIO(raw_bytes), "r") as zf:
+        names = zf.namelist()
+        has_v2 = any(n.startswith("master/") or n.startswith("clones/") for n in names)
+
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            name = info.filename.replace("\\", "/").lstrip("/")
+            if name in ("meta.json",) or name.endswith("/"):
+                continue
+            # security: no path escape
+            if ".." in name.split("/"):
+                logger.warning(f"[restore] skip unsafe path {name}")
+                continue
+
+            data = zf.read(info)
+
+            if has_v2 and name.startswith("master/"):
+                base = os.path.basename(name)
+                if not base.endswith(".json"):
+                    continue
+                dest = os.path.join(DATA_DIR, base)
+                # safety copy
+                if os.path.isfile(dest):
+                    try:
+                        _shutil.copy2(dest, os.path.join(safety_dir, base))
+                    except Exception:
+                        pass
+                with open(dest, "wb") as out:
+                    out.write(data)
+                master_n += 1
+
+            elif has_v2 and name.startswith("clones/"):
+                # clones/<clone_name>/...
+                parts = name.split("/")
+                if len(parts) < 3:
+                    continue
+                cname = parts[1]
+                if not cname or cname.startswith("."):
+                    continue
+                rel = "/".join(parts[2:])
+                if not rel or ".." in rel.split("/"):
+                    continue
+                cdir = os.path.join(clones_root, cname)
+                os.makedirs(cdir, exist_ok=True)
+                dest = os.path.join(cdir, rel.replace("/", os.sep))
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                with open(dest, "wb") as out:
+                    out.write(data)
+                clone_n += 1
+                clone_names.add(cname)
+
+            elif not has_v2:
+                # Legacy: flat *.json → master DATA_DIR only (never dump into clones)
+                base = os.path.basename(name)
+                if not base.endswith(".json"):
+                    continue
+                if base == "meta.json":
+                    continue
+                dest = os.path.join(DATA_DIR, base)
+                if os.path.isfile(dest):
+                    try:
+                        _shutil.copy2(dest, os.path.join(safety_dir, base))
+                    except Exception:
+                        pass
+                with open(dest, "wb") as out:
+                    out.write(data)
+                master_n += 1
+
+    return master_n, clone_n, sorted(clone_names)
+
+@bot.message_handler(commands=["backup"])
+def cmd_backup(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    bot.send_chat_action(ADMIN_ID, "upload_document")
+    try:
+        buf, n = _build_backup_zip()
+        if not buf:
+            bot.reply_to(message, "❌ រកមិនឃើញ file .json ណាមួយក្នុង DATA_DIR ទេ។")
+            return
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        buf.name = f"kaijaklike_backup_{ts}.zip"
+        # count clones in zip
+        _clones = []
+        try:
+            with zipfile.ZipFile(buf, "r") as _zf:
+                for _n in _zf.namelist():
+                    if _n.startswith("clones/") and _n.count("/") >= 2:
+                        _clones.append(_n.split("/")[1])
+            _clones = sorted(set(_clones))
+            buf.seek(0)
+        except Exception:
+            _clones = []
+        _cnote = (f"\n🤖 Clones: <b>{len(_clones)}</b> — " + ", ".join(f"<code>{c}</code>" for c in _clones[:12])
+                  + ("…" if len(_clones) > 12 else "")) if _clones else "\n🤖 Clones: <i>គ្មាន</i>"
+        bot.send_document(ADMIN_ID, buf,
+            caption=f"💾 <b>Backup Master + Clones</b> — {n} files\n"
+                    f"🗓️ {ts}{_cnote}\n\n"
+                    f"📁 <code>master/</code> = data Master\n"
+                    f"📁 <code>clones/&lt;name&gt;/</code> = data clone នីមួយៗ (មិនលាយ)\n\n"
+                    f"👉 ផ្ញើ file នេះមកវិញ + <code>/restore</code> លើ Server ថ្មី",
+            parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"[backup] {e}")
+        bot.reply_to(message, f"❌ Backup បរាជ័យ: {e}")
+
+@bot.message_handler(commands=["restore"])
+def cmd_restore(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    waiting[ADMIN_ID] = "await_restore_zip"
+    bot.reply_to(message,
+        "📥 <b>Restore ទិន្នន័យ</b>\n"
+        "សូម Forward ឬផ្ញើ file <code>.zip</code> backup មកទីនេះ (ចេញពី /backup)។\n\n"
+        "⚠️ <b>ប្រុងប្រយ័ត្ន:</b> នេះនឹង <u>សរសេរជាន់ពី</u> data បច្ចុប្បន្នទាំងអស់ "
+        "(users, wallets, orders...) ។ ធ្វើ /backup ទុកជាមុនសិន បើអ្នកមិនប្រាកដ។",
+        parse_mode="HTML", reply_markup=cancel_kb())
+
+@bot.message_handler(commands=["restore_services"])
+def cmd_restore_services(message):
+    """Restore តែ smm_services.json ពី backup zip — មិនប៉ះពាល់ users/wallets/orders/
+    config ផ្សេងទៀតឡើយ។ ប្រើសម្រាប់ sync បញ្ជី Service ពី bot មួយទៅ bot មួយទៀត
+    ដោយមិនបាត់ data អតិថិជនរបស់ bot ដែលទទួល។"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    waiting[ADMIN_ID] = "await_restore_services_zip"
+    bot.reply_to(message,
+        "📥 <b>Restore តែ Service</b>\n"
+        "សូម Forward ឬផ្ញើ file <code>.zip</code> backup មកទីនេះ (ចេញពី /backup ឬ file <code>smm_services.json</code> តែមួយក៏បាន)។\n\n"
+        "✅ ត្រូវជំនួសតែ <code>smm_services.json</code> ប៉ុណ្ណោះ — "
+        "<b>users, wallets, orders, config ផ្សេងទៀត មិនប៉ះពាល់ទេ</b> ។",
+        parse_mode="HTML", reply_markup=cancel_kb())
+
+# ═══════════════════════════════════════════════════════════
+#  ORDER BOT / PAYMENT BOT — Setup Commands
+# ═══════════════════════════════════════════════════════════
+def _show_setup_order_bot(message):
+    if not is_admin(message.from_user.id):
+        return
+    waiting[message.chat.id] = "await_order_bot_token"
+    cur = "✅ Setup រួច" if notify_bots_cfg.get("order_token") else "⭕ មិនទាន់ setup"
+    bot.send_message(message.chat.id,
+        f"🤖 <b>Setup Order Notify Bot</b>\n"
+        f"ស្ថានភាពបច្ចុប្បន្ន: {cur}\n\n"
+        f"1️⃣ បង្កើត Bot ថ្មីជាមួយ @BotFather (ឬប្រើ bot ចាស់ដែលមាន Token)\n"
+        f"2️⃣ <b>/start</b> bot ថ្មីនោះជាមួយ account Admin ដដែល "
+        f"(user id: <code>{ADMIN_ID}</code>) — ធានាថាបានផ្ញើសារមកអ្នក\n"
+        f"3️⃣ ចម្លង Token មកដាក់ទីនេះ\n\n"
+        f"ចាប់ពីពេលនេះ ការជូនដំណឹង Order ថ្មី/Done/Reject/Refund នឹងផ្ញើទៅ bot នេះ "
+        f"<b>ជំនួសបំពេញនៅ bot service ផ្ទាល់</b>។",
+        parse_mode="HTML", reply_markup=cancel_kb())
+
+def _show_setup_pay_bot(message):
+    if not is_admin(message.from_user.id):
+        return
+    waiting[message.chat.id] = "await_pay_bot_token"
+    cur = "✅ Setup រួច" if notify_bots_cfg.get("pay_token") else "⭕ មិនទាន់ setup"
+    bot.send_message(message.chat.id,
+        f"🤖 <b>Setup Payment Notify Bot</b>\n"
+        f"ស្ថានភាពបច្ចុប្បន្ន: {cur}\n\n"
+        f"1️⃣ បង្កើត Bot ថ្មីជាមួយ @BotFather (ឬប្រើ bot ចាស់ដែលមាន Token)\n"
+        f"2️⃣ <b>/start</b> bot ថ្មីនោះជាមួយ account Admin ដដែល "
+        f"(user id: <code>{ADMIN_ID}</code>) — ធានាថាបានផ្ញើសារមកអ្នក\n"
+        f"3️⃣ ចម្លង Token មកដាក់ទីនេះ\n\n"
+        f"ចាប់ពីពេលនេះ ការជូនដំណឹង ដាក់លុយ/QR/Payment ថ្មីៗ នឹងផ្ញើទៅ bot នេះ "
+        f"<b>ជំនួសបំពេញនៅ bot service ផ្ទាល់</b>។",
+        parse_mode="HTML", reply_markup=cancel_kb())
+
+@bot.message_handler(commands=["setup_order_bot"])
+def cmd_setup_order_bot(message):
+    _show_setup_order_bot(message)
+
+@bot.message_handler(commands=["setup_pay_bot"])
+def cmd_setup_pay_bot(message):
+    _show_setup_pay_bot(message)
+
+def _restore_btn_text(m):
+    """Telegram ត្រឡប់ text ដែលកាត់ emoji ចេញ (custom emoji icon set) — restore វិញ
+    ពី _STRIPPED_TEXT_MAP ដើម្បីឲ្យ match ត្រូវទាំង ២ ករណី (មាន/គ្មាន custom emoji setup)"""
+    return _STRIPPED_TEXT_MAP.get(m.text, m.text)
+
+@bot.message_handler(func=lambda m: _restore_btn_text(m) in ("🤖 Setup Order Bot", "💳 Setup Payment Bot") and is_admin(m.from_user.id))
+def handle_setup_bot_buttons(message):
+    if _restore_btn_text(message) == "🤖 Setup Order Bot":
+        _show_setup_order_bot(message)
+    else:
+        _show_setup_pay_bot(message)
+
+@bot.message_handler(func=lambda m: (is_admin(m.chat.id)
+                      and waiting.get(m.chat.id) in ("await_order_bot_token", "await_pay_bot_token")))
+def handle_notify_bot_token(message):
+    uid  = message.chat.id
+    kind = waiting.get(uid)
+    tok  = (message.text or "").strip()
+    waiting.pop(uid, None)
+    if not tok or ":" not in tok:
+        bot.send_message(uid, "❌ Token មើលទៅមិនត្រឹមត្រូវទេ។ សូមព្យាយាមម្តងទៀត (/setup_order_bot ឬ /setup_pay_bot)។",
+                          parse_mode="HTML", reply_markup=admin_kb())
+        return
+    tb = _make_notify_bot(tok)
+    if not tb:
+        bot.send_message(uid, "❌ Token ខុស ឬ bot មិនអាច connect បានទេ។ ពិនិត្យម្តងទៀត។",
+                          parse_mode="HTML", reply_markup=admin_kb())
+        return
+    me = tb.get_me()
+    if kind == "await_order_bot_token":
+        notify_bots_cfg["order_token"] = tok
+        _save(NOTIFY_BOTS_FILE, notify_bots_cfg)
+        _start_order_bot(tok)
+        bot.send_message(uid,
+            f"✅ <b>Order Bot ភ្ជាប់ជោគជ័យ!</b> (@{me.username})\n"
+            f"ត្រូវប្រាកដថាបាន /start bot នេះជាមួយ account Admin រួចហើយ "
+            f"បើមិនទាន់ សូម /start វាឥឡូវ។",
+            parse_mode="HTML", reply_markup=admin_kb())
+    else:
+        notify_bots_cfg["pay_token"] = tok
+        _save(NOTIFY_BOTS_FILE, notify_bots_cfg)
+        _start_pay_bot(tok)
+        bot.send_message(uid,
+            f"✅ <b>Payment Bot ភ្ជាប់ជោគជ័យ!</b> (@{me.username})\n"
+            f"ត្រូវប្រាកដថាបាន /start bot នេះជាមួយ account Admin រួចហើយ "
+            f"បើមិនទាន់ សូម /start វាឥឡូវ។",
+            parse_mode="HTML", reply_markup=admin_kb())
+
+@bot.message_handler(content_types=["document"])
+
+def handle_document(message):
+    uid = message.chat.id
+    if uid != ADMIN_ID:
+        return
+    step = waiting.get(uid)
+    if step not in ("await_restore_zip", "await_restore_services_zip"):
+        return
+    doc = message.document
+    fname = (doc.file_name or "").lower()
+
+    # ── Restore តែ Service — ទទួលទាំង .zip និង .json តែមួយ (smm_services.json) ──
+    if step == "await_restore_services_zip":
+        if not (fname.endswith(".zip") or fname.endswith(".json")):
+            bot.send_message(uid, "❌ ត្រូវជា file .zip ឬ .json ប៉ុណ្ណោះ។ ផ្ញើម្តងទៀត ឬ ✕ Cancel។",
+                              reply_markup=cancel_kb())
+            return
+        try:
+            file_info = bot.get_file(doc.file_id)
+            raw = bot.download_file(file_info.file_path)
+            if fname.endswith(".json"):
+                new_content = raw
+            else:
+                with zipfile.ZipFile(io.BytesIO(raw), "r") as zf:
+                    svc_names = [n for n in zf.namelist() if n == "smm_services.json" or n.endswith("/smm_services.json") or n == "master/smm_services.json"]
+                    if not svc_names:
+                        bot.send_message(uid, "❌ រកមិនឃើញ <code>smm_services.json</code> ក្នុង zip នេះទេ។ ផ្ញើម្តងទៀត ឬ ✕ Cancel។",
+                                          parse_mode="HTML", reply_markup=cancel_kb())
+                        return
+                    new_content = zf.read(svc_names[0])
+            # ត្រួតពិនិត្យថាជា JSON ត្រឹមត្រូវ មុននឹងសរសេរជាន់
+            try:
+                _parsed = json.loads(new_content.decode("utf-8"))
+            except Exception:
+                bot.send_message(uid, "❌ File នេះមិនមែនជា JSON ត្រឹមត្រូវទេ។ ផ្ញើម្តងទៀត ឬ ✕ Cancel។",
+                                  reply_markup=cancel_kb())
+                return
+            # ចម្លងទុកមុនសិន (safety backup) — តែ smm_services.json ប៉ុណ្ណោះ
+            safety_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            try:
+                import shutil as _shutil
+                if os.path.exists(SMM_SVC_FILE):
+                    _shutil.copy(SMM_SVC_FILE, _dpath(f"smm_services_pre_restore_{safety_ts}.json"))
+            except Exception: pass
+            global smm_services
+            smm_services = _parsed
+            _save(SMM_SVC_FILE, smm_services)
+            waiting.pop(uid, None)
+            bot.send_message(uid,
+                f"✅ <b>Restore Service ជោគជ័យ!</b> ({len(_parsed)} services)\n"
+                f"🛡️ Service ចាស់បានចម្លងទុកនៅ <code>smm_services_pre_restore_{safety_ts}.json</code>\n"
+                f"👤 users / 💰 wallets / 🛒 orders — <b>មិនប៉ះពាល់ទេ</b>។",
+                parse_mode="HTML", reply_markup=admin_kb())
+        except zipfile.BadZipFile:
+            bot.send_message(uid, "❌ File នេះមិនមែនជា zip ត្រឹមត្រូវទេ។ ផ្ញើម្តងទៀត ឬ ✕ Cancel។",
+                              reply_markup=cancel_kb())
+        except Exception as e:
+            logger.error(f"[restore_services] {e}")
+            bot.send_message(uid, f"❌ Restore Service បរាជ័យ: {e}", reply_markup=admin_kb())
+        return
+
+    if not fname.endswith(".zip"):
+        bot.send_message(uid, "❌ ត្រូវជា file .zip ប៉ុណ្ណោះ។ ផ្ញើម្តងទៀត ឬ ✕ Cancel។",
+                          reply_markup=cancel_kb())
+        return
+    try:
+        file_info = bot.get_file(doc.file_id)
+        raw = bot.download_file(file_info.file_path)
+        master_n, clone_n, clone_list = _restore_backup_zip(raw)
+        if master_n == 0 and clone_n == 0:
+            bot.send_message(uid, "❌ រកមិនឃើញ data ក្នុង zip នេះទេ។ ផ្ញើម្តងទៀត ឬ ✕ Cancel។",
+                              reply_markup=cancel_kb())
+            return
+        waiting.pop(uid, None)
+        cnote = ""
+        if clone_list:
+            cnote = ("\n🤖 Clones restored: <b>%d</b> — " % len(clone_list)
+                     + ", ".join(f"<code>{c}</code>" for c in clone_list[:15])
+                     + ("…" if len(clone_list) > 15 else ""))
+        bot.send_message(uid,
+            f"✅ <b>Restore ជោគជ័យ!</b>\n"
+            f"📦 Master: <b>{master_n}</b> files\n"
+            f"🤖 Clone files: <b>{clone_n}</b>{cnote}\n"
+            f"🛡️ Data ចាស់ Master បានចម្លងទុកក្នុង <code>_pre_restore_*</code>\n"
+            f"📁 Clone data ស្ថិតក្នុង <code>bot_clones/&lt;name&gt;/</code> (មិនលាយ Master)\n\n"
+            f"🔄 <b>កំពុង Restart Bot...</b> រង់ចាំ ~5s រួច /start វិញ។",
+            parse_mode="HTML")
+        def _auto_restart():
+            time.sleep(1.5)
+            try: bot.stop_polling()
+            except Exception: pass
+            time.sleep(1)
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        threading.Thread(target=_auto_restart, daemon=True).start()
+        return
+    except zipfile.BadZipFile:
+        bot.send_message(uid, "❌ File នេះមិនមែនជា zip ត្រឹមត្រូវទេ។ ផ្ញើម្តងទៀត ឬ ✕ Cancel។",
+                          reply_markup=cancel_kb())
+    except Exception as e:
+        logger.error(f"[restore] {e}")
+        bot.send_message(uid, f"❌ Restore បរាជ័យ: {e}", reply_markup=admin_kb())
+
+def _smm_api_post(params, timeout=25):
+    url = smm_api.get("url", "")
+    if not url: return None
+    try:
+        r = http.post(url, data=params, timeout=timeout)
+        return r.json()
+    except Exception as e:
+        logger.error(f"SMM API: {e}"); return None
+
+def _smm_api_status(api_order_id):
+    """ពិនិត្យស្ថានភាព Order ដែលបានដាក់តាម SMM API (action=status)"""
+    key = smm_api.get("key", ""); url = smm_api.get("url", "")
+    if not key or not url or not api_order_id: return None
+    try:
+        r = http.post(url, data={"key": key, "action": "status", "order": api_order_id}, timeout=25)
+        return r.json()
+    except Exception as e:
+        logger.error(f"SMM API status: {e}"); return None
+
+def _smm_api_refill(api_order_id):
+    """ស្នើសុំ Refill (បំពេញបន្ថែម) ពី Supplier API (action=refill) សម្រាប់ Order
+    ដែល Service គាំទ្រ Refill។ ត្រឡប់ refill id (str) បើជោគជ័យ, បើពុំនោះ None។"""
+    key = smm_api.get("key", ""); url = smm_api.get("url", "")
+    if not key or not url or not api_order_id: return None
+    try:
+        r = http.post(url, data={"key": key, "action": "refill", "order": api_order_id}, timeout=25)
+        d = r.json()
+        if isinstance(d, list) and d:
+            d = d[0]
+        if isinstance(d, dict) and not d.get("error") and d.get("refill") is not None:
+            return str(d["refill"])
+        return None
+    except Exception as e:
+        logger.error(f"SMM API refill: {e}"); return None
+
+def _smm_api_refill_status(refill_id):
+    """ពិនិត្យស្ថានភាព Refill request (action=refill_status)។"""
+    key = smm_api.get("key", ""); url = smm_api.get("url", "")
+    if not key or not url or not refill_id: return None
+    try:
+        r = http.post(url, data={"key": key, "action": "refill_status", "refill": refill_id}, timeout=25)
+        d = r.json()
+        if isinstance(d, list) and d:
+            d = d[0]
+        return d if isinstance(d, dict) else None
+    except Exception as e:
+        logger.error(f"SMM API refill_status: {e}"); return None
+
+def _smm_sync_order(oid):
+    """🔄 ត្រួតពិនិត្យ + Sync ស្ថានភាព Order មួយពី Supplier API ភ្លាមៗ (Live) —
+    ប្រើទាំងដោយ Background Watcher (Poll ទៀងទាត់) និងដោយ User ខ្លួនឯងពេលចុច
+    🔍 Track Order (ដើម្បីទទួលបានស្ថានភាព Live មិនចាំបាច់រង់ចាំ Poll Cycle បន្ទាប់)។
+    ត្រឡប់ status ថ្មីបំផុតរបស់ Order (str)។ គ្មានផលប៉ះពាល់ទេបើ Order មិនមែន
+    'pending' ឬគ្មាន api_order_id (Manual order) — ត្រឡប់ status បច្ចុប្បន្នវិញ។"""
+    o = smm_orders.get(oid)
+    if not o: return None
+    if o.get("status") != "pending": return o.get("status")
+    api_oid = o.get("api_order_id")
+    if not api_oid: return o.get("status")
+    res = _smm_api_status(api_oid)
+    if not res or not isinstance(res, dict): return o.get("status")
+    st = str(res.get("status", "")).strip().lower()
+    if st == "completed":
+        smm_orders[oid]["status"]  = "completed"
+        smm_orders[oid]["remains"] = res.get("remains", 0)
+        _save(SMM_ORD_FILE, smm_orders)
+        try:
+            bot.send_message(int(o["uid"]),
+                f"✅ <b>Order បានជោគជ័យគ្រប់ចំនួន 100%!</b> 🎉\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🆔 <code>{oid}</code>\n"
+                f"📊 {o.get('label','?')}\n"
+                f"🔢 ចំនួន: <b>{o.get('qty',0):,}</b>\n"
+                f"🔗 <code>{o.get('link','')}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🙏 អរគុណដែលប្រើ {_bot_brand()}!",
+                parse_mode="HTML")
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        try:
+            onotify(
+                f"✅ <b>Order បានគ្រប់ចំនួន 100%!</b>\n"
+                f"🆔 <code>{oid}</code>\n"
+                f"👤 {_user_display(o.get('uid',''))}\n"
+                f"📦 {o.get('label','?')}\n"
+                f"🔢 {o.get('qty',0):,} | 💰 ${float(o.get('price',0)):.4f}\n"
+                f"🔗 <code>{o.get('link','')}</code>")
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        return "completed"
+    elif st in ("canceled", "cancelled"):
+        smm_orders[oid]["status"] = "canceled"
+        price = float(o.get("price") or 0)
+        smm_orders[oid]["refunded"] = price
+        _save(SMM_ORD_FILE, smm_orders)
+        # Refund ស្វ័យប្រវត្តិ — ដាច់ដោយឡែកពី Notify, ដើម្បីកុំឲ្យ User ខាតលុយបើផ្ញើសារទៅគាត់មិនចេញ
+        add_bal(int(o["uid"]), price)
+        try:
+            bot.send_message(int(o["uid"]),
+                f"⚠️ <b>Order ត្រូវបានលុបចោល (Canceled)</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🆔 <code>{oid}</code>\n"
+                f"📊 {o.get('label','?')}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"💰 លុយត្រូវបានសងវិញ: <b>${price:.4f}</b>\n"
+                f"💳 Balance: <b>${bal(int(o['uid'])):.2f}</b>\n"
+                f"🙏 សូមអភ័យទោសចំពោះការរអាក់រអួល!",
+                parse_mode="HTML")
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        try:
+            onotify(
+                f"⚠️ <b>Order ត្រូវបានលុបចោល (Auto-Refunded)</b>\n"
+                f"🆔 <code>{oid}</code>\n"
+                f"👤 {_user_display(o.get('uid',''))}\n"
+                f"📊 {o.get('label','?')} | {o.get('qty',0):,} | ${price:.4f}\n"
+                f"🔗 <code>{o.get('link','')}</code>\n"
+                f"💰 លុយបានសងវិញស្វ័យប្រវត្តិទៅ User")
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        return "canceled"
+    elif st == "partial":
+        remains  = float(res.get("remains", 0) or 0)
+        qty_orig = float(o.get("qty", 0) or 0)
+        svc      = smm_services.get(o.get("slug"), {}) or {}
+        # ── បើ Service គាំទ្រ Refill និងមិនទាន់សុំ Refill ពីមុន → សុំ Refill ស្វ័យប្រវត្តិសិន
+        # ជំនួសសងលុយភ្លាម (សូម្បីតែសងលុយវិញ បើ Refill បរាជ័យ ក៏ Fallback ទៅ Logic ចាស់វិញ) ──
+        if svc.get("refill") and not o.get("refill_id") and not o.get("refill_tried") and remains > 0:
+            rf_id = _smm_api_refill(o.get("api_order_id"))
+            smm_orders[oid]["refill_tried"] = True
+            smm_orders[oid]["remains"] = remains
+            if rf_id:
+                smm_orders[oid]["status"]    = "refilling"
+                smm_orders[oid]["refill_id"] = rf_id
+                _save(SMM_ORD_FILE, smm_orders)
+                try:
+                    bot.send_message(int(o["uid"]),
+                        f"🔄 <b>Order ចុះថយ — កំពុងស្នើសុំបំពេញបន្ថែម (Refill)</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"🆔 <code>{oid}</code>\n"
+                        f"📊 {o.get('label','?')}\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"⏳ Bot កំពុងស្នើសុំ Supplier បំពេញចំនួនដែលបាត់ដោយស្វ័យប្រវត្តិ\n"
+                        f"បើ Refill មិនជោគជ័យ លុយនឹងសងវិញស្វ័យប្រវត្តិ",
+                        parse_mode="HTML")
+                except Exception as _e: logger.debug(f"[silent] {_e}")
+                try:
+                    onotify(
+                        f"🔄 <b>Order Partial → សុំ Refill ស្វ័យប្រវត្តិ</b>\n"
+                        f"🆔 <code>{oid}</code> | Refill ID: <code>{rf_id}</code>\n"
+                        f"👤 {_user_display(o.get('uid',''))}\n"
+                        f"📊 {o.get('label','?')}")
+                except Exception as _e: logger.debug(f"[silent] {_e}")
+                return "refilling"
+            _save(SMM_ORD_FILE, smm_orders)
+            # Refill request បរាជ័យ → បន្តទៅ Refund Logic ខាងក្រោម
+        # ── Refund សម្រាប់ចំនួនដែលមិនបានប្រគល់ (Service គ្មាន Refill ឬ Refill បរាជ័យ) ──
+        price     = float(o.get("price") or 0)
+        refund    = round(price * remains / qty_orig, 4) if qty_orig > 0 and remains > 0 else 0.0
+        delivered = int(qty_orig - remains) if qty_orig else 0
+        smm_orders[oid]["status"]   = "partial"
+        smm_orders[oid]["remains"]  = remains
+        smm_orders[oid]["refunded"] = refund
+        _save(SMM_ORD_FILE, smm_orders)
+        if refund > 0:
+            add_bal(int(o["uid"]), refund)
+        try:
+            bot.send_message(int(o["uid"]),
+                f"⚠️ <b>Order ប្រគល់មិនគ្រប់ចំនួន (Partial)</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🆔 <code>{oid}</code>\n"
+                f"📊 {o.get('label','?')}\n"
+                f"✅ បានប្រគល់: <b>{delivered:,}</b> / {int(qty_orig):,}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                + (f"💰 លុយត្រូវបានសងវិញ: <b>${refund:.4f}</b>\n"
+                   f"💳 Balance: <b>${bal(int(o['uid'])):.2f}</b>\n" if refund > 0 else "")
+                + f"🙏 សូមអភ័យទោសចំពោះការរអាក់រអួល!",
+                parse_mode="HTML")
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        try:
+            onotify(
+                f"⚠️ <b>Order ប្រគល់មិនគ្រប់ (Partial, Auto-Refunded)</b>\n"
+                f"🆔 <code>{oid}</code>\n"
+                f"👤 {_user_display(o.get('uid',''))}\n"
+                f"📊 {o.get('label','?')} | ប្រគល់ {delivered:,}/{int(qty_orig):,}\n"
+                f"🔗 <code>{o.get('link','')}</code>\n"
+                f"💰 សងវិញ: ${refund:.4f}")
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        return "partial"
+    return o.get("status")
+
+def _smm_sync_refill(oid):
+    """🔄 ត្រួតពិនិត្យស្ថានភាព Refill request មួយ (action=refill_status)។
+    បើ Refill ជោគជ័យ → Mark Order ត្រឡប់ជា completed វិញ។
+    បើ Refill ត្រូវបដិសេធ/បរាជ័យ → Fallback ទៅ Refund ដូច Logic partial ចាស់។
+    បើនៅតែកំពុងដំណើរការ → មិនធ្វើអ្វីទេ រង់ចាំ Poll លើកក្រោយ។"""
+    o = smm_orders.get(oid)
+    if not o or o.get("status") != "refilling": return o.get("status") if o else None
+    rf_id = o.get("refill_id")
+    if not rf_id: return "refilling"
+    res = _smm_api_refill_status(rf_id)
+    if not res: return "refilling"
+    st = str(res.get("status", "")).strip().lower()
+    if st in ("completed", "success"):
+        smm_orders[oid]["status"]  = "completed"
+        smm_orders[oid]["remains"] = 0
+        _save(SMM_ORD_FILE, smm_orders)
+        try:
+            bot.send_message(int(o["uid"]),
+                f"✅ <b>Refill បានជោគជ័យ!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🆔 <code>{oid}</code>\n"
+                f"📊 {o.get('label','?')}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🎉 ចំនួនដែលបានធ្លាក់ត្រូវបានបំពេញវិញគ្រប់ចំនួន!",
+                parse_mode="HTML")
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        try:
+            onotify(
+                f"✅ <b>Refill ជោគជ័យ</b>\n🆔 <code>{oid}</code> | 👤 {_user_display(o.get('uid',''))}")
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        return "completed"
+    if st in ("rejected", "canceled", "cancelled", "error"):
+        # Refill បរាជ័យ → Refund ចំនួនដែលនៅសល់ (Fallback)
+        remains   = float(o.get("remains", 0) or 0)
+        qty_orig  = float(o.get("qty", 0) or 0)
+        price     = float(o.get("price") or 0)
+        refund    = round(price * remains / qty_orig, 4) if qty_orig > 0 and remains > 0 else 0.0
+        delivered = int(qty_orig - remains) if qty_orig else 0
+        smm_orders[oid]["status"]   = "partial"
+        smm_orders[oid]["refunded"] = refund
+        _save(SMM_ORD_FILE, smm_orders)
+        if refund > 0:
+            add_bal(int(o["uid"]), refund)
+        try:
+            bot.send_message(int(o["uid"]),
+                f"⚠️ <b>Refill ត្រូវបានបដិសេធ</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🆔 <code>{oid}</code>\n"
+                f"📊 {o.get('label','?')}\n"
+                f"✅ បានប្រគល់: <b>{delivered:,}</b> / {int(qty_orig):,}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                + (f"💰 លុយត្រូវបានសងវិញ: <b>${refund:.4f}</b>\n"
+                   f"💳 Balance: <b>${bal(int(o['uid'])):.2f}</b>\n" if refund > 0 else "")
+                + f"🙏 សូមអភ័យទោសចំពោះការរអាក់រអួល!",
+                parse_mode="HTML")
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        try:
+            onotify(
+                f"⚠️ <b>Refill បដិសេធ → Auto-Refunded</b>\n"
+                f"🆔 <code>{oid}</code> | 👤 {_user_display(o.get('uid',''))}\n"
+                f"💰 សងវិញ: ${refund:.4f}")
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        return "partial"
+    return "refilling"
+
+def _smm_order_watcher():
+    """ 🕑 Background thread — Poll ស្ថានភាព Order ដែលដាក់ស្វ័យប្រវត្តិតាម API ជាទៀងទាត់
+    ដោយហៅ _smm_sync_order() សម្រាប់ Order pending នីមួយៗ, និង _smm_sync_refill()
+    សម្រាប់ Order ដែលកំពុងរង់ចាំ Refill (status='refilling')។
+    Order ដែលជា Manual (គ្មាន api_order_id) មិនត្រូវបាន Poll ទេ — Admin ត្រូវ Mark Done ដោយផ្ទាល់។"""
+    while True:
+        try:
+            time.sleep(SMM_ORDER_POLL_INTERVAL)
+            for oid, o in list(smm_orders.items()):
+                st = o.get("status")
+                if st == "pending" and o.get("api_order_id"):
+                    _smm_sync_order(oid)
+                elif st == "refilling" and o.get("refill_id"):
+                    _smm_sync_refill(oid)
+        except Exception as e:
+            logger.error(f"[order_watcher] {e}")
+
+def _smm_fetch_service(api_id):
+    key = smm_api.get("key", "")
+    url = smm_api.get("url", "")
+    if not key or not url:
+        logger.error("SMM API: url or key not set")
+        return None
+    try:
+        r = http.post(url, data={"key": key, "action": "services"}, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        if isinstance(data, dict) and data.get("error"):
+            logger.error(f"SMM API error: {data['error']}")
+            return None
+        for s in data:
+            if str(s.get("service")) == str(api_id):
+                # API panels use "rate" as cost per 1000, some use "min" fallback
+                rate = s.get("rate") or s.get("price") or s.get("cost") or "0"
+                return {
+                    "cost_rate": str(rate),
+                    "min":       max(1, int(float(s.get("min") or 10))),
+                    "max":       int(float(s.get("max") or 100000)),
+                    "raw_name":  s.get("name") or s.get("Name") or str(api_id),
+                    "refill":    bool(s.get("refill", False)),
+                }
+        logger.error(f"SMM API: service {api_id} not found in list")
+    except Exception as e:
+        logger.error(f"Fetch service {api_id}: {e}")
+    return None
+
+_ORD_STATUS_LABELS = {
+    "pending":   "⏳ កំពុងដំណើរការ",
+    "completed": "✅ ជោគជ័យ",
+    "partial":   "⚠️ ប្រគល់មិនគ្រប់",
+    "canceled":  "❌ បានលុបចោល",
+    "cancelled": "❌ បានលុបចោល",
+    "refilling": "🔄 កំពុងសុំ Refill",
+}
+def _ord_status_label(st):
+    return _ORD_STATUS_LABELS.get(str(st or "").lower(), str(st or "?"))
+
+
+def _format_user_order_detail(oid, o):
+    """User-facing order detail — status, reject reason, refund."""
+    import html as _html
+    st = str(o.get("status") or "?")
+    st_label = _ord_status_label(st)
+    lab = _html.escape(str(o.get("label") or "?"))
+    link = _html.escape(str(o.get("link") or "—"))
+    qty = o.get("qty", "?")
+    try:
+        qty_s = f"{int(qty):,}"
+    except Exception:
+        qty_s = str(qty)
+    price = float(o.get("price") or 0)
+    reason = (o.get("reject_reason") or o.get("note") or "").strip()
+    ts = o.get("ts") or o.get("created") or 0
+    try:
+        dt = datetime.datetime.fromtimestamp(int(ts)).strftime("%d/%m/%Y %H:%M") if ts else "—"
+    except Exception:
+        dt = str(ts) if ts else "—"
+    lines = [
+        f"🔍 <b>តាមដាន Order</b>",
+        f"━━━━━━━━━━━━━━━━━━",
+        f"🆔 <code>{_html.escape(str(oid))}</code>",
+        f"📌 ស្ថានភាព: <b>{_html.escape(str(st_label))}</b>",
+        f"📦 {lab}",
+        f"🔢 ចំនួន: <b>{qty_s}</b>",
+        f"💰 តម្លៃ: <b>${price:.4f}</b>",
+        f"🔗 <code>{link}</code>",
+        f"🕐 {dt}",
+    ]
+    if st.lower() in ("rejected", "canceled", "cancelled"):
+        if reason:
+            lines.append(f"📝 មូលហេតុ: <b>{_html.escape(reason)}</b>")
+        else:
+            lines.append("📝 មូលហេតុ: <i>មិនបានបញ្ជាក់</i>")
+        ref = float(o.get("refunded") or 0)
+        if ref > 0:
+            lines.append(f"💳 បានសងវិញ: <b>${ref:.4f}</b>")
+    elif st.lower() == "partial":
+        if o.get("remains") is not None:
+            lines.append(f"📉 នៅសល់: <b>{o.get('remains')}</b>")
+        ref = float(o.get("refunded") or 0)
+        if ref > 0:
+            lines.append(f"💳 សងវិញ (partial): <b>${ref:.4f}</b>")
+        if reason:
+            lines.append(f"📝 Note: {_html.escape(reason)}")
+    elif st.lower() in ("completed", "done", "success"):
+        if reason and reason not in ("-", "—"):
+            lines.append(f"📝 Note: {_html.escape(reason)}")
+        lines.append("✅ Order បានបញ្ចប់")
+    else:
+        lines.append("⏳ កំពុងដំណើរការ — រង់ចាំបន្តិច")
+    return "\n".join(lines)
+
+
+def _user_orders_inline_kb(uid_str, limit=8):
+    """Inline buttons for user's recent orders → open detail."""
+    kb = InlineKeyboardMarkup()
+    items = [(oid, o) for oid, o in smm_orders.items() if str(o.get("uid")) == str(uid_str)]
+    items.sort(key=lambda x: int(x[1].get("ts") or 0), reverse=True)
+    for oid, o in items[:limit]:
+        st = _ord_status_label(o.get("status"))
+        lab = str(o.get("label") or "Order")[:18]
+        kb.row(InlineKeyboardButton(
+            f"{st} · {lab} · #{oid}",
+            callback_data=f"uord:{oid}",
+        ))
+    return kb
+
+
+def _smm_clean_name(raw):
+    raw = re.sub(r'\s*\[.*?\]\s*', ' ', raw)
+    raw = re.sub(r'\s*\(.*?\)\s*', ' ', raw)
+    return re.sub(r'\s+', ' ', raw).strip()[:60]
+
+def _smm_service_list_text():
+    if not smm_services: return "❌ គ្មាន Service ទេ"
+    lines = ["<b>📋 SMM Services</b>\n━━━━━━━━━━━━━━━━━━"]
+    for cat in _smm_get_categories():
+        lines.append(f"\n📂 <b>{cat}</b>")
+        for slug, s in _smm_get_svcs_in_cat(cat):
+            sr = _smm_sell_rate(s["cost_rate"], slug)
+            lines.append(f"  • {s.get('label',slug)} — ${sr:.2f}/1K")
+    return "\n".join(lines)
+
+# ── Hardcoded notify channel — always works ──
+NOTIFY_CHANNEL_ID_DEFAULT = -1003930705105
+
+def _notify(msg):
+    """Send to notify channel. ID: env NOTIFY_CHANNEL_ID → file → default."""
+    cid = NOTIFY_CHANNEL_ID_DEFAULT
+    try:
+        env_cid = (os.environ.get("NOTIFY_CHANNEL_ID") or "").strip()
+        if env_cid:
+            cid = int(env_cid)
+        else:
+            cfg = _load(NOTIFY_FILE, {})
+            saved_cid = cfg.get("channel_id", "")
+            if saved_cid:
+                cid = int(saved_cid)
+    except Exception as _e:
+        logger.debug(f"[silent] {_e}")
+    try:
+        msg = _emojify(msg) if msg else msg
+        bot.send_message(cid, msg, parse_mode="HTML", disable_web_page_preview=True)
+        logger.info(f"[notify] sent to {cid}")
+    except Exception as e:
+        logger.warning(f"[notify] failed cid={cid} err={e}")
+
+def _mask_uid(uid):
+    """Mask UID for public channel: 56xxxxxxxx"""
+    s = str(uid)
+    if len(s) <= 2:
+        return s + "xxxxxxxx"
+    return s[:2] + "x" * max(8, len(s) - 2)
+
+def _kh_now_str(fmt="full"):
+    """Khmer-friendly datetime string (UTC+7).
+    fmt=full  → 2026-09-26 01:42:44 PM
+    fmt=24    → 2026-09-26 13:38:48
+    """
+    now = datetime.datetime.now(_KH_TZ)
+    if fmt == "24":
+        return now.strftime("%Y-%m-%d %H:%M:%S")
+    return now.strftime("%Y-%m-%d %I:%M:%S %p")
+
+
+
+def _channel_deposit_msg(uid, amount, reference="", method_label="ដាក់ប្រាក់", bonus=0.0):
+    """Channel invoice style — LazR SMM (masked UID for public channel)."""
+    ref = reference or f"JAKLIKE_{int(time.time()*1000)}"
+    msg = (
+        f"🔔 <b>ការដាក់ប្រាក់បានជោគជ័យហើយ</b>\n"
+        f"លេខសម្គាល់អ្នកប្រើ: <code>{_mask_uid(uid)}</code>\n"
+        f"ចំនួនទឹកប្រាក់: <b>${float(amount):.2f}</b>\n"
+        f"ម៉ោង: {_kh_now_str('full')}\n"
+        f"វិធីបង់ប្រាក់: {method_label}\n"
+        f"ស្ថានភាព: បានជោគជ័យ\n"
+        f"លេខសម្គាល់ប្រតិបត្តិការ:\n"
+        f"<code>{ref}</code>\n\n"
+        f"🙏 អរគុណសម្រាប់ការដាក់ប្រាក់ <b>${float(amount):.2f}</b> ✅"
+    )
+    if bonus and float(bonus) > 0:
+        msg += f"\n🎁 Bonus: <b>+${float(bonus):.2f}</b>"
+    return msg
+
+
+def _channel_new_user_msg(uid):
+    """Channel style — new user (masked ID)."""
+    return (
+        f"🆕 <b>អ្នកប្រើថ្មីបានចូលប្រើ Bot</b>\n"
+        f"លេខសម្គាល់អ្នកប្រើ: <code>{_mask_uid(uid)}</code>\n"
+        f"ពេលវេលា: {_kh_now_str('full')}\n"
+        f"ស្ថានភាព: បានចូលរួច / បានចុះឈ្មោះរួច"
+    )
+
+
+def _channel_order_msg(uid, label, price, link, oid, api_order_id=None, qty=None, extra_order_ids=None, status_label=None):
+    """Channel order — LazR style: masked buyer, Link: Private (public channel)."""
+    # Privacy on public channel: never post full target link
+    link_disp = "Private"
+    svc_line = label or "?"
+    if qty:
+        try:
+            svc_line = f"{label} x{int(qty):,}"
+        except Exception:
+            pass
+    if price is not None:
+        svc_line = f"{svc_line} - ${float(price):.2f}"
+
+    lines = [
+        f"📦 <b>ការបញ្ជាទិញថ្មី!</b>",
+        f"",
+        f"Buyer ID: <code>{_mask_uid(uid)}</code>",
+        f"",
+        f"🔗 Link: {link_disp}",
+        f"🎯 សេវាកម្ម: {svc_line}",
+    ]
+    if extra_order_ids:
+        for emoji, title, eid in extra_order_ids:
+            lines.append(f"{emoji} {title}: <code>{eid}</code>")
+    else:
+        if api_order_id:
+            lines.append(f"🆔 API Order ID: <code>{api_order_id}</code>")
+        lines.append(f"📋 Order ID: <code>{oid}</code>")
+    lines += [
+        f"💵 តម្លៃសរុប: <b>${float(price):.2f}</b>" if price is not None else "💵 តម្លៃសរុប: —",
+        f"📦 ការបញ្ជា: {status_label or 'ជោគជ័យ ✅'}",
+        f"📅 Date: {_kh_now_str('24')}",
+        f"",
+        f"អរគុណចំពោះការប្រើប្រាស់ ❤️",
+    ]
+    return "\n".join(lines)
+
+
+def _send_deposit_notify(uid, amount, bonus, new_bal, reference="", method_label="ដាក់ប្រាក់"):
+    """Admin/pay-bot style kept short; channel uses LazR invoice format."""
+    msg = (
+        f"💰 <b>ដាក់លុយ ថ្មី!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"👤 User ID: <code>{uid}</code>\n"
+        f"💵 បានទទួល: <b>${amount:.2f}</b>\n"
+    )
+    if bonus > 0:
+        msg += f"🎟️ Bonus: <b>+${bonus:.2f}</b>\n"
+    msg += (
+        f"💳 Balance ថ្មី: <b>${new_bal:.2f}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━"
+    )
+    # short admin/pay notify
+    try:
+        pnotify(msg)
+    except Exception:
+        pass
+    # public channel — LazR style
+    _notify(_channel_deposit_msg(uid, amount, reference=reference,
+                                 method_label=method_label, bonus=bonus))
+
+def _get_notify_cfg():
+    cfg = _load(NOTIFY_FILE, {})
+    if not cfg.get("channel_id"):
+        cfg = {"channel_id": str(NOTIFY_CHANNEL_ID_DEFAULT), "enabled": True}
+    cfg["enabled"] = True
+    return cfg
+
+# ═══════════════════════════════════════════════════════════
+#  ORDER BOT / PAYMENT BOT — bot ដាច់ដោយឡែកសម្រាប់ផ្ញើ Notification
+#  Order និង Payment ជំនួសបំពេញនៅ bot service ផ្ទាល់ ។ Admin setup token
+#  តាម /setup_order_bot និង /setup_pay_bot — Notification នឹងផ្ញើទៅ bot
+#  ថ្មីនេះជំនួស (admin ត្រូវ /start bot ថ្មីនោះជាមួយ account ដដែលជាមុនសិន)។
+# ═══════════════════════════════════════════════════════════
+order_bot = None   # telebot.TeleBot instance សម្រាប់ Order notify (None = មិនទាន់ setup)
+pay_bot   = None   # telebot.TeleBot instance សម្រាប់ Payment notify (None = មិនទាន់ setup)
+
+def _make_notify_bot(token):
+    """បង្កើត + validate TeleBot instance ថ្មីពី token (ហៅ getMe() ដើម្បីប្រាកដថា
+    token ត្រឹមត្រូវ)។ Return None បើ token ទទេ ឬខុស។"""
+    if not token:
+        return None
+    try:
+        tb = telebot.TeleBot(token, parse_mode=None)
+        tb.get_me()
+        return tb
+    except Exception as e:
+        logger.warning(f"[notify_bot init] failed: {e}")
+        return None
+
+def _notify_bot_polling(tb, label):
+    """Background polling for Order/Payment bots — never share token with main bot."""
+    fail_409 = 0
+    while True:
+        try:
+            _ensure_clean_updates(tb, label)
+            logger.info(f"🤖 [{label}] Notify Bot polling ចាប់ផ្ដើម...")
+            tb.infinity_polling(timeout=20, long_polling_timeout=15, skip_pending=False)
+            fail_409 = 0
+        except Exception as e:
+            msg = str(e)
+            is_409 = ("409" in msg) or ("Conflict" in msg)
+            if is_409:
+                fail_409 += 1
+                wait = min(30 + fail_409 * 15, 120)
+                logger.error(f"❌ [{label}] 409 Conflict — token ប្រើពីរកន្លែង។ Retry {wait}s")
+                try:
+                    tb.delete_webhook(drop_pending_updates=False)
+                except Exception:
+                    pass
+                time.sleep(wait)
+            else:
+                logger.warning(f"⚠️ [{label}] Notify Bot polling error: {e} — Retry in 10s...")
+                time.sleep(10)
+
+def _start_order_bot(token):
+    """Init order_bot — token ត្រូវខុសពី BOT_TOKEN មេ បើមិនដូច្នេះ 409 Conflict."""
+    global order_bot
+    tok = (token or "").strip()
+    if not tok:
+        return False
+    if tok == (BOT_TOKEN or "").strip():
+        logger.error("[Order Bot] token ដូច BOT_TOKEN មេ — មិនចាប់ polling (នឹង 409)")
+        return False
+    tb = _make_notify_bot(tok)
+    if not tb:
+        return False
+    order_bot = tb
+    _register_order_bot_handlers(order_bot)
+    threading.Thread(target=_notify_bot_polling, args=(order_bot, "Order Bot"), daemon=True).start()
+    return True
+
+def _start_pay_bot(token):
+    global pay_bot
+    tok = (token or "").strip()
+    if not tok:
+        return False
+    if tok == (BOT_TOKEN or "").strip():
+        logger.error("[Payment Bot] token ដូច BOT_TOKEN មេ — មិនចាប់ polling (នឹង 409)")
+        return False
+    if order_bot and tok == getattr(order_bot, "token", None):
+        logger.error("[Payment Bot] token ដូច Order Bot — មិនចាប់ polling")
+        return False
+    tb = _make_notify_bot(tok)
+    if not tb:
+        return False
+    pay_bot = tb
+    _register_pay_bot_handlers(pay_bot)
+    threading.Thread(target=_notify_bot_polling, args=(pay_bot, "Payment Bot"), daemon=True).start()
+    return True
+
+def _bot_tag(tb):
+    """Tag for waiting[] so Done/Reject note steps resume on the same bot."""
+    if tb is order_bot:
+        return "order"
+    if tb is pay_bot:
+        return "pay"
+    return "main"
+
+
+def _bot_by_tag(tag):
+    if tag == "order" and order_bot:
+        return order_bot
+    if tag == "pay" and pay_bot:
+        return pay_bot
+    return bot
+
+
+def _notify_target_chat_id(kind="order"):
+    """Chat ID for Order/Payment Bot.
+    Priority: notify_bots_cfg order_chat_id/pay_chat_id → ADMIN_ID.
+    Admin must /start the notify bot at least once if target is a private user chat.
+    """
+    try:
+        cfg = notify_bots_cfg or {}
+        raw = (cfg.get("order_chat_id") if kind == "order" else cfg.get("pay_chat_id")) or ""
+        raw = str(raw).strip()
+        if raw:
+            return int(raw)
+    except Exception as e:
+        logger.debug(f"[notify chat_id] {e}")
+    return ADMIN_ID
+
+
+def _safe_send(tb, chat_id, text, reply_markup=None, parse_mode="HTML", label="notify"):
+    """Send via a TeleBot instance; return True on success."""
+    if not tb:
+        return False
+    try:
+        tb.send_message(chat_id, text, parse_mode=parse_mode, reply_markup=reply_markup)
+        logger.info(f"[{label}] sent → {chat_id}")
+        return True
+    except Exception as e:
+        logger.warning(f"[{label}] send failed chat={chat_id} err={e}")
+        return False
+
+
+# FIX (TikTok Khmer / manual orders reached the Channel but not the Order Bot):
+# manual orders are the only ones sent WITH a keyboard (Done/Reject). If Telegram rejects that message for the
+# Order Bot (premium icon / style on buttons, <tg-emoji> inside <code>, HTML parse error ...) the old code just
+# logged a warning and the admin saw nothing. Now every notification is retried in 3 steps and the real Telegram
+# error is reported to the admin (rate-limited) so it is visible without opening the Render logs.
+_notify_diag_last = {}
+
+def _plain_markup(markup):
+    """Copy of an InlineKeyboardMarkup with NO premium icon / style: only text + callback_data/url."""
+    try:
+        rows = []
+        for row in (getattr(markup, "keyboard", None) or []):
+            new_row = []
+            for b in row:
+                txt = _strip_tg_emoji_tags(getattr(b, "text", "") or "").strip() or "\u2022"
+                if getattr(b, "callback_data", None):
+                    new_row.append(_IKB_orig(txt, callback_data=b.callback_data))
+                elif getattr(b, "url", None):
+                    new_row.append(_IKB_orig(txt, url=b.url))
+                else:
+                    new_row.append(_IKB_orig(txt, callback_data="noop"))
+            rows.append(new_row)
+        return InlineKeyboardMarkup(rows)
+    except Exception as _e:
+        logger.debug(f"[plain_markup] {_e}")
+        return None
+
+def _html_to_plain(text):
+    import html as _h
+    t = _strip_tg_emoji_tags(text or "")
+    t = _re.sub(r"<[^>]+>", "", t)
+    return _h.unescape(t)
+
+def _try_send(tb, chat_id, text, markup, parse_mode, label):
+    """-> (ok, error_text)"""
+    try:
+        tb.send_message(chat_id, text, parse_mode=parse_mode, reply_markup=markup, disable_web_page_preview=True)
+        logger.info(f"[{label}] sent -> {chat_id}")
+        return True, ""
+    except Exception as e:
+        err = str(e)[:300]
+        logger.warning(f"[{label}] send failed chat={chat_id} err={err}")
+        return False, err
+
+
+def _tg_escape(s, limit=400):
+    """Escape text for Telegram HTML — block API HTML error pages (!DOCTYPE)."""
+    import html as _html
+    if s is None:
+        return ""
+    s = str(s)
+    low = s.lower()
+    if "<!doctype" in low or "<html" in low or "<body" in low:
+        s = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", s)
+        s = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", s)
+        s = re.sub(r"(?is)<[^>]+>", " ", s)
+        s = re.sub(r"\s+", " ", s).strip() or "(HTML error page from payment API)"
+    s = _html.escape(s, quote=False)
+    if limit and len(s) > limit:
+        s = s[:limit] + "…"
+    return s
+
+def _send_with_fallbacks(tb, chat_id, text, markup, parse_mode, label):
+    """Try: plain-buttons first when keyboard present (avoids ENTITY_TEXT_INVALID from premium icons),
+    then full, then plain text. -> (ok, last_error, how)"""
+    attempts = []
+    text_clean = _strip_tg_emoji_tags(text or "")
+    if markup is not None:
+        pm = _plain_markup(markup)
+        # Prefer FULL first (premium icons) — only fall back to plain-buttons if Telegram rejects
+        attempts.append(("full", text_clean, markup, parse_mode))
+        if pm is not None:
+            attempts.append(("plain-buttons", text_clean, pm, parse_mode))
+    else:
+        attempts.append(("full", text_clean, None, parse_mode))
+    attempts.append(("plain-text", _html_to_plain(text_clean), _plain_markup(markup) if markup is not None else None, None))
+    if markup is not None:
+        attempts.append(("text-only", _html_to_plain(text_clean), None, None))
+    last = ""
+    for how, t, m, pmode in attempts:
+        ok, err = _try_send(tb, chat_id, t, m, pmode, f"{label}/{how}")
+        if ok:
+            return True, last, how
+        last = err
+    return False, last, ""
+
+def _notify_diag(kind, msg):
+    """Tell the admin WHY a notify bot failed (max once / 5 min per kind) so it can be fixed."""
+    try:
+        now = time.time()
+        if now - _notify_diag_last.get(kind, 0) < 300:
+            return
+        _notify_diag_last[kind] = now
+        _try_send(bot, ADMIN_ID, msg[:3500], None, None, f"{kind}/diag")
+    except Exception as _e:
+        logger.debug(f"[notify_diag] {_e}")
+
+def _notify_via(kind, text, reply_markup=None, parse_mode="HTML"):
+    """kind = 'order' | 'pay'. Notify bot first, main bot as fallback; both with degraded retries."""
+    name = "onotify" if kind == "order" else "pnotify"
+    tb = order_bot if kind == "order" else pay_bot
+    try:
+        if text and ("<!DOCTYPE" in text or "<!doctype" in text or "<html" in (text or "").lower()):
+            text = _tg_escape(text, 1500)
+            parse_mode = None
+        # Order/Pay notify: មិនប្រើ <tg-emoji> — Telegram ងាយ ENTITY_TEXT_INVALID
+        # ជាមួយ InlineKeyboard (Done/Reject) + HTML លាយ premium entities។
+        # រក្សា unicode emoji ធម្មតា តែ strip tg-emoji tags បើមាន។
+        try:
+            if reply_markup is not None:
+                text = _strip_tg_emoji_tags(text or "")
+            else:
+                text = _emojify(text) if text else text
+                # still avoid nested entity issues in notify bots
+                if tb is not None:
+                    text = _strip_tg_emoji_tags(text or "")
+        except Exception as _e:
+            logger.warning(f"[{name}] text sanitize failed: {_e}")
+            text = _strip_tg_emoji_tags(text or "") if text else text
+        if parse_mode is None and text and "<tg-emoji" in str(text):
+            parse_mode = "HTML"
+        ok = False
+        if tb:
+            ok, err, how = _send_with_fallbacks(tb, _notify_target_chat_id(kind), text, reply_markup, parse_mode, f"{name}/{kind}_bot")
+            if ok and how in ("plain-text", "text-only"):
+                _notify_diag(kind, f"ℹ️ {kind.title()} Bot: សារមកដល់ ប៉ុន្តែត្រូវផ្ញើបែបសាមញ្ញ ({how}) ព្រោះ Telegram បដិសេធមុន:\n{err}")
+            # plain-buttons is the preferred path for Done/Reject — not an error
+            if not ok:
+                _notify_diag(kind, f"⚠️ {kind.title()} Bot ផ្ញើមិនបាន:\n{err}\n\n(ពិនិត្យថា Admin បាន /start {kind.title()} Bot ហើយ Chat ID ត្រឹមត្រូវ)")
+        if not ok:
+            ok, err2, how2 = _send_with_fallbacks(bot, ADMIN_ID, text, reply_markup, parse_mode, f"{name}/main")
+            if not ok:
+                logger.error(f"[{name}] all channels failed: {err2}")
+    except Exception as e:
+        logger.warning(f"[{name}] failed: {e}")
+
+
+def onotify(text, reply_markup=None, parse_mode="HTML"):
+    """Order notification -> Order Bot (if set) + fallback to main bot ADMIN (with degraded retries)."""
+    _notify_via("order", text, reply_markup, parse_mode)
+
+
+def pnotify(text, reply_markup=None, parse_mode="HTML"):
+    """Payment/Deposit notification -> Payment Bot + fallback main bot (with degraded retries)."""
+    _notify_via("pay", text, reply_markup, parse_mode)
+
+
+
+def pnotify_photo(file_id, caption, reply_markup=None):
+    """ផ្ញើរូបភាព (ឧ. Proof ដាក់លុយ) ទៅ Payment Bot។ file_id មិនអាចប្រើឆ្លង bot
+    គ្នាបានទេ ដូច្នេះត្រូវ download bytes ពី bot service ជាមុន រួច upload ថ្មីទៅ
+    Payment Bot ។"""
+    try:
+        if pay_bot:
+            finfo = bot.get_file(file_id)
+            raw = bot.download_file(finfo.file_path)
+            caption = _emojify(caption) if caption else caption
+            pay_bot.send_photo(_notify_target_chat_id(), raw, caption=caption,
+                                parse_mode="HTML", reply_markup=reply_markup)
+        else:
+            caption = _emojify(caption) if caption else caption
+            bot.send_photo(ADMIN_ID, file_id, caption=caption,
+                            parse_mode="HTML", reply_markup=reply_markup)
+    except Exception as e:
+        logger.warning(f"[pnotify_photo] failed: {e}")
+
+def _make_order_id():
+    """Order ID = លេខលំដាប់ យកពីទិន្នន័យស្ថិតិ (smm_orders = ប្រភព 📊 ស្ថិតិ)។
+    next_id = ចំនួន Order សរុបក្នុងស្ថិតិ + 1
+    (ឧ. ស្ថិតិបង្ហាញ 150 orders → Order ID ថ្មី = 151)
+    បើមាន Order ID លេខធំជាងចំនួនសរុប (ឧ. migrate ពីប្រព័ន្ធផ្សេង) បន្តពី max នោះ។"""
+    global smm_orders
+    # ── ទិន្នន័យពីស្ថិតិ (ដូច 📊 ស្ថិតិ → SMM Orders) ──
+    total_orders = len(smm_orders)  # សរុប order ទាំងអស់ក្នុង database
+    max_numeric = 0
+    for k in smm_orders.keys():
+        try:
+            max_numeric = max(max_numeric, int(str(k)))
+        except (TypeError, ValueError):
+            pass  # លុប KZ... ចាស់ មិនរាប់ជាលេខ
+    # លំដាប់បន្ទាប់ = max(ចំនួនសរុប, ID លេខធំបំផុត) + 1
+    next_id = max(total_orders, max_numeric) + 1
+    while str(next_id) in smm_orders:
+        next_id += 1
+    # រក្សា counter ឲ្យ sync ជាមួយស្ថិតិ (សម្រាប់ debug / backup)
+    try:
+        _save(ORDER_SEQ_FILE, {"n": next_id, "total_orders": total_orders})
+    except Exception:
+        pass
+    return str(next_id)
+
+
+def _user_display(uid_str):
+    """បង្កើតឈ្មោះ + username បង្ហាញឲ្យ Admin មើលងាយ។
+    Escape HTML ក្នុង name/username ដើម្បីកុំ ENTITY_TEXT_INVALID។"""
+    import html as _html
+    u = users_db.get(str(uid_str), {})
+    name = _html.escape((u.get("name") or "").strip())
+    uname = _html.escape((u.get("username") or "").strip().lstrip("@"))
+    parts = []
+    if name:
+        parts.append(name)
+    if uname:
+        parts.append(f"@{uname}")
+    if parts:
+        return " ".join(parts) + f" (<code>{uid_str}</code>)"
+    return f"<code>{uid_str}</code>"
+
+# ═══════════════════════════════════════════════════════════
+#  KHQR CARD GENERATOR
+# ═══════════════════════════════════════════════════════════
+_CARD_NAVY      = (5, 59, 47)       # deep emerald (header / headline text)
+_CARD_NAVY2     = (3, 33, 30)       # deeper teal (header gradient bottom)
+_CARD_RED       = (217, 45, 32)
+_CARD_WHITE     = (255, 255, 255)
+_CARD_SUBTITLE  = (170, 221, 199)   # mint (header subtitle)
+_CARD_GRAY      = (100, 116, 109)
+_CARD_MUTED     = (145, 152, 148)
+_CARD_BORDER    = (224, 231, 227)
+_CARD_GOLD      = (201, 162, 39)
+_CARD_VIOLET    = (6, 95, 70)       # emerald accent (panel border / pill outline)
+_CARD_PANEL     = (247, 250, 249)
+_CARD_CHIP_BG   = (234, 250, 244)   # pale mint chip background
+
+_FONT_REG = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/system/fonts/Roboto-Regular.ttf",
+    "/data/data/com.termux/files/usr/share/fonts/DejaVuSans.ttf",
+]
+_FONT_BOLD = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/system/fonts/Roboto-Bold.ttf",
+    "/data/data/com.termux/files/usr/share/fonts/DejaVuSans-Bold.ttf",
+]
+
+
+def _admin_format_order(oid, o):
+    """Admin view — any order by ID (no uid restriction)."""
+    import html as _html
+    if not o:
+        return None
+    uid_o = str(o.get("uid") or "")
+    u = users_db.get(uid_o, {})
+    name = _html.escape((u.get("name") or "").strip() or "—")
+    uname = (u.get("username") or "").strip().lstrip("@")
+    uname_disp = f"@{_html.escape(uname)}" if uname else "—"
+    lab = _html.escape(str(o.get("label") or "?"))
+    link = _html.escape(str(o.get("link") or "—"))
+    st = o.get("status") or "?"
+    try:
+        st_label = _ord_status_label(st)
+    except Exception:
+        st_label = st
+    qty = o.get("qty", "?")
+    try:
+        qty_s = f"{int(qty):,}"
+    except Exception:
+        qty_s = str(qty)
+    price = float(o.get("price") or 0)
+    api_oid = o.get("api_order_id") or "—"
+    reason = o.get("reject_reason") or o.get("note") or ""
+    lines = [
+        f"🔍 <b>Order Detail</b>",
+        f"━━━━━━━━━━━━━━━━━━",
+        f"🆔 Order: <code>{_html.escape(str(oid))}</code>",
+        f"📌 Status: <b>{_html.escape(str(st_label))}</b> (<code>{_html.escape(str(st))}</code>)",
+        f"━━━━━━━━━━━━━━━━━━",
+        f"👤 User ID: <code>{_html.escape(uid_o)}</code>",
+        f"🙍 Name: <b>{name}</b>",
+        f"🔗 Username: {uname_disp}",
+        f"━━━━━━━━━━━━━━━━━━",
+        f"📦 {lab}",
+        f"🔢 Qty: <b>{qty_s}</b>",
+        f"💰 Price: <b>${price:.4f}</b>",
+        f"🔗 Link: <code>{link}</code>",
+        f"🆔 API Order: <code>{_html.escape(str(api_oid))}</code>",
+    ]
+    if o.get("refunded"):
+        lines.append(f"💳 Refunded: <b>${float(o.get('refunded') or 0):.4f}</b>")
+    if reason:
+        lines.append(f"📝 Note: {_html.escape(str(reason))}")
+    if o.get("created") or o.get("ts") or o.get("time"):
+        ts = o.get("created") or o.get("ts") or o.get("time")
+        lines.append(f"🕐 <code>{_html.escape(str(ts))}</code>")
+    return "\n".join(lines)
+
+
+def _admin_format_user(uid_str):
+    """Admin view — user profile + balance + recent orders by Telegram ID."""
+    import html as _html
+    uid_str = str(uid_str).strip()
+    u = users_db.get(uid_str, {})
+    name = _html.escape((u.get("name") or "").strip() or "—")
+    uname = (u.get("username") or "").strip().lstrip("@")
+    uname_disp = f"@{_html.escape(uname)}" if uname else "—"
+    b = bal(uid_str)
+    banned = bool(u.get("banned"))
+    blocked = bool(u.get("blocked"))
+    last = u.get("last") or u.get("last_seen") or "—"
+    # orders for this user
+    u_orders = [(oid, o) for oid, o in smm_orders.items() if str(o.get("uid")) == uid_str]
+    # newest last in dict order — take last 10
+    recent = u_orders[-10:] if u_orders else []
+    lines = [
+        f"👤 <b>User Detail</b>",
+        f"━━━━━━━━━━━━━━━━━━",
+        f"🆔 ID: <code>{_html.escape(uid_str)}</code>",
+        f"🙍 Name: <b>{name}</b>",
+        f"🔗 Username: {uname_disp}",
+        f"💳 Balance: <b>${b:.4f}</b>",
+        f"🚫 Banned: {'✅' if banned else '❌'} | Blocked: {'✅' if blocked else '❌'}",
+        f"🕐 Last: <code>{_html.escape(str(last))}</code>",
+        f"📦 Orders total: <b>{len(u_orders)}</b>",
+        f"━━━━━━━━━━━━━━━━━━",
+    ]
+    if recent:
+        lines.append("<b>Order ចុងក្រោយ:</b>")
+        for oid, o in reversed(recent):
+            st = o.get("status") or "?"
+            lab = _html.escape(str(o.get("label") or "?")[:28])
+            price = float(o.get("price") or 0)
+            lines.append(f"• <code>{_html.escape(str(oid))}</code> | {lab} | ${price:.2f} | <b>{_html.escape(str(st))}</b>")
+    else:
+        lines.append("<i>គ្មាន order</i>")
+    return "\n".join(lines)
+
+
+
+def _card_font(size, bold=False):
+    for path in (_FONT_BOLD if bold else _FONT_REG):
+        try:
+            return ImageFont.truetype(path, size)
+        except (OSError, IOError):
+            continue
+    return ImageFont.load_default(size=size)
+
+def _tw(draw, text, font):
+    return draw.textbbox((0, 0), text, font=font)[2]
+
+def _cx_text(draw, cx, y, text, font, fill):
+    draw.text((cx - _tw(draw, text, font) / 2, y), text, font=font, fill=fill)
+
+def _vgrad(draw, box, top_color, bottom_color):
+    x0, y0, x1, y1 = box
+    h = max(1, y1 - y0)
+    for i in range(h):
+        t = i / h
+        r = int(top_color[0] + (bottom_color[0] - top_color[0]) * t)
+        g = int(top_color[1] + (bottom_color[1] - top_color[1]) * t)
+        b = int(top_color[2] + (bottom_color[2] - top_color[2]) * t)
+        draw.line([(x0, y0 + i), (x1, y0 + i)], fill=(r, g, b))
+
+def _qr_matrix(data):
+    try:
+        import qrcode as _qrcode
+        qr = _qrcode.QRCode(border=0, error_correction=_qrcode.constants.ERROR_CORRECT_M)
+        qr.add_data(data); qr.make(fit=True)
+        m = qr.get_matrix()
+        return np.array([[0 if c else 255 for c in row] for row in m], dtype=np.uint8)
+    except Exception as e:
+        raise RuntimeError(f"qrcode lib error: {e}")
+
+def _qr_img(data, box_px):
+    matrix = _qr_matrix(data)
+    n = matrix.shape[0]
+    mod = max(1, box_px // n)
+    img = Image.new("RGB", (mod * n, mod * n), _CARD_PANEL)
+    draw = ImageDraw.Draw(img)
+    for ry in range(n):
+        for rx in range(n):
+            if matrix[ry, rx] == 0:
+                x0, y0 = rx * mod, ry * mod
+                draw.rectangle([x0, y0, x0 + mod - 1, y0 + mod - 1], fill=_CARD_NAVY)
+    return img.resize((box_px, box_px), Image.LANCZOS)
+
+def _pill_box(draw, cx, y, text, font, pad_x, pad_y, fill, outline=None, outline_w=2,
+              text_fill=_CARD_NAVY):
+    """Draw a centered, auto-width rounded pill with text. Returns pill height."""
+    bbox = draw.textbbox((0, 0), text, font=font)
+    tw_, th_ = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    pill_h = th_ + 2 * pad_y
+    pill_w = tw_ + 2 * pad_x
+    box = [cx - pill_w / 2, y, cx + pill_w / 2, y + pill_h]
+    draw.rounded_rectangle(box, radius=pill_h / 2, fill=fill,
+                            outline=outline, width=outline_w if outline else 0)
+    draw.text((cx - tw_ / 2 - bbox[0], y + pad_y - bbox[1]), text, font=font, fill=text_fill)
+    return pill_h
+
+def _build_qr_image(qr_string, amount=None, ref=None, label=None, subtitle=None,
+                    expires_min=None, width=720):
+    """Generate branded KHQR 'ticket' card → BytesIO (PNG). Falls back to plain QR on error."""
+    if expires_min is None:
+        expires_min = max(1, round(DEPOSIT_EXPIRE_SEC / 60))
+    try:
+        W = width
+        HEADER_H = int(W * 0.30)
+        SIDE_PAD = int(W * 0.13)
+        QR_BOX   = W - 2 * SIDE_PAD
+        QR_PAD   = int(QR_BOX * 0.09)
+        OVERLAP  = int(W * 0.10)
+
+        f_title = _card_font(int(W * 0.052), bold=True)
+        f_sub   = _card_font(int(W * 0.026))
+        f_name  = _card_font(int(W * 0.042), bold=True)
+        f_label = _card_font(int(W * 0.024))
+        f_amt   = _card_font(int(W * 0.062), bold=True)
+        f_small = _card_font(int(W * 0.0205))
+        f_badge = _card_font(int(W * 0.0195), bold=True)
+
+        qr_card_top    = HEADER_H - OVERLAP
+        qr_card_bottom = qr_card_top + QR_BOX
+        content_top    = qr_card_bottom + int(W * 0.05)
+
+        # Row heights (shared between H calc and the draw walk, kept in sync)
+        NAME_ROW  = int(W * 0.065)
+        SUB_ROW   = int(W * 0.045)
+        GAP1      = int(W * 0.020)
+        AMT_H     = int(f_amt.size * 1.55)
+        GAP2      = int(W * 0.030)
+        PERF_ROW  = int(W * 0.045)
+        CHIP_H    = int(f_small.size * 1.9)
+        CHIP_GAP  = int(W * 0.022)
+        EXP_ROW   = int(W * 0.032)
+        FOOT_ROW1 = int(W * 0.030)
+        FOOT_ROW2 = int(W * 0.030)
+        BOTTOM_PAD = int(W * 0.05)
+
+        H = (content_top + NAME_ROW + SUB_ROW + GAP1 + AMT_H + GAP2 + PERF_ROW
+             + CHIP_H + CHIP_GAP + EXP_ROW + FOOT_ROW1 + FOOT_ROW2 + BOTTOM_PAD)
+
+        img  = Image.new("RGB", (W, H), _CARD_WHITE)
+        draw = ImageDraw.Draw(img)
+        cx   = W // 2
+        pad  = int(W * 0.06)
+
+        # 1. Gradient header (deep emerald → teal)
+        _vgrad(draw, [0, 0, W, HEADER_H], _CARD_NAVY, _CARD_NAVY2)
+
+        # Decorative rings — kept fully inside the header so no stray arcs bleed
+        # into the body below (the previous ring's radius overshot HEADER_H)
+        for rr, rw in ((int(W*0.16), 1), (int(W*0.10), 1)):
+            ring_cx, ring_cy = W - int(W * 0.04), int(W * 0.045)
+            draw.ellipse([ring_cx - rr, ring_cy - rr, ring_cx + rr, ring_cy + rr],
+                         outline=(24, 84, 68), width=rw)
+
+        draw.text((pad, int(W * 0.045)), "KHQR", font=f_title, fill=_CARD_WHITE)
+        draw.text((pad, int(W * 0.045) + f_title.size + int(W * 0.010)),
+                  "Cambodian QR Payment · KHQR", font=f_sub, fill=_CARD_SUBTITLE)
+        rule_y = int(W * 0.045) + f_title.size + int(W * 0.010) + f_sub.size + int(W * 0.018)
+        draw.line([(pad, rule_y), (pad + int(W * 0.14), rule_y)], fill=_CARD_GOLD, width=2)
+
+        # Gold "verified" badge
+        badge_txt = "✓ VERIFIED"
+        bw = _tw(draw, badge_txt, f_badge)
+        bpad_x, bpad_y = int(W * 0.020), int(W * 0.011)
+        bx1 = W - pad
+        bx0 = bx1 - bw - bpad_x * 2
+        by0 = int(W * 0.045)
+        by1 = by0 + f_badge.size + bpad_y * 2
+        shadow_d = max(2, int(W * 0.006))
+        draw.rounded_rectangle([bx0+shadow_d, by0+shadow_d, bx1+shadow_d, by1+shadow_d],
+                                radius=(by1 - by0) // 2, fill=(2, 20, 16))
+        draw.rounded_rectangle([bx0, by0, bx1, by1], radius=(by1 - by0) // 2, fill=_CARD_GOLD)
+        draw.text((bx0 + bpad_x, by0 + bpad_y - int(W * 0.003)), badge_txt, font=f_badge, fill=_CARD_NAVY)
+
+        # 2. Floating QR panel — thin gold border + emerald corner dots (instead of brackets)
+        r = int(W * 0.045)
+        panel_box = [SIDE_PAD, qr_card_top, SIDE_PAD + QR_BOX, qr_card_bottom]
+        shadow_off = int(W * 0.012)
+        draw.rounded_rectangle(
+            [panel_box[0] + shadow_off, panel_box[1] + shadow_off,
+             panel_box[2] + shadow_off, panel_box[3] + shadow_off],
+            radius=r, fill=(222, 230, 226))
+        draw.rounded_rectangle(panel_box, radius=r, fill=_CARD_WHITE,
+                                outline=_CARD_GOLD, width=3)
+
+        qr_px  = QR_BOX - 2 * QR_PAD
+        qr_pil = _qr_img(qr_string, qr_px)
+        img.paste(qr_pil, (SIDE_PAD + QR_PAD, qr_card_top + QR_PAD))
+
+        # Small emerald corner dots — pushed fully past the rounded-corner arc
+        # (r) so they render as clean circles instead of being clipped by it
+        dot_r = max(3, int(W * 0.007))
+        do = r + int(W * 0.012)
+        x0, y0, x1, y1 = panel_box
+        for dx, dy in [(x0+do, y0+do), (x1-do, y0+do), (x0+do, y1-do), (x1-do, y1-do)]:
+            draw.ellipse([dx-dot_r, dy-dot_r, dx+dot_r, dy+dot_r], fill=_CARD_VIOLET)
+
+        # 3. Store name + subtitle
+        y = content_top
+        _cx_text(draw, cx, y, label or _bot_brand(), f_name, _CARD_NAVY)
+        y += NAME_ROW
+        _cx_text(draw, cx, y, subtitle or "SMM Panel Deposit", f_label, _CARD_GRAY)
+        y += SUB_ROW + GAP1
+
+        # 4. Amount — gold-bordered floating pill (not a full-width banner)
+        if amount is not None:
+            amt_str = f"${float(amount):.2f}"
+            pad_x = int(W * 0.045)
+            pad_y = (AMT_H - f_amt.size) // 2
+            _pill_box(draw, cx, y, amt_str, f_amt, pad_x, pad_y,
+                      fill=_CARD_CHIP_BG, outline=_CARD_GOLD, outline_w=3,
+                      text_fill=_CARD_NAVY)
+        y += AMT_H + GAP2
+
+        # 5. Ticket perforation — dashed tear line with two gold end-dots
+        perf_y = y + PERF_ROW // 2
+        dash_w, dash_gap = int(W * 0.018), int(W * 0.012)
+        dx = pad + int(W * 0.03)
+        while dx < W - pad - int(W * 0.03):
+            draw.line([(dx, perf_y), (min(dx + dash_w, W - pad - int(W*0.03)), perf_y)],
+                      fill=_CARD_BORDER, width=2)
+            dx += dash_w + dash_gap
+        end_r = max(3, int(W * 0.008))
+        draw.ellipse([pad-end_r, perf_y-end_r, pad+end_r, perf_y+end_r], fill=_CARD_GOLD)
+        draw.ellipse([W-pad-end_r, perf_y-end_r, W-pad+end_r, perf_y+end_r], fill=_CARD_GOLD)
+        y += PERF_ROW
+
+        # 6. Ref chip
+        if ref:
+            _pill_box(draw, cx, y, f"Ref: {ref}", f_small,
+                      int(W * 0.03), int(f_small.size * 0.45),
+                      fill=_CARD_CHIP_BG, text_fill=_CARD_GRAY)
+        y += CHIP_H + CHIP_GAP
+
+        # 7. Expiry (red, plain — draws the eye without another box)
+        if expires_min:
+            _cx_text(draw, cx, y, f"Expires in {expires_min} minutes", f_small, _CARD_RED)
+        y += EXP_ROW
+
+        # 8. Footer
+        _cx_text(draw, cx, y, "Scan with any banking app (KHQR)", f_small, _CARD_MUTED)
+        y += FOOT_ROW1
+        _cx_text(draw, cx, y, "ABA · ACLEDA · Wing", f_small, _CARD_MUTED)
+
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        buf.seek(0); buf.name = "khqr_card.png"
+        return buf
+
+    except Exception as e:
+        logger.warning(f"[build_qr_image] {e}")
+        try:
+            import qrcode as _qrc
+            qr = _qrc.QRCode(box_size=8, border=2,
+                             error_correction=_qrc.constants.ERROR_CORRECT_M)
+            qr.add_data(qr_string); qr.make(fit=True)
+            pil = qr.make_image(fill_color=(5, 59, 47), back_color="white").convert("RGB")
+            buf = io.BytesIO(); pil.save(buf, format="PNG")
+            buf.seek(0); buf.name = "khqr.png"
+            return buf
+        except:
+            return None
+
+# ═══════════════════════════════════════════════════════════
+#  CAMRAPIDPAY — Create KHQR + Check payment
+#  (v9: replace manual EMV TLV with CamRapidPay API)
+# ═══════════════════════════════════════════════════════════
+
+def _effective_webhook_url():
+    """CamRapidPay ទាមទារ webhook_url ជា Required Field (បញ្ជាក់ដោយ API ផ្ទាល់៖
+    'Missing required fields: ... webhook_url ...') ដូច្នេះត្រូវផ្ញើជានិច្ច។
+    អាទិភាព៖ 1) webhook_cfg (Set ដោយផ្ទាល់ក្នុង Bot តាម Admin Menu)  2) WEBHOOK_URL env var
+    3) Auto-build ពី RENDER_EXTERNAL_URL ទៅកាន់ Route /webhook/camrapid ដែល Bot ស្គាល់ស្រាប់
+    4) Fallback ចុងក្រោយ (គ្មាន Public URL ទាល់តែសោះ) — Placeholder ដែលមិន Leak អី"""
+    if webhook_cfg.get("url"):
+        return webhook_cfg["url"]
+    if WEBHOOK_URL:
+        return WEBHOOK_URL
+    render_url = os.getenv("RENDER_EXTERNAL_URL", "")
+    if render_url:
+        return render_url.rstrip("/") + "/webhook/camrapid"
+    return "https://example.com/webhook/camrapid"
+
+def _public_base_url():
+    """Base HTTPS URL របស់ Bot (Render) — ប្រើសម្រាប់ /open-aba → ABA Mobile."""
+    render_url = (os.getenv("RENDER_EXTERNAL_URL") or "").strip().rstrip("/")
+    if render_url:
+        return render_url
+    wh = (webhook_cfg.get("url") or WEBHOOK_URL or "").strip()
+    if wh.startswith("http"):
+        try:
+            from urllib.parse import urlparse
+            p = urlparse(wh)
+            if p.scheme and p.netloc:
+                return f"{p.scheme}://{p.netloc}"
+        except Exception:
+            pass
+    return ""
+
+def _aba_mobile_https_link(deeplink_or_qr):
+    """https://bot/open-aba?d=... → redirect ទៅ abamobilebank:// (បើក ABA Mobile)។
+    Telegram button ត្រូវ http(s) តែប៉ុណ្ណោះ។"""
+    base = _public_base_url()
+    if not base or not deeplink_or_qr:
+        return None
+    s = str(deeplink_or_qr).strip()
+    if not s:
+        return None
+    if not s.lower().startswith("abamobilebank://"):
+        from urllib.parse import quote
+        s = f"abamobilebank://ababank.com?type=payway&qrcode={quote(s, safe='')}"
+    tok = base64.urlsafe_b64encode(s.encode("utf-8")).decode("ascii").rstrip("=")
+    return f"{base}/open-aba?d={tok}"
+
+def _camrapid_create(uid, amount, reference):
+    """Create KHQR payment via CamRapidPay API — returns response dict or None"""
+    payload = {
+        "api_key":     _effective_camrapid_key(),
+        "amount":      round(float(amount), 2),
+        "reference":   reference,
+        "webhook_url": _effective_webhook_url(),
+    }
+
+    logger.info(f"[camrapid_create] uid={uid} ref={reference} amount={payload['amount']} "
+                f"webhook={payload['webhook_url']}")
+    try:
+        r = http.post(CAMRAPID_CREATE,
+                      json=payload,
+                      headers={"Content-Type": "application/json",
+                               "Accept": "application/json"},
+                      timeout=15)
+        logger.info(f"[camrapid_create] HTTP {r.status_code}")
+        data = r.json()
+        logger.info(f"[camrapid_create] resp={data}")
+        if data.get("success"):
+            return data   # keys: qr_code, payment_url, bill_number, amount, expires_in
+        logger.error(f"[camrapid_create] failed: {data}")
+        return None
+    except Exception as e:
+        logger.error(f"[camrapid_create] exception: {e}")
+        return None
+
+def _camrapid_check_detail(reference) -> dict:
+    """CamRapidPay status — returns {paid, amount, status, raw} for anti-bypass verification."""
+    out = {"paid": False, "amount": None, "status": "", "raw": {}}
+    if not reference:
+        return out
+    try:
+        r = http.get(
+            CAMRAPID_CHECK,
+            params={"api_key": _effective_camrapid_key(), "reference": reference},
+            headers={"Accept": "application/json"},
+            timeout=10,
+        )
+        data = r.json() if r.content else {}
+        out["raw"] = data if isinstance(data, dict) else {}
+        st = str(data.get("status") or data.get("payment_status") or "").strip()
+        out["status"] = st
+        paid_ok = bool(data.get("success")) and st.lower() in (
+            "success", "paid", "completed", "complete", "done"
+        )
+        # extract amount if gateway returns it
+        amt = data.get("amount") or data.get("paid_amount") or data.get("total")
+        if amt is not None:
+            try:
+                out["amount"] = round(float(amt), 2)
+            except (TypeError, ValueError):
+                pass
+        out["paid"] = paid_ok
+        logger.info(f"[camrapid_check] ref={reference} paid={paid_ok} amount={out['amount']} status={st}")
+        return out
+    except Exception as e:
+        logger.error(f"[camrapid_check] {e}")
+        return out
+
+def _camrapid_check(reference) -> bool:
+    """Backward-compatible bool wrapper."""
+    return bool(_camrapid_check_detail(reference).get("paid"))
+
+# ═══════════════════════════════════════════════════════════
+#  ABA PAYWAY (តាម KHMER SYSTEM — khmer-system.com) — ជម្រើសទូទាត់ស្វ័យប្រវត្តិទី ២
+#  (v12: ស្របជាមួយ CamRapidPay ដែលមានស្រាប់ខាងលើ — ២ Gateway ដំណើរការឯករាជ្យពីគ្នា)
+# ═══════════════════════════════════════════════════════════
+_last_aba_error = ""
+
+def has_aba_payway():
+    """True បើ Bot នេះមាន ABA PayWay auto-payment តាម KHMER SYSTEM (Key + Merchant ID ព្រមទាំង ២)"""
+    return bool(_effective_aba_key() and _effective_aba_merchant())
+
+def _aba_create(uid, amount, username, _attempt=1):
+    """Create ABA PayWay payment (KHMER SYSTEM) — returns response dict ពេលជោគជ័យ
+    (keys ប្រហែល: payment_id, qr_image/card_image, pay_url, qr_string...), ឬ None ពេលបរាជ័យ
+    (មើល _last_aba_error សម្រាប់មូលហេតុ)
+
+    khmer-system.com ជួនកាលឆ្លើយយឺត → timeout 60s + retry 3 ដង (ReadTimeout / 5xx).
+    """
+    global _last_aba_error
+    api_key      = _effective_aba_key()
+    merchant_id  = _effective_aba_merchant()
+    if not api_key or not merchant_id:
+        _last_aba_error = "ABA_API_KEY / ABA_MERCHANT_ID មិនបានកំណត់ (env var ឬ Settings → ABA PayWay Key)"
+        logger.error(f"[aba_create] {_last_aba_error}")
+        return None
+    # (connect timeout, read timeout) — provider sometimes slow
+    _timeout = (10, int(os.getenv("ABA_READ_TIMEOUT", "60") or 60))
+    _max_try = int(os.getenv("ABA_CREATE_RETRIES", "5") or 5)
+    try:
+        r = http.post(
+            ABA_CREATE_URL,
+            json={
+                "api_key":     api_key,
+                "merchant_id": merchant_id,
+                "username":    username,
+                "amount":      round(float(amount), 2),
+            },
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                ),
+            },
+            timeout=_timeout,
+        )
+        logger.info(f"[aba_create] uid={uid} attempt={_attempt} HTTP {r.status_code}")
+        try:
+            data = r.json()
+        except Exception:
+            body = r.text.strip()
+            _last_aba_error = f"HTTP {r.status_code} (non-JSON): {_tg_escape(body, 200)}"
+            logger.error(f"[aba_create] {_last_aba_error}")
+            if r.status_code >= 500 and _attempt < _max_try:
+                time.sleep(1.5 * _attempt)
+                return _aba_create(uid, amount, username, _attempt=_attempt + 1)
+            return None
+        # log without huge image fields
+        _log = {k: v for k, v in (data or {}).items() if k not in ("qr_image", "card_image", "qr")}
+        if data and (data.get("qr_image") or data.get("card_image")):
+            _log["has_image"] = True
+        logger.info(f"[aba_create] resp={_log}")
+        if data.get("ok"):
+            return data
+        code = str(data.get("code") or data.get("error") or "")
+        msg = data.get("message") or data.get("error") or data
+        _last_aba_error = f"HTTP {r.status_code} [{code or '?'}]: {msg}"
+        logger.error(f"[aba_create] failed: {_last_aba_error}")
+        # Khmer System often returns 402 QR_GENERATION_FAILED on 1st try (wallet/merchant
+        # cold / rate) then succeeds on 2nd — retry 402/429 as well as 5xx.
+        _retry_http = (
+            r.status_code >= 500
+            or r.status_code in (402, 408, 425, 429)
+            or "QR_GENERATION_FAILED" in code.upper()
+            or "qr_generation" in str(msg).lower()
+        )
+        if _retry_http and _attempt < _max_try:
+            wait = 2.0 * _attempt + (1.5 if r.status_code == 402 else 0)
+            logger.warning(f"[aba_create] retryable HTTP {r.status_code} code={code} wait={wait:.1f}s attempt={_attempt}")
+            time.sleep(wait)
+            return _aba_create(uid, amount, username, _attempt=_attempt + 1)
+        return None
+    except Exception as e:
+        _last_aba_error = f"{type(e).__name__}: {e}"
+        logger.error(f"[aba_create] exception attempt={_attempt}: {e}")
+        # Retry on timeout / connection errors
+        _retryable = (
+            "Timeout" in type(e).__name__
+            or "timeout" in str(e).lower()
+            or "Connection" in type(e).__name__
+        )
+        if _retryable and _attempt < _max_try:
+            time.sleep(2.0 * _attempt)
+            return _aba_create(uid, amount, username, _attempt=_attempt + 1)
+        if _attempt < _max_try:
+            time.sleep(1.5 * _attempt)
+            return _aba_create(uid, amount, username, _attempt=_attempt + 1)
+        return None
+
+def _aba_check_detail(payment_id) -> dict:
+    """ABA PayWay status — {paid, amount, status, raw}."""
+    out = {"paid": False, "amount": None, "status": "", "raw": {}}
+    if not payment_id:
+        return out
+    try:
+        r = http.post(
+            ABA_CHECK_URL,
+            json={"api_key": _effective_aba_key(), "merchant_id": _effective_aba_merchant(),
+                  "payment_id": payment_id},
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0 (compatible; KaiBot/1.0)",
+            },
+            timeout=(8, 25),
+        )
+        data = r.json() if r.content else {}
+        out["raw"] = data if isinstance(data, dict) else {}
+        st = str(data.get("status") or "").strip()
+        out["status"] = st
+        paid_ok = bool(data.get("ok")) and st.upper() == "PAID"
+        amt = data.get("amount") or data.get("paid_amount") or data.get("total")
+        if amt is not None:
+            try:
+                out["amount"] = round(float(amt), 2)
+            except (TypeError, ValueError):
+                pass
+        out["paid"] = paid_ok
+        logger.info(f"[aba_check] payment_id={payment_id} paid={paid_ok} amount={out['amount']} status={st}")
+        return out
+    except Exception as e:
+        logger.error(f"[aba_check] {e}")
+        return out
+
+def _aba_check(payment_id) -> bool:
+    return bool(_aba_check_detail(payment_id).get("paid"))
+
+def _build_aba_app_deeplink(data):
+    """បើ response ពី khmer-system.com មាន field deeplink ត្រង់ៗ ត្រឡប់វាភ្លាម។ បើគ្មាន
+    ប៉ុន្តែមាន raw KHQR string ត្រូវបង្កើត deep link ដោយខ្លួនឯង តាម scheme ផ្លូវការរបស់
+    ABA Mobile (abamobilebank://ababank.com?type=payway&qrcode=...) ។ ត្រឡប់ None បើគ្មាន field
+    ណាមួយសមរម្យទេ។"""
+    if not isinstance(data, dict):
+        return None
+    for key in ("abapay_deeplink", "aba_deeplink", "deeplink", "deep_link"):
+        val = data.get(key)
+        if val and str(val).strip():
+            return str(val).strip()
+    qr_raw = None
+    for key in ("qr_string", "qrString", "qr_code", "qrCode", "qr"):
+        val = data.get(key)
+        if val and str(val).strip():
+            qr_raw = str(val).strip()
+            break
+    if qr_raw:
+        from urllib.parse import quote
+        return f"abamobilebank://ababank.com?type=payway&qrcode={quote(qr_raw, safe='')}"
+    logger.warning(f"[aba_deeplink] គ្មាន deeplink/qr_string field ក្នុង response — keys: {list(data.keys())}")
+    return None
+
+# ═══════════════════════════════════════════════════════════
+#  KHPAY (khpay.site)
+# ═══════════════════════════════════════════════════════════
+_last_khpay_error = ""
+
+def _khpay_create(uid, amount, note=""):
+    global _last_khpay_error
+    api_key = _effective_khpay_key()
+    if not api_key:
+        _last_khpay_error = "KHPAY_API_KEY មិនបានកំណត់"
+        return None
+    try:
+        payload = {
+            "amount":   round(float(amount), 2),
+            "currency": "USD",
+            "note":     note or f"Deposit uid={uid}",
+        }
+        mid = _effective_khpay_merchant()
+        if mid:
+            payload["merchant_id"] = mid
+        r = http.post(
+            KHPAY_CREATE_URL,
+            json=payload,
+            headers={"Authorization": f"Bearer {api_key}",
+                     "Content-Type": "application/json", "Accept": "application/json"},
+            timeout=20,
+        )
+        logger.info(f"[khpay_create] uid={uid} HTTP {r.status_code}")
+        try:
+            data = r.json()
+        except Exception:
+            _last_khpay_error = f"HTTP {r.status_code}: {_tg_escape(r.text, 200)}"
+            return None
+        if data.get("success") and isinstance(data.get("data"), dict):
+            return data["data"]
+        if data.get("transaction_id") or data.get("qr_image") or data.get("qr_string"):
+            return data
+        _last_khpay_error = str(data.get("error") or data.get("message") or data)[:500]
+        logger.error(f"[khpay_create] failed: {_last_khpay_error}")
+        return None
+    except Exception as e:
+        _last_khpay_error = f"{type(e).__name__}: {e}"
+        logger.error(f"[khpay_create] {e}")
+        return None
+
+def _khpay_check_detail(transaction_id) -> dict:
+    """KHPAY status — {paid, amount, status, raw}."""
+    out = {"paid": False, "amount": None, "status": "", "raw": {}}
+    api_key = _effective_khpay_key()
+    if not api_key or not transaction_id:
+        return out
+    try:
+        url = f"{KHPAY_CHECK_URL.rstrip('/')}/{transaction_id}"
+        r = http.get(url, headers={"Authorization": f"Bearer {api_key}",
+                                   "Accept": "application/json"}, timeout=10)
+        data = r.json() if r.content else {}
+        d = data.get("data") if isinstance(data.get("data"), dict) else data
+        if not isinstance(d, dict):
+            d = {}
+        out["raw"] = d
+        st = str(d.get("status") or d.get("action") or "").strip()
+        out["status"] = st
+        paid_ok = (
+            d.get("paid") is True
+            or st.lower() in ("paid", "success", "completed", "approved")
+        )
+        amt = d.get("amount") or d.get("paid_amount") or d.get("total")
+        if amt is not None:
+            try:
+                out["amount"] = round(float(amt), 2)
+            except (TypeError, ValueError):
+                pass
+        out["paid"] = paid_ok
+        logger.info(f"[khpay_check] {transaction_id} paid={paid_ok} amount={out['amount']} status={st}")
+        return out
+    except Exception as e:
+        logger.error(f"[khpay_check] {e}")
+        return out
+
+def _khpay_check(transaction_id) -> bool:
+    return bool(_khpay_check_detail(transaction_id).get("paid"))
+
+
+def _alert_pay_security(msg):
+    """ជូនដំណឹង Admin ភ្លាមៗពេលរកឃើញភាពមិនប្រក្រតី Payment (bypass attempt / mismatch)."""
+    try:
+        logger.warning(f"[pay_security] {msg}")
+        bot.send_message(ADMIN_ID, f"🚨 <b>Payment Security</b>\n{msg}", parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"[pay_security alert failed] {e}")
+
+def _ref_already_used(reference, except_dep_id=None) -> bool:
+    """True បើ reference នេះធ្លាប់ credit រួច (ឬកំពុង confirm deposit ផ្សេង)."""
+    if not reference:
+        return False
+    ref = str(reference).strip()
+    info = used_payment_refs.get(ref)
+    if info and info.get("dep_id") != except_dep_id:
+        return True
+    for did, d in smm_deps.items():
+        if did == except_dep_id:
+            continue
+        if str(d.get("reference") or "") == ref and d.get("status") in ("confirmed", "confirming"):
+            return True
+    return False
+
+def _mark_ref_used(reference, dep_id, uid, amount):
+    if not reference:
+        return
+    ref = str(reference).strip()
+    used_payment_refs[ref] = {
+        "dep_id": dep_id,
+        "uid": str(uid),
+        "amount": float(amount),
+        "ts": int(time.time()),
+    }
+    # រក្សាត្រឹម 5000 refs ចុងក្រោយ
+    if len(used_payment_refs) > 5000:
+        oldest = sorted(used_payment_refs.items(), key=lambda kv: kv[1].get("ts") or 0)
+        for k, _ in oldest[: len(used_payment_refs) - 5000]:
+            used_payment_refs.pop(k, None)
+    _save(USED_REFS_FILE, used_payment_refs)
+
+def _verify_paid_amount(expected, paid_amount, dep_id, reference, uid):
+    """ពិនិត្យចំនួនបង់ពី Gateway vs ចំនួន QR។
+    - paid_amount is None → អនុញ្ញាត (gateway មិនត្រឡប់ amount) តែ log
+    - paid < expected → REJECT (underpay bypass)
+    - paid >= expected → OK (credit តែ expected)
+    Returns (ok: bool, credit_amount: float)
+    """
+    expected = round(float(expected), 2)
+    if paid_amount is None:
+        logger.info(f"[pay_verify] no amount from gateway dep={dep_id} ref={reference} expected={expected}")
+        return True, expected
+    try:
+        paid = round(float(paid_amount), 2)
+    except (TypeError, ValueError):
+        return True, expected
+    if paid + 0.009 < expected:
+        _alert_pay_security(
+            f"❌ <b>Amount mismatch (underpay)</b>\n"
+            f"👤 <code>{uid}</code>\n"
+            f"📌 Ref: <code>{reference}</code>\n"
+            f"🧾 QR: <b>${expected:.2f}</b>\n"
+            f"🏦 Paid: <b>${paid:.2f}</b>\n"
+            f"🆔 dep: <code>{dep_id}</code>\n"
+            f"→ <b>មិន credit</b> (ការពារ bypass)"
+        )
+        return False, 0.0
+    if paid > expected + 0.05:
+        logger.info(f"[pay_verify] overpay dep={dep_id} expected={expected} paid={paid} — credit expected only")
+    return True, expected
+
+def _safe_confirm_deposit(dep_id, reference, paid_amount=None, source="poll"):
+    """Atomic credit path — ការពារ double-credit / ref reuse / underpay.
+    Returns True បើ credit ជោគជ័យ។"""
+    global smm_deps, used_payment_refs
+    with _pay_credit_lock:
+        dep = smm_deps.get(dep_id)
+        if not dep:
+            logger.warning(f"[safe_confirm] dep missing {dep_id}")
+            return False
+        if dep.get("status") != "pending":
+            logger.info(f"[safe_confirm] skip dep={dep_id} status={dep.get('status')} source={source}")
+            return False
+        uid_str = str(dep.get("uid") or "")
+        try:
+            uid = int(uid_str)
+        except (TypeError, ValueError):
+            logger.error(f"[safe_confirm] bad uid dep={dep_id}")
+            return False
+        expected = round(float(dep.get("amount") or 0), 2)
+        if expected <= 0:
+            _alert_pay_security(f"❌ dep={dep_id} amount invalid: {expected}")
+            return False
+        ref = str(reference or dep.get("reference") or "").strip()
+        if not ref:
+            _alert_pay_security(f"❌ dep={dep_id} empty reference — refuse credit")
+            return False
+        # ── Anti re-use reference ──
+        if _ref_already_used(ref, except_dep_id=dep_id):
+            smm_deps[dep_id]["status"] = "rejected_dup_ref"
+            _save(SMM_DEP_FILE, smm_deps)
+            _alert_pay_security(
+                f"❌ <b>Reference reuse blocked</b>\n"
+                f"👤 <code>{uid_str}</code>\n"
+                f"📌 Ref: <code>{ref}</code>\n"
+                f"🆔 dep: <code>{dep_id}</code>\n"
+                f"source: {source}"
+            )
+            return False
+        # ── Amount verify ──
+        ok_amt, credit_base = _verify_paid_amount(expected, paid_amount, dep_id, ref, uid_str)
+        if not ok_amt:
+            smm_deps[dep_id]["status"] = "rejected_amount"
+            smm_deps[dep_id]["paid_reported"] = paid_amount
+            _save(SMM_DEP_FILE, smm_deps)
+            return False
+        # ── Claim (lock status) ──
+        smm_deps[dep_id]["status"] = "confirming"
+        smm_deps[dep_id]["confirm_source"] = source
+        smm_deps[dep_id]["confirmed_ts"] = time.time()
+        if paid_amount is not None:
+            smm_deps[dep_id]["paid_reported"] = paid_amount
+        _save(SMM_DEP_FILE, smm_deps)
+        _mark_ref_used(ref, dep_id, uid_str, credit_base)
+
+        bonus = float(dep.get("bonus") or 0)
+        promo_bonus = float(dep.get("promo_bonus") or 0)
+        auto_bonus = float(dep.get("auto_bonus") or 0)
+        total = round(credit_base + bonus, 2)
+        add_bal(uid, total)
+        smm_deps[dep_id]["status"] = "confirmed"
+        smm_deps[dep_id]["credited"] = total
+        _save(SMM_DEP_FILE, smm_deps)
+        # Referral: 5% to inviter on every confirmed deposit
+        try:
+            _ref_pay_commission(uid, credit_base, dep_id=dep_id)
+        except Exception as _re:
+            logger.warning(f"[referral] on deposit: {_re}")
+        if dep.get("promo") and promo_bonus > 0:
+            try:
+                confirm_promo(dep["promo"], uid)
+            except Exception as e:
+                logger.warning(f"[safe_confirm] confirm_promo: {e}")
+
+        new_b = bal(uid)
+        # notify user
+        msg = (f"✅ <b>ដាក់លុយបានជោគជ័យហើយ!</b> 🎉\n"
+               f"━━━━━━━━━━━━━━━━━━\n"
+               f"💰 បានទទួល: <b>${credit_base:.2f}</b>")
+        if promo_bonus > 0:
+            msg += f"\n🎟️ Promo Bonus: <b>+${promo_bonus:.2f}</b>"
+        if auto_bonus > 0:
+            msg += f"\n🎁 Auto Bonus: <b>+${auto_bonus:.2f}</b>"
+        msg += f"\n💳 Balance: <b>${new_b:.2f}</b>\n━━━━━━━━━━━━━━━━━━\n💙 អរគុណដែលប្រើ {_bot_brand()}!"
+        try:
+            bot.send_message(uid, msg, parse_mode="HTML", reply_markup=main_kb(uid))
+        except Exception as _e:
+            logger.debug(f"[silent] {_e}")
+        try:
+            pnotify(
+                f"💰 <b>ដាក់លុយ ✅</b> ({source})\n👤 <code>{uid_str}</code>\n"
+                f"📌 Ref: <code>{ref}</code>\n"
+                f"💰 ${credit_base:.2f}" + (f" + Bonus ${bonus:.2f}" if bonus > 0 else "")
+            )
+        except Exception as _e:
+            logger.debug(f"[silent] {_e}")
+        try:
+            method_label = {
+                "aba": "ABA PayWay",
+                "khpay": "KHPAY",
+                "camrapid": "CamRapidPay KHQR",
+                "manual": "ដាក់ប្រាក់",
+            }.get((dep.get("method") or "").lower(), "ដាក់ប្រាក់")
+            _notify(_channel_deposit_msg(
+                uid, credit_base,
+                reference=ref,
+                method_label=method_label,
+                bonus=bonus,
+            ))
+        except Exception as e:
+            logger.warning(f"[deposit_notify] failed: {e}")
+        logger.info(f"[safe_confirm] OK dep={dep_id} uid={uid_str} ${credit_base} source={source}")
+        return True
+
+def _watch_deposit(uid, uid_str, dep_id, amount, reference, checker=None, detail_checker=None):
+    """Poll payment gateway until paid or expired.
+    ប្រើ detail_checker (ត្រឡប់ dict paid/amount) ពេលមាន — បើអត់ fallback bool checker។
+    Credit តែតាម _safe_confirm_deposit (anti double-credit / underpay / ref-reuse)."""
+    # map bool checkers → detail checkers
+    if detail_checker is None:
+        if checker is _aba_check:
+            detail_checker = _aba_check_detail
+        elif checker is _khpay_check:
+            detail_checker = _khpay_check_detail
+        elif checker is None or checker is _camrapid_check:
+            detail_checker = _camrapid_check_detail
+        else:
+            detail_checker = None
+    deadline = time.time() + DEPOSIT_EXPIRE_SEC + 30
+    while time.time() < deadline:
+        dep = smm_deps.get(dep_id)
+        if not dep or dep.get("status") != "pending":
+            return
+        paid_amount = None
+        is_paid = False
+        try:
+            if detail_checker:
+                info = detail_checker(reference)
+                is_paid = bool(info.get("paid"))
+                paid_amount = info.get("amount")
+            elif checker:
+                is_paid = bool(checker(reference))
+        except Exception as e:
+            logger.warning(f"[watch_deposit] check error dep={dep_id}: {e}")
+            is_paid = False
+        if is_paid:
+            _safe_confirm_deposit(dep_id, reference, paid_amount=paid_amount, source="poll")
+            return
+        time.sleep(POLL_INTERVAL)
+    dep = smm_deps.get(dep_id)
+    if dep and dep.get("status") == "pending":
+        dep["status"] = "expired"
+        _save(SMM_DEP_FILE, smm_deps)
+        try:
+            bot.send_message(uid, "⏰ <b>QR ផុតកំណត់!</b> សូម top up ម្តងទៀត", parse_mode="HTML")
+        except Exception as _e:
+            logger.debug(f"[silent] {_e}")
+
+
+def _dep_created_ts(dep_id, dep):
+    """ត្រឡប់ created timestamp របស់ deposit មួយ — ប្រើ field 'created_ts' បើមាន
+    (deposit ថ្មីៗ), បើអត់ (deposit ចាស់មុន update នេះ) fallback ទៅ parse ពី
+    dep_id ខ្លួនឯង (format: dep_{uid}_{unix_ts})។"""
+    ts = dep.get("created_ts")
+    if ts:
+        return float(ts)
+    try:
+        return float(dep_id.rsplit("_", 1)[-1])
+    except Exception:
+        return 0.0
+
+def _active_pending_deposit(uid):
+    """បើ User មាន QR deposit ដែលកំពុង 'pending' ហើយមិនទាន់ផុតកំណត់ (5 នាទី)
+    សូមត្រឡប់ (dep, remain_sec) មកវិញ — បើគ្មាន ត្រឡប់ (None, 0)។ ប្រើដើម្បីទប់
+    User មិនឲ្យបង្កើត QR ថ្មីម្តងទៀត ព្រោះ QR ចាស់ (5 នាទី) នៅតែសកម្ម — ត្រូវឲ្យ
+    QR នោះផុតកំណត់ (ឬបានទូទាត់ជោគជ័យ) សិន ទើបបង្កើតបានថ្មីទៀត។"""
+    uid_str = str(uid)
+    now = time.time()
+    for dep_id, dep in smm_deps.items():
+        if dep.get("uid") != uid_str or dep.get("status") != "pending":
+            continue
+        elapsed = now - _dep_created_ts(dep_id, dep)
+        remain  = DEPOSIT_EXPIRE_SEC - elapsed
+        if remain > 0:
+            return dep, int(remain) + 1
+    return None, 0
+
+def _send_deposit_qr(uid, amount, promo_code=None, label="💸 ដាក់លុយ", bonus=0.0, promo_code_name=None,
+                      promo_bonus=0.0, auto_bonus=0.0, method="aba"):
+    """Create payment QR → send branded QR card to user.
+    method="camrapid" (default — ដដែលពីមុន, backward-compatible) ឬ method="aba"
+    (ABA PayWay តាម KHMER SYSTEM — v12, មិនប៉ះពាល់ code path CamRapidPay ខាងក្រោមទេ)"""
+    # ── ទប់ស្កាត់ User មិនឲ្យបង្កើត QR ថ្មី ដរាបណា QR ចាស់ (5 នាទី) មិនទាន់ផុត
+    #    កំណត់ — ការពារកុំឲ្យមាន QR pending ច្រើនក្នុងពេលតែមួយសម្រាប់ User តែម្នាក់
+    #    (Admin មិនកំណត់ ដើម្បីងាយ Test) ──
+    if str(uid) != str(ADMIN_ID):
+        _dep, _remain = _active_pending_deposit(uid)
+        if _dep:
+            _mins, _secs = divmod(_remain, 60)
+            _remain_txt = f"{_mins} នាទី {_secs} វិនាទី" if _mins else f"{_secs} វិនាទី"
+            bot.send_message(uid,
+                f"⏳ <b>អ្នកមាន QR ដែលកំពុងរង់ចាំទូទាត់ស្រាប់ហើយ!</b>\n"
+                f"សូមប្រើ QR នោះ ឬស្កេនវាដើម្បីទូទាត់ជាមុនសិន។\n"
+                f"បើមិនចង់ប្រើទៀត សូមរង់ចាំ <b>{_remain_txt}</b> ដល់ QR ចាស់ផុតកំណត់ "
+                f"ទើបអាចបង្កើតថ្មីម្តងទៀតបាន។",
+                parse_mode="HTML")
+            return
+
+    # ── Anti-Spam Cooldown — ការពារ User ចុចបង្កើត QR ជាប់ៗគ្នា (spam) ដែលនាំឲ្យ
+    #    ហៅ CamRapidPay/ABA API ច្រើនដងឥតប្រយោជន៍ ។ Admin (ADMIN_ID) មិនកំណត់ ដើម្បីងាយ Test ។
+    _cd_key = str(uid)
+    if _cd_key != str(ADMIN_ID):
+        _cd_sec  = int(dep_qr_cooldown_cfg.get("seconds", DEP_QR_COOLDOWN_SEC))
+        _now_ts  = time.time()
+        _last_ts = _dep_qr_cooldown.get(_cd_key, 0)
+        _elapsed = _now_ts - _last_ts
+        if _cd_sec > 0 and _elapsed < _cd_sec:
+            _remain = int(_cd_sec - _elapsed) + 1
+            bot.send_message(uid,
+                f"⏳ <b>សូមរង់ចាំ {_remain} វិនាទី</b> មុននឹងបង្កើត QR ថ្មីម្តងទៀត។\n"
+                f"បើ QR មុនទើបតែផ្ញើ សូមប្រើវានោះ ឬស្កេនវាដើម្បីទូទាត់។",
+                parse_mode="HTML")
+            return
+        _dep_qr_cooldown[_cd_key] = _now_ts
+
+    if method == "aba":
+        _send_deposit_qr_aba(uid, amount, promo_code_name=promo_code_name, bonus=bonus,
+                              promo_bonus=promo_bonus, auto_bonus=auto_bonus)
+        return
+    if method == "khpay":
+        _send_deposit_qr_khpay(uid, amount, promo_code_name=promo_code_name, bonus=bonus,
+                                promo_bonus=promo_bonus, auto_bonus=auto_bonus)
+        return
+    if method == "manual":
+        if not (manual_qr_cfg.get("enabled") and (manual_qr_cfg.get("photo_id") or manual_qr_cfg.get("photo_path"))):
+            bot.send_message(uid, "❌ Manual Deposit មិនទាន់មានទេ។", reply_markup=main_kb(uid))
+            return
+        waiting[uid] = {"step": "await_manual_dep_proof", "amount": float(amount)}
+        info = manual_qr_cfg.get("info") or ""
+        caption = (
+            f"🖼 <b>ដាក់លុយ — Manual QR</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"💰 ចំនួន: <b>${float(amount):.2f}</b>\n"
+            + (f"{info}\n" if info else "")
+            + f"━━━━━━━━━━━━━━━━━━\n"
+            f"1️⃣ ស្កេន QR ខាងលើ\n"
+            f"2️⃣ ផ្ទេរប្រាក់ <b>${float(amount):.2f}</b>\n"
+            f"3️⃣ ផ្ញើ <b>Screenshot ភស្តុតាង</b> មកទីនេះ"
+        )
+        try:
+            _pp = manual_qr_cfg.get("photo_path") or ""
+            _full = _dpath(_pp) if _pp else ""
+            if _full and os.path.exists(_full):
+                with open(_full, "rb") as _fh:
+                    bot.send_photo(uid, _fh, caption=caption, parse_mode="HTML", reply_markup=cancel_kb())
+            else:
+                bot.send_photo(uid, manual_qr_cfg["photo_id"], caption=caption,
+                                parse_mode="HTML", reply_markup=cancel_kb())
+        except Exception as e:
+            logger.warning(f"[manual_dep] send photo failed: {e}")
+            bot.send_message(uid, caption + "\n\n⚠️ រូប QR មិនអាចផ្ញើបាន — ទំនាក់ Admin",
+                             parse_mode="HTML", reply_markup=cancel_kb())
+        return
+
+
+    # Unknown / removed method (CamRapidPay removed)
+    bot.send_message(
+        uid,
+        "⚠️ វិធីទូទាត់នេះមិនអាចប្រើបានទេ។ សូមជ្រើស <b>ABA PayWay</b> ឬ <b>KHPAY</b>។",
+        parse_mode="HTML",
+    )
+    return
+
+
+
+# ===== KAI QR FIX v1 =====
+# Deposit via ABA PayWay answered with text only ("ស្កែន QR ឬចុច OPEN ABA Mobile") and NO QR image.
+# Causes covered here: khmer-system returned no image / an image URL Telegram cannot fetch / invalid base64.
+# _aba_create() is wrapped so that data["card_image"] is ALWAYS real image bytes (data URI) when possible:
+#   1) download the image URL ourselves, 2) validate base64, 3) draw the KHQR card from the QR string,
+#   4) last resort: QR of the payment page URL.  If nothing works the admin gets a short diagnostic.
+import base64 as _qb64
+
+_aba_create_orig = _aba_create
+_aba_qr_diag_ts = [0.0]
+
+
+def _qr_is_image(b):
+    return bool(b) and len(b) > 200 and (
+        b[:8] == b"\x89PNG\r\n\x1a\n" or b[:3] == b"\xff\xd8\xff" or b[:4] == b"GIF8" or (b[:4] == b"RIFF" and b[8:12] == b"WEBP"))
+
+
+def _qr_first(d, keys):
+    for src in (d, d.get("data") if isinstance(d.get("data"), dict) else {}):
+        for k in keys:
+            v = src.get(k)
+            if v and isinstance(v, str) and v.strip():
+                return v.strip()
+    return ""
+
+
+def _aba_ensure_qr_image(data, amount):
+    note = "none"
+    blob = None
+    try:
+        raw = _qr_first(data, ("card_image", "qr_image", "image", "qr_png", "qr_base64"))
+        if raw:
+            if raw.lower().startswith(("http://", "https://")):
+                try:
+                    r = http_req.get(raw, timeout=15)
+                    if r.ok and _qr_is_image(r.content):
+                        blob, note = r.content, "downloaded-url"
+                    else:
+                        note = "url-not-image(%s)" % getattr(r, "status_code", "?")
+                except Exception as e:
+                    note = "url-failed(%s)" % type(e).__name__
+            else:
+                try:
+                    b = _qb64.b64decode(raw.split(",", 1)[1] if raw.startswith("data:") else raw, validate=False)
+                    if _qr_is_image(b):
+                        blob, note = b, "base64-ok"
+                    else:
+                        note = "base64-not-image"
+                except Exception:
+                    note = "base64-invalid"
+        if blob is None:
+            qs = _qr_first(data, ("qr_string", "qrString", "qr_code", "qrCode", "khqr", "qr"))
+            kind = "khqr-string"
+            if not qs:
+                qs, kind = _qr_first(data, ("pay_url", "payment_url", "checkout_url", "url")), "pay-url"
+            if qs:
+                ref = str(data.get("payment_id") or data.get("ref") or "")[-12:] or None
+                buf = _build_qr_image(qs, amount=amount, ref=ref, label="ABA PayWay")
+                b = buf.getvalue() if hasattr(buf, "getvalue") else bytes(buf or b"")
+                if _qr_is_image(b):
+                    blob, note = b, "generated-from-" + kind
+    except Exception as e:
+        logger.warning("[aba_qr] ensure failed: %s", e)
+        note = "error(%s)" % type(e).__name__
+    if blob:
+        uri = "data:image/png;base64," + _qb64.b64encode(blob).decode()
+        data["card_image"] = uri
+        data["qr_image"] = uri
+    logger.info("[aba_qr] image=%s keys=%s", note, sorted(k for k in data.keys())[:14])
+    if not blob:
+        try:
+            now = time.time()
+            if now - _aba_qr_diag_ts[0] > 300:      # at most one admin message per 5 minutes
+                _aba_qr_diag_ts[0] = now
+                pnotify("⚠️ ABA PayWay: មិនមាន QR image សម្រាប់ផ្ញើ (%s)\nkeys: %s" % (note, ", ".join(sorted(data.keys()))[:300]),
+                        parse_mode=None)
+        except Exception as e:
+            logger.debug("[aba_qr] diag: %s", e)
+    return data
+
+
+def _aba_create(uid, amount, username, _attempt=1):
+    data = _aba_create_orig(uid, amount, username, _attempt)
+    if isinstance(data, dict):
+        _aba_ensure_qr_image(data, amount)
+    return data
+# ===== END KAI QR FIX =====
+
+
+def _send_deposit_qr_aba(uid, amount, promo_code_name=None, bonus=0.0, promo_bonus=0.0, auto_bonus=0.0):
+    """Create ABA PayWay (KHMER SYSTEM) payment QR and send to user."""
+    uid_str = str(uid)
+    promo_applied = promo_code_name
+    _gen_msg = None
+    try:
+        _gen_msg = bot.send_message(uid, "⏳ <b>កំពុងបង្កើត QR (ABA PayWay)...</b>", parse_mode="HTML")
+    except Exception as _e:
+        logger.debug(f"[silent] {_e}")
+
+    username = ""
+    try:
+        u = users.get(uid_str) or {}
+        username = (u.get("username") or u.get("name") or f"tg{uid}")[:40]
+    except Exception:
+        username = f"tg{uid}"
+
+    data = _aba_create(uid, amount, username)
+    if not data:
+        if _gen_msg:
+            try:
+                bot.delete_message(uid, _gen_msg.message_id)
+            except Exception:
+                pass
+        err = globals().get("_last_aba_error") or "unknown"
+        bot.send_message(
+            uid,
+            "⚠️ <b>មិនអាចបង្កើត QR បានទេ</b>\n"
+            f"<code>{_tg_escape(str(err), 200)}</code>\n"
+            "សូមទំនាក់ Admin ឬព្យាយាមម្តងទៀត។",
+            parse_mode="HTML",
+        )
+        try:
+            pnotify(
+                f"⚠️ <b>ABA QR បរាជ័យ</b>\n👤 <code>{uid_str}</code> — ${amount:.2f}\n"
+                f"🔎 <code>{_tg_escape(str(err), 400)}</code>"
+            )
+        except Exception:
+            pass
+        return
+
+    payment_id = (
+        data.get("payment_id")
+        or data.get("tran_id")
+        or data.get("transaction_id")
+        or data.get("id")
+        or ""
+    )
+    card_image = (
+        data.get("card_image")
+        or data.get("qr_image")
+        or data.get("qrImage")
+        or data.get("image")
+        or ""
+    )
+    pay_url = data.get("pay_url") or data.get("payment_url") or data.get("checkout_url") or ""
+    aba_app_link = _build_aba_app_deeplink(data) if "_build_aba_app_deeplink" in globals() else None
+    if not aba_app_link:
+        aba_app_link = (
+            data.get("abapay_deeplink")
+            or data.get("aba_deeplink")
+            or data.get("deeplink")
+            or data.get("deep_link")
+            or ""
+        )
+
+    reference = str(payment_id or f"ABA{uid}_{int(time.time())}")[:50]
+    dep_id = f"dep_{uid}_{int(time.time())}"
+    smm_deps[dep_id] = {
+        "uid": uid_str,
+        "amount": amount,
+        "status": "pending",
+        "bonus": bonus,
+        "promo_bonus": promo_bonus,
+        "auto_bonus": auto_bonus,
+        "promo": promo_applied or "",
+        "reference": reference,
+        "payment_url": pay_url or "",
+        "method": "aba",
+        "created_ts": time.time(),
+    }
+    _save(SMM_DEP_FILE, smm_deps)
+
+    bonus_bits = []
+    if promo_bonus > 0:
+        bonus_bits.append(f"🎟️ Promo Bonus: <b>+${promo_bonus:.2f}</b> ({promo_applied})")
+    if auto_bonus > 0:
+        bonus_bits.append(
+            f"🎁 Auto Bonus ({dep_bonus_cfg.get('pct', 5):.0f}%): <b>+${auto_bonus:.2f}</b>"
+        )
+    bonus_line = ("\n" + "\n".join(bonus_bits)) if bonus_bits else ""
+    ref_short = reference[-12:] if len(reference) > 12 else reference
+    expire_min = max(1, int(globals().get("DEPOSIT_EXPIRE_SEC", 3600) // 60))
+    cap = (
+        f"💳 <b>ABA PayWay — បញ្ចូលលុយ</b>{bonus_line}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"💰 ចំនួន: <b>${amount:.2f}</b>\n"
+        f"🔖 Ref: <code>{ref_short}</code>\n"
+        f"⏱ ផុតកំណត់: <b>{expire_min} នាទី</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"✅ ស្កេន QR ឬចុច «OPEN ABA Mobile»\n"
+        f"<i>Balance នឹងចូលស្វ័យប្រវត្តិបន្ទាប់ពីបង់ជោគជ័យ</i>"
+    )
+
+    aba_https = None
+    if aba_app_link:
+        link = str(aba_app_link).strip()
+        if link.lower().startswith(("http://", "https://", "tg://")):
+            aba_https = link
+        else:
+            try:
+                aba_https = _aba_mobile_https_link(link)
+            except Exception:
+                aba_https = None
+    if not aba_https:
+        for _k in ("qr_string", "qrString", "qr_code", "qr"):
+            if data.get(_k):
+                try:
+                    aba_https = _aba_mobile_https_link(data.get(_k))
+                except Exception:
+                    aba_https = None
+                if aba_https:
+                    break
+
+    kb_pay = None
+    if aba_https:
+        kb_pay = InlineKeyboardMarkup()
+        try:
+            kb_pay.add(InlineKeyboardButton("🏦 OPEN ABA Mobile", url=aba_https, color="active"))
+        except TypeError:
+            kb_pay.add(InlineKeyboardButton("🏦 OPEN ABA Mobile", url=aba_https))
+
+    photo_payload = None
+    if card_image:
+        img_str = str(card_image).strip()
+        if img_str.lower().startswith(("http://", "https://")):
+            photo_payload = img_str
+        else:
+            try:
+                b64_part = img_str.split(",", 1)[1] if img_str.startswith("data:") else img_str
+                photo_payload = io.BytesIO(base64.b64decode(b64_part, validate=False))
+                photo_payload.name = "aba_payment.png"
+            except Exception as e:
+                logger.warning(f"[deposit_qr_aba] base64 decode failed: {e}")
+                photo_payload = None
+
+    if _gen_msg:
+        try:
+            bot.delete_message(uid, _gen_msg.message_id)
+        except Exception as _e:
+            logger.debug(f"[silent] {_e}")
+
+    sent_ok = False
+    if photo_payload:
+        try:
+            bot.send_photo(uid, photo_payload, caption=cap, parse_mode="HTML", reply_markup=kb_pay)
+            sent_ok = True
+        except Exception as e:
+            logger.warning(f"[deposit_qr_aba] send_photo failed: {e}")
+    if not sent_ok:
+        # try build QR from string fields
+        qr_str = data.get("qr_string") or data.get("qrString") or data.get("qr_code") or data.get("qr") or ""
+        if qr_str and not str(qr_str).startswith("http"):
+            try:
+                import qrcode
+                img = qrcode.make(str(qr_str))
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                buf.seek(0)
+                bot.send_photo(uid, buf, caption=cap, parse_mode="HTML", reply_markup=kb_pay)
+                sent_ok = True
+            except Exception as e:
+                logger.warning(f"[deposit_qr_aba] qrcode fallback: {e}")
+        if not sent_ok:
+            bot.send_message(uid, cap, parse_mode="HTML", reply_markup=kb_pay)
+
+    if not payment_id:
+        bot.send_message(
+            uid,
+            "⚠️ <b>ABA PayWay មិនបាន Return payment_id!</b>\nសូមទំនាក់ Admin",
+            parse_mode="HTML",
+        )
+        return
+
+    try:
+        pnotify(
+            f"🆕 <b>QR ត្រូវបានបង្កើត (ABA PayWay)</b>\n👤 <code>{uid_str}</code>\n"
+            f"💵 ${amount:.2f}\n🔖 <code>{payment_id}</code>"
+        )
+    except Exception as _e:
+        logger.debug(f"[silent] {_e}")
+
+    threading.Thread(
+        target=_watch_deposit,
+        args=(uid, uid_str, dep_id, amount, reference),
+        kwargs={"checker": _aba_check},
+        daemon=True,
+    ).start()
+
+
+def _send_deposit_qr_khpay(uid, amount, promo_code_name=None, bonus=0.0, promo_bonus=0.0, auto_bonus=0.0):
+    """Create payment via KHPAY → QR + ប៊ូតុងបើក ABA Mobile.
+    Telegram មិនទទួល abamobilebank:// ជា button URL — ប្រើ HTTPS /open-aba
+    ដែល redirect ទៅ ABA App។"""
+    uid_str = str(uid)
+    promo_applied = promo_code_name
+    _gen_msg = None
+    try:
+        _gen_msg = bot.send_message(uid, "⏳ <b>កំពុងបង្កើត QR (KHPAY)...</b>", parse_mode="HTML")
+    except Exception as _e:
+        logger.debug(f"[silent] {_e}")
+    data = _khpay_create(uid, amount, note=f"TopUp uid={uid}")
+    if not data:
+        if _gen_msg:
+            try: bot.delete_message(uid, _gen_msg.message_id)
+            except Exception: pass
+        bot.send_message(uid, "⚠️ <b>មានបញ្ហា Generate QR (KHPAY)!</b>\nសូមព្យាយាមម្តងទៀត ឬ ទំនាក់ Admin", parse_mode="HTML")
+        try:
+            pnotify(f"⚠️ <b>KHPAY បរាជ័យ</b>\n👤 <code>{uid_str}</code> — ${amount:.2f}\n🔎 <code>{_tg_escape(_last_khpay_error, 400)}</code>")
+        except Exception: pass
+        return
+    txn_id = data.get("transaction_id") or data.get("id") or ""
+    qr_image = data.get("qr_image") or data.get("qrImage") or ""
+    qr_string = data.get("qr_string") or data.get("qrString") or ""
+    pay_url = data.get("payment_url") or data.get("pay_url") or ""
+    aba_deeplink_raw = (
+        data.get("abapay_deeplink") or data.get("aba_deeplink")
+        or data.get("deeplink") or data.get("deep_link") or ""
+    )
+    if isinstance(aba_deeplink_raw, str):
+        aba_deeplink_raw = aba_deeplink_raw.strip()
+    else:
+        aba_deeplink_raw = ""
+    expires_in = int(data.get("expires_in") or KHPAY_EXPIRE_SEC)
+    dep_id = f"dep_{uid}_{int(time.time())}"
+    reference = txn_id or f"KHPAY{uid}_{int(time.time())}"[:50]
+    smm_deps[dep_id] = {
+        "uid": uid_str, "amount": amount, "status": "pending",
+        "bonus": bonus, "promo_bonus": promo_bonus, "auto_bonus": auto_bonus,
+        "promo": promo_applied or "", "reference": reference,
+        "payment_url": pay_url or "", "method": "khpay", "created_ts": time.time(),
+    }
+    _save(SMM_DEP_FILE, smm_deps)
+
+    bonus_bits = []
+    if promo_bonus > 0:
+        bonus_bits.append(f"🎟️ Promo Bonus: <b>+${promo_bonus:.2f}</b>")
+    if auto_bonus > 0:
+        bonus_bits.append(f"🎁 Auto Bonus: <b>+${auto_bonus:.2f}</b>")
+    bonus_txt = ("\n" + "\n".join(bonus_bits)) if bonus_bits else ""
+    caption = (
+        f"💠 <b>ដាក់លុយ — KHPAY</b>\n━━━━━━━━━━━━━━━━━━\n"
+        f"💰 ចំនួន: <b>${amount:.2f}</b>{bonus_txt}\n"
+        f"🆔 Txn: <code>{reference}</code>\n"
+        f"⏱ ផុតក្នុង: <b>{expires_in}s</b>\n━━━━━━━━━━━━━━━━━━\n"
+        f"📱 ស្កេន QR ឬ ចុចប៊ូតុង OPEN ABA Mobile\n"
+        f"✅ បន្ទាប់ពីបង់រួច Bot នឹងបញ្ចូល Balance ស្វ័យប្រវត្តិ"
+    )
+
+    # HTTPS link → /open-aba → abamobilebank:// (បើក ABA Mobile)
+    aba_https = _aba_mobile_https_link(aba_deeplink_raw or qr_string)
+    kb_pay = InlineKeyboardMarkup()
+    has_btn = False
+    if aba_https:
+        kb_pay.add(InlineKeyboardButton("🏦 OPEN ABA Mobile", url=aba_https, color="active"))
+        has_btn = True
+    # payment_url button លុប — User ប្រើតែ «OPEN ABA Mobile» ឬ ស្កេន QR
+    if not has_btn:
+        kb_pay = None
+
+    if _gen_msg:
+        try: bot.delete_message(uid, _gen_msg.message_id)
+        except Exception: pass
+
+    sent_msg = None
+    photo_sent = False
+    try:
+        if isinstance(qr_image, str) and qr_image.startswith("data:image"):
+            raw = base64.b64decode(qr_image.split(",", 1)[-1])
+            sent_msg = bot.send_photo(uid, raw, caption=caption, parse_mode="HTML", reply_markup=kb_pay)
+            photo_sent = True
+        elif isinstance(qr_image, str) and qr_image.startswith("http"):
+            sent_msg = bot.send_photo(uid, qr_image, caption=caption, parse_mode="HTML", reply_markup=kb_pay)
+            photo_sent = True
+        elif isinstance(qr_image, str) and len(qr_image) > 200:
+            try:
+                raw = base64.b64decode(qr_image)
+                sent_msg = bot.send_photo(uid, raw, caption=caption, parse_mode="HTML", reply_markup=kb_pay)
+                photo_sent = True
+            except Exception:
+                pass
+    except Exception as e:
+        logger.warning(f"[khpay] photo: {e}")
+    if not photo_sent and qr_string:
+        try:
+            img = qrcode.make(qr_string)
+            buf = io.BytesIO(); img.save(buf, format="PNG"); buf.seek(0)
+            sent_msg = bot.send_photo(uid, buf, caption=caption, parse_mode="HTML", reply_markup=kb_pay)
+            photo_sent = True
+        except Exception as e:
+            logger.warning(f"[khpay] qrcode: {e}")
+    if not photo_sent:
+        extra = f"\n\n🔗 {pay_url}" if pay_url else ""
+        sent_msg = bot.send_message(uid, caption + extra, parse_mode="HTML", reply_markup=kb_pay)
+
+    def _attach_bank_button():
+        try:
+            if not sent_msg:
+                return
+            aba_link = aba_https or _aba_mobile_https_link(aba_deeplink_raw or qr_string)
+            if not aba_link:
+                return
+            kb2 = InlineKeyboardMarkup()
+            if aba_link:
+                kb2.add(InlineKeyboardButton("🏦 OPEN ABA Mobile", url=aba_link, color="active"))
+            # payment_url button លុបពី KHPAY
+            new_cap = caption + (
+                "\n📱 <i>ចុច «OPEN ABA Mobile» — ចូលអេក្រង់ទូទាត់ភ្លាម។ បើមិនចូល សូមបើកក្នុង Safari/Chrome "
+                "(មិនមែន in-app browser របស់ Telegram)</i>")
+            if photo_sent:
+                bot.edit_message_caption(
+                    new_cap, chat_id=uid, message_id=sent_msg.message_id,
+                    parse_mode="HTML", reply_markup=kb2)
+            else:
+                bot.edit_message_text(
+                    new_cap, chat_id=uid, message_id=sent_msg.message_id,
+                    parse_mode="HTML", reply_markup=kb2)
+        except Exception as e:
+            logger.warning(f"[khpay] attach_bank_button failed: {e}")
+
+    if qr_string or aba_deeplink_raw:
+        threading.Thread(target=_attach_bank_button, daemon=True).start()
+
+    try:
+        pnotify(f"🆕 <b>QR KHPAY</b>\n👤 <code>{uid_str}</code>\n💵 ${amount:.2f}\n🔖 <code>{reference}</code>")
+    except Exception: pass
+    threading.Thread(target=_watch_deposit, args=(uid, uid_str, dep_id, amount, reference),
+                     kwargs={"checker": _khpay_check}, daemon=True).start()
+
+
+def _get_dep_promo(uid):
+    step = waiting.get(uid)
+    if isinstance(step, dict):
+        return step.get("promo")
+    return None
+
+_pending_dep_choice = {}   # uid -> {"amount":..., "promo_code":...} — រង់ចាំ user ជ្រើស Payment Method (v12)
+
+def _process_deposit(uid, uid_str, amount, promo_code=None, method=None):
+    """method=None → decide ស្វ័យប្រវត្តិ: បើមានទាំង CamRapidPay + ABA PayWay ព្រមគ្នា (Key
+    កំណត់រួច ព្រមទាំង admin មិនទាន់បិទតាម 🔀 វិធីទូទាត់) ឲ្យ user ជ្រើសរើសមុន (picker) ；
+    បើមានតែមួយ ប្រើវិធីនោះភ្លាម；  បើគ្មានវិធីណាមួយប្រើបាន ជូនដំណឹង user + admin ។ (v12/v13)"""
+    camrapid_ok = False  # CamRapidPay removed
+    aba_ok      = has_aba_payway() and is_pay_method_enabled("aba")
+    khpay_ok    = has_khpay() and is_pay_method_enabled("khpay")
+    # Clone កំណត់ pay_method តែមួយ → ចូលចិត្ត method នោះ ប៉ុន្តែបើមិន ready រក fallback
+    _pref = (os.getenv("PAY_METHOD") or "auto").strip().lower()
+    if _pref == "khpay":
+        if khpay_ok:
+            camrapid_ok = False; aba_ok = False
+        else:
+            logger.warning("[deposit] PAY_METHOD=khpay but khpay not ready — fallback other methods")
+    elif _pref == "aba":
+        if aba_ok:
+            camrapid_ok = False; khpay_ok = False
+    elif _pref in ("auto", "camrapid"):
+        if camrapid_ok:
+            aba_ok = False; khpay_ok = False
+    if method is None:
+        available = []
+        if camrapid_ok: available.append(("camrapid", "🔄 CamRapidPay KHQR", "active"))
+        if aba_ok:      available.append(("aba", "💳 ABA PayWay · Auto QR", "primary"))
+        if khpay_ok:    available.append(("khpay", "💠 KHPAY · Auto QR", "progress"))
+        try:
+            if manual_qr_cfg.get("enabled") and (manual_qr_cfg.get("photo_id") or manual_qr_cfg.get("photo_path")):
+                available.append(("manual", "🖼 Manual QR · ផ្ញើភស្តុតាង", "progress"))
+        except Exception:
+            pass
+        if len(available) > 1:
+            _pending_dep_choice[uid] = {"amount": amount, "promo_code": promo_code}
+            lang = get_lang(uid)
+            kb = InlineKeyboardMarkup()
+            for mid, label, color in available:
+                kb.add(InlineKeyboardButton(label, callback_data=f"depm:{mid}", color=color))
+            if lang == "kh":
+                tip = (
+                    f"💳 <b>ជ្រើសរើសវិធីទូទាត់</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"💰 ចំនួន: <b>${amount:.2f}</b>\n\n"
+                    f"• <b>ABA / KHPAY</b> — ស្កេន QR · Balance ចូលស្វ័យប្រវត្តិ\n"
+                    f"• <b>Manual QR</b> — ស្កេនរូប · ផ្ញើ screenshot ភស្តុតាង\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"⏱ QR ស្វ័យប្រវត្តិ ~5 នាទី"
+                )
+            else:
+                tip = (
+                    f"💳 <b>Choose payment method</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"💰 Amount: <b>${amount:.2f}</b>\n\n"
+                    f"• <b>ABA / KHPAY</b> — scan QR · auto credit\n"
+                    f"• <b>Manual QR</b> — scan then send proof\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"⏱ Auto QR expires in ~5 minutes"
+                )
+            bot.send_message(uid, tip, parse_mode="HTML", reply_markup=kb)
+            return
+        if not available:
+            lang = get_lang(uid)
+            _dbg = (
+                f"pref={os.getenv('PAY_METHOD') or 'auto'} | "
+                f"aba={'Y' if has_aba_payway() else 'N'} "
+                f"toggle={is_pay_method_enabled('aba')} | "
+                f"khpay={'Y' if has_khpay() else 'N'} "
+                f"toggle={is_pay_method_enabled('khpay')}"
+            )
+            logger.warning(f"[deposit] no method uid={uid} {_dbg}")
+            bot.send_message(uid,
+                ("⚠️ <b>មិនមានវិធីទូទាត់នៅពេលនេះទេ។</b>\n"
+                 "សូមទំនាក់ Admin ឬព្យាយាមម្ដងទៀតនៅពេលក្រោយ។")
+                if lang == "kh" else
+                ("⚠️ <b>No payment method is available right now.</b>\n"
+                 "Please contact Admin or try again later."),
+                parse_mode="HTML")
+            try:
+                pnotify(
+                    f"🚨 <b>User ព្យាយាមដាក់លុយ ${amount:.2f} — វិធីទូទាត់ទាំងអស់បិទ/មិនទាន់កំណត់!</b>\n"
+                    f"👤 <code>{uid_str}</code>\n<code>{_dbg}</code>\n"
+                    f"សូមកំណត់ ABA / KHPAY / Manual QR")
+            except Exception as _e:
+                logger.debug(f"[silent] {_e}")
+            return
+
+        method = available[0][0]
+
+    lang  = get_lang(uid)
+    promo_bonus = 0.0
+    promo_applied = None
+    if promo_code:
+        p = promos.get(promo_code.upper())
+        if p and (p.get("uses", 0) == 0 or p.get("used", 0) < p.get("uses", 0)):
+            if str(uid) not in p.get("user_used", {}):
+                if p.get("pct", False):
+                    promo_bonus = round(amount * float(p["discount"]) / 100, 2)
+                else:
+                    promo_bonus = round(float(p["discount"]), 2)
+                promo_applied = promo_code.upper()
+    # ── Auto Deposit Bonus (stacks on top of any promo bonus) ──
+    auto_bonus  = _auto_dep_bonus(amount)
+    total_bonus = round(promo_bonus + auto_bonus, 2)
+    _send_deposit_qr(uid, amount,
+                     label=f"💸 <b>{'ដាក់លុយ' if lang=='kh' else 'Top Up'}</b>",
+                     bonus=total_bonus, promo_code_name=promo_applied,
+                     promo_bonus=promo_bonus, auto_bonus=auto_bonus, method=method)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("depm:"))
+def cb_dep_method(call):
+    """ចម្លើយ user ជ្រើសរើស Payment Method ពី picker ក្នុង _process_deposit (v12)"""
+    uid = call.message.chat.id
+    uid_str = str(uid)
+    method = call.data.split(":", 1)[1]
+    bot.answer_callback_query(call.id)
+    pending = _pending_dep_choice.pop(uid, None)
+    if not pending:
+        bot.send_message(uid, "⚠️ Session ផុតកំណត់ — សូមចាប់ផ្ដើមដាក់លុយម្តងទៀត")
+        return
+    _process_deposit(uid, uid_str, pending["amount"], pending.get("promo_code"), method=method)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("paytoggle:"))
+def cb_paytoggle(call):
+    """បិទ/បើក វិធីទូទាត់ (CamRapidPay / ABA PayWay) ពី Admin Panel — v13"""
+    uid = call.message.chat.id
+    if uid != ADMIN_ID: bot.answer_callback_query(call.id, "🚫"); return
+    method = call.data.split(":", 1)[1]
+    if method not in PAY_METHOD_LABELS:
+        bot.answer_callback_query(call.id, "❌ Unknown method"); return
+    set_pay_method_enabled(method, not is_pay_method_enabled(method))
+    new_state = is_pay_method_enabled(method)
+    bot.answer_callback_query(call.id, f"{'🟢 បើក' if new_state else '🔴 បិទ'} {PAY_METHOD_LABELS[method]}")
+    try:
+        bot.edit_message_text(
+            f"🔀 <b>បិទ/បើក វិធីទូទាត់</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"{_paytoggle_status_lines()}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"👉 ចុចប៊ូតុងខាងក្រោមដើម្បីបិទ/បើក។ បើមានទាំង ២ (Key កំណត់រួច + Toggle ON) ព្រមគ្នា "
+            f"User នឹងឃើញ picker ជ្រើសរើសពេលដាក់លុយ។ បើមានតែមួយ Bot ប្រើវិធីនោះដោយស្វ័យប្រវត្តិ។",
+            chat_id=uid, message_id=call.message.message_id, parse_mode="HTML", reply_markup=_paytoggle_kb())
+    except Exception as _e: logger.debug(f"[silent] {_e}")
+
+# ═══════════════════════════════════════════════════════════
+#  KEYBOARDS
+# ═══════════════════════════════════════════════════════════
+def main_kb(uid=None):
+    """User menu — ទម្រង់ចាស់ដើម (Account/TopUp → Order full-width → History/Track → Support)."""
+    lang = get_lang(uid) if uid else "kh"
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    e = EMOJI_MAP
+    if lang == "en":
+        kb.row(KeyboardButton("👤 My Account", emoji_id=e.get("👤") or None, color="active"),
+               KeyboardButton("💸 Top Up", emoji_id=e.get("💸") or e.get("💰"), color="progress"))
+        kb.row(KeyboardButton("🛒 Order Service", emoji_id=e.get("🛒"), color="active"))
+        kb.row(KeyboardButton("📋 Order History", emoji_id=e.get("📋"), color="active"),
+               KeyboardButton("🔍 Track Order", emoji_id=e.get("🔍"), color="active"))
+        kb.row(KeyboardButton("💬 Support", emoji_id=e.get("💬"), color="active"),
+               KeyboardButton("💡 How to Use", emoji_id=e.get("💡"), color="progress"))
+    else:
+        kb.row(KeyboardButton("👤 គណនី", emoji_id=e.get("👤") or None, color="active"),
+               KeyboardButton("💸 បញ្ចូលលុយ", emoji_id=e.get("💸") or e.get("💰"), color="progress"))
+        kb.row(KeyboardButton("🛒 បញ្ជាទិញសេវា", emoji_id=e.get("🛒"), color="active"))
+        kb.row(KeyboardButton("📋 ប្រវត្តិការបញ្ជាទិញ", emoji_id=e.get("📋"), color="active"),
+               KeyboardButton("🔍 តាមដានការបញ្ជាទិញ", emoji_id=e.get("🔍"), color="active"))
+        kb.row(KeyboardButton("💬 ជំនួយ", emoji_id=e.get("💬"), color="active"),
+               KeyboardButton("💡 របៀបប្រើប្រាស់", emoji_id=e.get("💡"), color="progress"))
+    try:
+        for row in kb.keyboard:
+            for btn in row:
+                if hasattr(btn, "to_dict"):
+                    btn.to_dict()
+    except Exception:
+        pass
+    return kb
+
+
+def admin_kb():
+    """Admin hub — short categories (submenus open on tap)."""
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row(KeyboardButton("📊 ការបញ្ជា SMM", color="active"),
+           KeyboardButton("📦 មុខងារ SMM", color="progress"))
+    kb.row(KeyboardButton("💰 ហិរញ្ញវត្ថុ", color="active"),
+           KeyboardButton("👥 អ្នកប្រើ", color="active"))
+    kb.row(KeyboardButton("🎨 Media", color="progress"),
+           KeyboardButton("⚙️ កំណត់", color="progress"))
+    kb.row(KeyboardButton("🔔 Notify", color="progress"),
+           KeyboardButton("💾 Backup Data", color="active"))
+    kb.row(KeyboardButton("🔍 រក Order ID", color="active"),
+           KeyboardButton("👤 រក User ID", color="progress"))
+    # populate stripped-text map so premium icons still match handlers
+    try:
+        for row in kb.keyboard:
+            for btn in row:
+                if hasattr(btn, "to_dict"):
+                    btn.to_dict()
+    except Exception:
+        pass
+    return kb
+
+
+def admin_smm_kb():
+    """SMM tools submenu."""
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row(KeyboardButton("⚙️ កំណត់ SMM API", color="progress"),
+           KeyboardButton("📋 SMM Services", color="active"))
+    kb.row(KeyboardButton("➕ បន្ថែម SMM", color="active"),
+           KeyboardButton("✍️ Manual SMM", color="active"))
+    kb.row(KeyboardButton("✏️ កែ SMM", color="progress"),
+           KeyboardButton("🗑️ លុប SMM", color="danger"))
+    kb.row(KeyboardButton("📦 បន្ថែម Package", color="active"),
+           KeyboardButton("💰 កែតម្លៃ", color="progress"))
+    kb.row(KeyboardButton("💹 ប្រាក់ចំណេញ SMM", color="active"),
+           KeyboardButton("📈 របាយការណ៍ចំណេញ", color="active"))
+    kb.row(KeyboardButton("🏆 Top Services/Clients", color="active"),
+           KeyboardButton("⏰ Daily Report Auto", color="active"))
+    kb.row(KeyboardButton("⏱ ល្បឿន Poll", color="progress"),
+           KeyboardButton("💰 ឆែកលុយ API", color="active"))
+    kb.row(KeyboardButton("🏠 Admin Menu", color="inactive"))
+    return kb
+
+
+def admin_finance_kb():
+    """Wallet / deposit / bonus submenu."""
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row(KeyboardButton("💰 កាបូបលុយ", color="active"),
+           KeyboardButton("💳 ប្រាក់បញ្ញើ", color="active"))
+    kb.row(KeyboardButton("💸 បន្ថែមប្រាក់", color="active"),
+           KeyboardButton("💔 កាត់ប្រាក់", color="danger"))
+    kb.row(KeyboardButton("🎁 Bonus ដាក់លុយ", color="progress"),
+           KeyboardButton("🏷️ បញ្ចុះតម្លៃ User", color="progress"))
+    kb.row(KeyboardButton("🧾 QR ដាក់លុយដោយដៃ", color="active"))
+    kb.row(KeyboardButton("🏠 Admin Menu", color="inactive"))
+    return kb
+
+
+def admin_users_kb():
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row(KeyboardButton("👥 អ្នកប្រើប្រាស់", color="active"),
+           KeyboardButton("📊 ស្ថិតិ", color="active"))
+    kb.row(KeyboardButton("📢 ផ្សព្វផ្សាយ", color="progress"))
+    kb.row(KeyboardButton("🏠 Admin Menu", color="inactive"))
+    return kb
+
+
+def admin_media_kb():
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row(KeyboardButton("🖼️ Welcome Photo", color="progress"),
+           KeyboardButton("📝 Welcome Msg", color="progress"))
+    kb.row(KeyboardButton("🎬 វីដេអូបង្រៀន", color="progress"),
+           KeyboardButton("🎵 វីដេអូ TikTok ជោគជ័យ", color="progress"))
+    kb.row(KeyboardButton("😊 កំណត់ Emoji", color="progress"))
+    kb.row(KeyboardButton("🏠 Admin Menu", color="inactive"))
+    return kb
+
+
+def admin_settings_kb():
+    """Payment keys + force-sub + bots."""
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    if IS_MASTER:
+        kb.row(KeyboardButton("✏️ កែ Support", color="progress"),
+               KeyboardButton("👥 Sub Admins", color="progress"))
+    kb.row(KeyboardButton("💳 ABA PayWay Key", color="progress"),
+           KeyboardButton("💠 KHPAY Key", color="progress"))
+    kb.row(KeyboardButton("🔀 វិធីទូទាត់", color="progress"),
+           KeyboardButton("⏳ QR Cooldown", color="progress"))
+    if IS_MASTER:
+        kb.row(KeyboardButton("📢 Force Subscribe", color="progress"))
+        kb.row(KeyboardButton("🤖 Setup Order Bot", color="progress"),
+               KeyboardButton("💳 Setup Payment Bot", color="progress"))
+    else:
+        kb.row(KeyboardButton("🤖 Setup Order Bot", color="progress"),
+               KeyboardButton("💳 Setup Payment Bot", color="progress"))
+    kb.row(KeyboardButton("🔄 ធ្វើឱ្យទាន់សម័យ", color="progress"))
+    kb.row(KeyboardButton("🏠 Admin Menu", color="inactive"))
+    return kb
+
+
+def admin_notify_kb():
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row(KeyboardButton("🔔 Notify Channel", color="progress"),
+           KeyboardButton("🧪 តេស្ត Notify", color="active"))
+    kb.row(KeyboardButton("🏠 Admin Menu", color="inactive"))
+    return kb
+
+
+
+def emoji_menu_kb():
+    """Inline menu for Premium Emoji settings (replaces /setemojis, /emojilist, /emojiid)."""
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("✏️ កំណត់ Emoji ថ្មី", callback_data="emojimenu:set", color="progress"))
+    kb.add(InlineKeyboardButton("🔄 ប្តូរ Emoji ដែលមានស្រាប់", callback_data="emojimenu:change", color="progress"))
+    kb.add(InlineKeyboardButton("📊 មើលស្ថានភាព",     callback_data="emojimenu:list", color="active"))
+    kb.add(InlineKeyboardButton("🎨 មើលសាកល្បង (Preview)", callback_data="emojimenu:preview", color="active"))
+    kb.add(InlineKeyboardButton("🆔 យក Emoji ID",       callback_data="emojimenu:id", color="active"))
+    return kb
+
+def missing_emoji_kb(per_row=6):
+    """Inline keyboard grid — one button per NOT-YET-SET emoji. Tapping one starts a
+    single-target flow: bot remembers which char was picked, admin sends/forwards the
+    premium version of it, bot matches it and saves the custom_emoji_id automatically —
+    no manual ID lookup needed."""
+    missing = [ch for ch, v in EMOJI_MAP.items() if not v]
+    btns = []
+    row = []
+    for ch in missing:
+        row.append(InlineKeyboardButton(ch, callback_data=f"emojipick:{ch}", color="progress"))
+        if len(row) == per_row:
+            btns.append(row); row = []
+    if row: btns.append(row)
+    btns.append([InlineKeyboardButton("📋 ផ្ញើច្រើនម្តង (Advanced)", callback_data="emojimenu:setmulti", color="active")])
+    btns.append([InlineKeyboardButton("🔙 ត្រឡប់ Menu", callback_data="emojimenu:menu", color="inactive")])
+    return InlineKeyboardMarkup(btns)
+
+def all_emoji_kb(per_row=6):
+    """Inline keyboard grid — ALL emoji (both set និង unset), ដើម្បីឲ្យ Admin អាចជ្រើស
+    Emoji ដែលកំណត់រួចហើយ មកកំណត់ (ប្តូរ) ម្តងទៀត។ ✅ = មានស្រាប់, ⬜ = មិនទាន់កំណត់។
+    ប្រើ callback_data ដដែលនឹង emojipick: (Handler ដដែលមិនប្រកែកថា Set រួចហើយឬអត់)។"""
+    btns = []
+    row = []
+    for ch, v in EMOJI_MAP.items():
+        mark = "✅" if v else "⬜"
+        row.append(InlineKeyboardButton(f"{mark}{ch}", callback_data=f"emojipick:{ch}",
+                                         color=("active" if v else "progress")))
+        if len(row) == per_row:
+            btns.append(row); row = []
+    if row: btns.append(row)
+    btns.append([InlineKeyboardButton("🔙 ត្រឡប់ Menu", callback_data="emojimenu:menu", color="inactive")])
+    return InlineKeyboardMarkup(btns)
+
+def sub_admin_kb():
+    """Keyboard for sub-admins (limited permissions)"""
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row(KeyboardButton("📊 ការបញ្ជា SMM", color="active"),
+           KeyboardButton("💰 កាបូបលុយ",    color="active"))
+    kb.row(KeyboardButton("💳 ប្រាក់បញ្ញើ",   color="active"),
+           KeyboardButton("👥 អ្នកប្រើប្រាស់", color="active"))
+    kb.row(KeyboardButton("💸 បន្ថែមប្រាក់", color="active"),
+           KeyboardButton("💔 កាត់ប្រាក់",   color="danger"))
+    kb.row(KeyboardButton("📊 ស្ថិតិ",       color="active"),
+           KeyboardButton("📢 ផ្សព្វផ្សាយ", color="progress"))
+    return kb
+
+def cancel_kb():
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.row(KeyboardButton("✕ Cancel", color="danger"))
+    return kb
+
+def _warm_stripped_text_map():
+    """ហៅ .to_dict() លើ reply-keyboard ចម្បងទាំងអស់ (KH + EN) មួយដងពេល bot
+    ចាប់ផ្ដើម ដើម្បីបំពេញ _STRIPPED_TEXT_MAP ជាមុន — កុំឲ្យមាន window ខ្លីៗ
+    ចន្លោះពេល bot restart និងពេលផ្ញើ keyboard ថ្មីទៅ user ដែលអាចធ្វើឲ្យ
+    ប៊ូតុងចាស់ (ដែល client នៅចាំ) ធ្លាក់ចូល fallback "មិនស្គាល់ button"។"""
+    def _dump(kb):
+        for row in kb.keyboard:
+            for btn in row:
+                if hasattr(btn, "to_dict"):
+                    btn.to_dict()
+    try:
+        _dump(main_kb())                      # lang="kh" default
+        user_lang["__warmup__"] = "en"
+        _dump(main_kb(uid="__warmup__"))
+        user_lang.pop("__warmup__", None)
+        _dump(admin_kb())
+        _dump(admin_smm_kb())
+        _dump(admin_finance_kb())
+        _dump(admin_users_kb())
+        _dump(admin_media_kb())
+        _dump(admin_settings_kb())
+        _dump(admin_notify_kb())
+        _dump(sub_admin_kb())
+        _dump(cancel_kb())
+    except Exception as e:
+        logger.warning(f"⚠️ _warm_stripped_text_map failed: {e}")
+
+def deposit_amt_kb(uid=None, promo_code=None):
+    lang = get_lang(uid) if uid else "kh"
+    # Preset amounts
+    amounts = [1, 2, 5, 10, 20, 50]
+    btns = []
+    row = []
+    for i, amt in enumerate(amounts):
+        row.append(InlineKeyboardButton(f"💵 ${amt}", callback_data=f"dep:amt:{amt}", color="active"))
+        if len(row) == 3:
+            btns.append(row); row = []
+    if row: btns.append(row)
+    # Custom amount
+    btns.append([InlineKeyboardButton(
+        "✏️ ចំនួនផ្សេង" if lang=="kh" else "✏️ Custom Amount",
+        callback_data="dep:custom", color="progress")])
+    if manual_qr_cfg.get("enabled") and manual_qr_cfg.get("photo_id"):
+        btns.append([InlineKeyboardButton(
+            "🧾 ដាក់លុយដោយដៃ (Manual)" if lang=="kh" else "🧾 Manual Deposit",
+            callback_data="dep:manual", color="active")])
+    return InlineKeyboardMarkup(btns)
+
+def admin_bal_amt_kb(target, kind):
+    """Admin ចុចជ្រើសចំនួន (ឬ 'ចំនួនផ្សេង' ដើម្បីវាយដោយដៃ) សម្រាប់ បន្ថែម/កាត់ Balance
+    របស់ user — ដូចរចនាបទ deposit_amt_kb (preset buttons + custom)."""
+    amounts = [1, 2, 5, 10, 20, 50]
+    btns = []
+    row = []
+    for amt in amounts:
+        row.append(InlineKeyboardButton(f"💵 ${amt}",
+            callback_data=f"balamt:{kind}:{target}:{amt}", color="active"))
+        if len(row) == 3:
+            btns.append(row); row = []
+    if row: btns.append(row)
+    btns.append([InlineKeyboardButton("✏️ ចំនួនផ្សេង",
+        callback_data=f"balamt:{kind}:{target}:custom", color="progress")])
+    return InlineKeyboardMarkup(btns)
+
+
+def _first_premium_in_text(text):
+    """Return (char, custom_emoji_id) for the first emoji in text that has a premium id set.
+    Prefer leftmost occurrence in the label so the icon matches what users see first."""
+    if not text:
+        return None, None
+    best = None  # (pos, ch, eid)
+    for ch in _EMOJI_CHARS_SORTED:
+        try:
+            eid = _lookup_emoji_id(ch)
+        except Exception:
+            eid = EMOJI_MAP.get(ch)
+        if not eid:
+            n = ch.replace("\ufe0f", "").replace("️", "")
+            for k, v in EMOJI_MAP.items():
+                if v and k.replace("\ufe0f", "").replace("️", "") == n:
+                    eid = v
+                    break
+        if not eid:
+            continue
+        # find earliest position of ch or FE0F twin
+        pos = -1
+        for v in {ch, ch.replace("\ufe0f", ""), ch + "️"}:
+            if not v:
+                continue
+            i = text.find(v)
+            if i >= 0 and (pos < 0 or i < pos):
+                pos = i
+        if pos >= 0:
+            if best is None or pos < best[0]:
+                best = (pos, ch, str(eid))
+    if best:
+        return best[1], best[2]
+    return None, None
+
+def _ikb_premium(label, **kwargs):
+    """InlineKeyboardButton with best available premium icon from label text."""
+    ch, eid = _first_premium_in_text(label)
+    if eid:
+        return InlineKeyboardButton(label, emoji_id=eid, **kwargs)
+    return InlineKeyboardButton(label, **kwargs)
+
+def smm_cat_kb():
+    PLATFORM_ICONS = {
+        "tiktok khmer": "🇰🇭",
+        "tiktok": "🎵", "telegram": "📱", "facebook": "📘",
+        "instagram": "📸", "youtube": "▶️", "twitter": "🐦",
+        "x": "🐦", "threads": "🧵"
+    }
+    cats = _smm_get_categories()
+    btns = []
+    for cat in cats:
+        if _leading_emoji(cat):
+            label = cat
+        else:
+            icon = "📱"
+            for key, ico in PLATFORM_ICONS.items():
+                if key in cat.lower():
+                    icon = ico
+                    break
+            label = f"{icon}  {cat}"
+        # Use first *configured* premium emoji in label as button icon
+        btns.append([_ikb_premium(label, callback_data=f"smmcat:{cat}", color="active")])
+    btns.append([_ikb_premium("🔙 Back", callback_data="back:main", color="inactive")])
+    return InlineKeyboardMarkup(btns)
+
+def smm_svc_kb(cat):
+    SVC_ICONS = {
+        "follower":"👤","like":"❤️","view":"👁️","comment":"💬",
+        "share":"🔗","save":"🔖","member":"👥","subscriber":"🔔",
+        "watch":"👀","reaction":"😍",
+    }
+    svcs = _smm_get_svcs_in_cat(cat)
+    btns = []
+    for slug, s in svcs:
+        label = s.get("label", slug)
+        if not _leading_emoji(label):
+            icon = "⚡"
+            for key, ico in SVC_ICONS.items():
+                if key in label.lower():
+                    icon = ico
+                    break
+            label = f"{icon}  {label}"
+        # Prefer premium icon for ❤️ / 👁️ / 👤 / 🇰🇭 whichever admin has set
+        btns.append([_ikb_premium(label, callback_data=f"smmsvc:{slug}", color="active")])
+    btns.append([_ikb_premium("🔙 Back", callback_data="back:smmcats", color="inactive")])
+    return InlineKeyboardMarkup(btns)
+
+def smm_qty_kb(slug, s, uid=None):
+    sr    = _smm_sell_rate(s["cost_rate"], slug)
+    mn    = s.get("min", 10)
+    mx    = s.get("max", 100000)
+    label = s.get("label", slug)
+    first = label.split()[0] if label else slug
+    # Flat price service — only 1 option
+    if s.get("flat_price"):
+        flat = float(s["flat_price"])
+        if uid is not None:
+            flat, disc, pct = _apply_user_discount(uid, slug, flat)
+            if pct > 0:
+                btn_txt = f"✅ Order — ${flat:.2f} (បញ្ចុះ {pct:.0f}%)"
+            else:
+                btn_txt = f"✅ Order — ${flat:.2f}"
+        else:
+            btn_txt = f"✅ Order — ${flat:.2f}"
+        btns = [[InlineKeyboardButton(btn_txt, callback_data=f"smmqty:{slug}:1", color="active")]]
+        btns.append([InlineKeyboardButton("🔙 Back", callback_data="back:smmcats", color="inactive")])
+        return InlineKeyboardMarkup(btns)
+    preset = s.get("preset_qtys")
+    if preset and isinstance(preset, list):
+        qtys = [q for q in preset if mn <= q <= mx]
+    else:
+        suggestions = [100, 500, 1000, 5000, 10000, 50000]
+        qtys = []
+        for q in [mn] + suggestions:
+            if mn <= q <= mx and q not in qtys: qtys.append(q)
+            if len(qtys) >= 6: break
+    btns = []
+    for q in qtys:
+        price = _round_price_01(sr * q / 1000)  # ត្រូវតែដូចគ្នានឹងតម្លៃពិត _smm_price_for_order()
+                                                  # ដែលនឹងគិតលុយ ដើម្បីកុំឲ្យតម្លៃលើប៊ូតុងខុសពី
+                                                  # តម្លៃពិតដែលគិតលុយពេលបញ្ជាទិញ (bug ចាស់)
+        if uid is not None:
+            price, _, pct = _apply_user_discount(uid, slug, price)
+            suffix = f" (−{pct:.0f}%)" if pct > 0 else ""
+        else:
+            suffix = ""
+        btns.append([InlineKeyboardButton(
+            f"{q:,} {first} — ${price:.2f}{suffix}", callback_data=f"smmqty:{slug}:{q}", color="active")])
+    btns.append([InlineKeyboardButton("🔙 Back", callback_data="back:smmcats", color="inactive")])
+    return InlineKeyboardMarkup(btns)
+
+# ═══════════════════════════════════════════════════════════
+#  USER TRACKING
+# ═══════════════════════════════════════════════════════════
+def _track_user(message):
+    """តាមដាន User — បើ User ថ្មី (មិនទាន់មានក្នុង users_db) ជូនដំណឹង Admin ភ្លាមៗ។"""
+    uid = message.chat.id
+    uid_str = str(uid)
+    u = message.from_user
+    is_new = uid_str not in users_db
+    prev = users_db.get(uid_str, {})
+    # joined: កំណត់តែពេល User ថ្មីពិតប្រាកដ — User ចាស់ដែលមិនទាន់មាន field
+    # នេះ (data មុន update) មិនត្រូវទទួល timestamp "ឥឡូវ" ទេ បើមិនដូច្នេះ
+    # ស្ថិតិ "User ថ្មី 1 ខែ" នឹងហួសកំណត់ខុសឆ្គង។
+    joined_ts = prev.get("joined")
+    if is_new:
+        joined_ts = int(time.time())
+    was_blocked = bool(prev.get("blocked"))
+    users_db[uid_str] = {
+        "name":     u.first_name or "",
+        "username": u.username or "",
+        "last":     int(time.time()),
+        "banned":   prev.get("banned", False),
+        "joined":   joined_ts,
+        # User ផ្ញើសារមកវិញ = unblock ហើយ — សម្អាត flag
+        "blocked":  False,
+    }
+    # លុប blocked_at បើមាន
+    users_db[uid_str].pop("blocked_at", None)
+    if not was_blocked:
+        # កុំរក្សា key blocked=False ឥតប្រយោជន៍
+        users_db[uid_str].pop("blocked", None)
+    _save(USERS_FILE, users_db)
+    wallets.setdefault(uid_str, 0.0)
+    # បើពីមុន blocked ឥឡូវមកវិញ — ជូនដំណឹង Admin (optional, 1 ដង)
+    if was_blocked:
+        try:
+            _notify_admin_user_block(uid, blocked=False)
+        except Exception as _e:
+            logger.debug(f"[silent] {_e}")
+    # ── ជូនដំណឹង Admin + Channel ពេល User ថ្មីចូលប្រើ Bot ──
+    if is_new and uid != ADMIN_ID and uid not in sub_admins:
+        try:
+            name = (u.first_name or "").strip() or "?"
+            uname = f"@{u.username}" if u.username else "—"
+            total = len(users_db)
+            bot.send_message(ADMIN_ID,
+                f"👋 <b>User ថ្មីចូលប្រើ Bot!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🙍 ឈ្មោះ: <b>{name}</b>\n"
+                f"🔗 Username: {uname}\n"
+                f"🆔 ID: <code>{uid_str}</code>\n"
+                f"👥 សរុប Users: <b>{total}</b>",
+                parse_mode="HTML")
+        except Exception as e:
+            logger.warning(f"[new_user notify] failed: {e}")
+        # Channel — LazR style
+        try:
+            _notify(_channel_new_user_msg(uid_str))
+        except Exception as e:
+            logger.warning(f"[new_user channel] failed: {e}")
+
+def is_banned(uid):
+    return bool(users_db.get(str(uid), {}).get("banned", False))
+
+def _is_block_error(exc):
+    """True បើ Telegram បដិសេធព្រោះ User block bot / deactivate / chat លុប"""
+    msg = str(exc).lower()
+    hints = (
+        "bot was blocked",
+        "user is deactivated",
+        "chat not found",
+        "forbidden: bot was blocked",
+        "forbidden: user is deactivated",
+        "peer_id_invalid",
+        "can't initiate conversation",
+        "bot can't initiate",
+    )
+    return any(h in msg for h in hints)
+
+def _mark_user_blocked(uid, blocked=True):
+    """កត់ត្រា User ថា block/unblock bot"""
+    uid_str = str(uid)
+    if uid_str not in users_db:
+        users_db[uid_str] = {"name": "", "username": "", "last": int(time.time()), "banned": False}
+    u = users_db[uid_str]
+    prev = bool(u.get("blocked"))
+    if blocked:
+        u["blocked"] = True
+        u["blocked_at"] = int(time.time())
+    else:
+        u.pop("blocked", None)
+        u.pop("blocked_at", None)
+    changed = prev != bool(blocked)
+    if changed:
+        _save(USERS_FILE, users_db)
+        block_log.append({
+            "uid": uid_str,
+            "action": "block" if blocked else "unblock",
+            "ts": int(time.time()),
+            "name": (u.get("name") or "")[:40],
+            "username": u.get("username") or "",
+        })
+        if len(block_log) > 300:
+            del block_log[:-300]
+        _save(BLOCK_LOG_FILE, block_log)
+    return changed
+
+def is_blocked(uid):
+    return bool(users_db.get(str(uid), {}).get("blocked", False))
+
+def _notify_admin_user_block(uid, blocked=True):
+    """ជូនដំណឹង Admin ពេល User block ឬ unblock bot"""
+    try:
+        u = users_db.get(str(uid), {})
+        name = (u.get("name") or "?").strip()
+        uname = f"@{u['username']}" if u.get("username") else "—"
+        if blocked:
+            txt = (
+                f"🚫 <b>User បាន Block Bot!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🙍 ឈ្មោះ: <b>{name}</b>\n"
+                f"🔗 Username: {uname}\n"
+                f"🆔 ID: <code>{uid}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"<i>User នេះនឹងត្រូវ skip ពេល Broadcast</i>"
+            )
+        else:
+            txt = (
+                f"✅ <b>User បាន Unblock Bot វិញ!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🙍 ឈ្មោះ: <b>{name}</b>\n"
+                f"🔗 Username: {uname}\n"
+                f"🆔 ID: <code>{uid}</code>"
+            )
+        bot.send_message(ADMIN_ID, txt, parse_mode="HTML")
+    except Exception as e:
+        logger.warning(f"[block_notify] failed: {e}")
+
+def _log_ban(target_uid, action, by_uid):
+    """រក្សាប្រវត្តិ ban/unban — action = 'ban' | 'unban'"""
+    u = users_db.get(str(target_uid), {})
+    ban_log.append({
+        "uid": str(target_uid),
+        "action": action,
+        "by": str(by_uid),
+        "ts": int(time.time()),
+        "name": (u.get("name") or "")[:40],
+        "username": u.get("username") or "",
+    })
+    if len(ban_log) > 200:
+        del ban_log[:-200]
+    _save(BAN_LOG_FILE, ban_log)
+
+def _list_new_users(days=30, limit=50):
+    """ត្រឡប់ list of (uid, user_dict) ដែល joined ក្នុង days ថ្ងៃចុងក្រោយ រៀងពីថ្មី→ចាស់"""
+    cutoff = int(time.time()) - days * 86400
+    items = []
+    for uid_str, u in users_db.items():
+        j = u.get("joined")
+        if j and int(j) >= cutoff:
+            items.append((uid_str, u))
+    items.sort(key=lambda x: int(x[1].get("joined") or 0), reverse=True)
+    return items[:limit]
+
+def _new_users_report_text(days=30, limit=40):
+    items = _list_new_users(days, limit)
+    cutoff = int(time.time()) - days * 86400
+    total = sum(1 for u in users_db.values() if u.get("joined") and int(u["joined"]) >= cutoff)
+    lines = [
+        f"🆕 <b>User ថ្មី — {days} ថ្ងៃចុងក្រោយ</b>",
+        f"សរុប: <b>{total}</b> នាក់" + (f" (បង្ហាញ {len(items)})" if total > len(items) else ""),
+        "━━━━━━━━━━━━━━━━━━",
+    ]
+    if not items:
+        lines.append("<i>មិនទាន់មាន User ថ្មីក្នុងរយៈពេលនេះទេ</i>")
+    else:
+        for i, (uid_str, u) in enumerate(items, 1):
+            name = (u.get("name") or "?")[:16]
+            uname = f"@{u['username']}" if u.get("username") else "—"
+            ts = int(u.get("joined") or 0)
+            dt = datetime.datetime.fromtimestamp(ts, _KH_TZ).strftime("%d/%m %H:%M") if ts else "?"
+            lines.append(f"{i}. <b>{name}</b> {uname}\n   <code>{uid_str}</code> · {dt}")
+    return "\n".join(lines)
+
+def _ban_log_text(limit=20):
+    lines = [f"🚫 <b>ប្រវត្តិ Ban/Unban</b> (ចុងក្រោយ {min(limit, len(ban_log))})", "━━━━━━━━━━━━━━━━━━"]
+    if not ban_log:
+        lines.append("<i>មិនទាន់មានកំណត់ត្រា</i>")
+    else:
+        for rec in reversed(ban_log[-limit:]):
+            act = "🚫 Ban" if rec.get("action") == "ban" else "🔓 Unban"
+            name = rec.get("name") or "?"
+            uname = f"@{rec['username']}" if rec.get("username") else ""
+            ts = int(rec.get("ts") or 0)
+            dt = datetime.datetime.fromtimestamp(ts, _KH_TZ).strftime("%d/%m %H:%M") if ts else "?"
+            lines.append(f"{act} <code>{rec.get('uid')}</code> {name} {uname}\n   ដោយ <code>{rec.get('by')}</code> · {dt}")
+    return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════
+#  ADMIN PROMO HELPERS
+# ═══════════════════════════════════════════════════════════
+
+def _blocked_users_list_text(limit=50):
+    """បញ្ជី User ដែលកំពុង Block Bot បច្ចុប្បន្ន"""
+    items = [(uid_str, u) for uid_str, u in users_db.items() if u.get("blocked")]
+    items.sort(key=lambda x: int(x[1].get("blocked_at") or 0), reverse=True)
+    total = len(items)
+    show = items[:limit]
+    lines = [
+        "🔇 <b>User កំពុង Block Bot</b>",
+        "សរុប: <b>%d</b> នាក់%s" % (total, (" (បង្ហាញ %d)" % len(show)) if total > len(show) else ""),
+        "━━━━━━━━━━━━━━━━━━",
+    ]
+    if not show:
+        lines.append("<i>មិនមាន User ណា block bot បច្ចុប្បន្នទេ</i>")
+    else:
+        for i, (uid_str, u) in enumerate(show, 1):
+            name = (u.get("name") or "?")[:16]
+            uname = ("@" + u["username"]) if u.get("username") else "—"
+            ts = int(u.get("blocked_at") or 0)
+            dt = datetime.datetime.fromtimestamp(ts, _KH_TZ).strftime("%d/%m %H:%M") if ts else "?"
+            lines.append("%d. <b>%s</b> %s" % (i, name, uname))
+            lines.append("   <code>%s</code> · %s" % (uid_str, dt))
+    return "\n".join(lines)
+
+def _block_log_text(limit=40):
+    """ប្រវត្តិ Block/Unblock ពីមុន"""
+    lines = [
+        "🔇 <b>ប្រវត្តិ Block Bot</b> (ចុងក្រោយ %d)" % min(limit, len(block_log)),
+        "━━━━━━━━━━━━━━━━━━",
+    ]
+    if not block_log:
+        lines.append("<i>មិនទាន់មានកំណត់ត្រា — នឹងចាប់ផ្តើមកត់ត្រាពេល User block បន្ទាប់ពី update នេះ</i>")
+    else:
+        for rec in reversed(block_log[-limit:]):
+            act = "🚫 Block" if rec.get("action") == "block" else "✅ Unblock"
+            name = rec.get("name") or "?"
+            uname = ("@" + rec["username"]) if rec.get("username") else ""
+            ts = int(rec.get("ts") or 0)
+            dt = datetime.datetime.fromtimestamp(ts, _KH_TZ).strftime("%d/%m %H:%M") if ts else "?"
+            lines.append("%s <code>%s</code> %s %s" % (act, rec.get("uid"), name, uname))
+            lines.append("   %s" % dt)
+    return "\n".join(lines)
+
+def _show_promos(uid):
+    if not promos:
+        bot.send_message(uid, "🎟️ <b>គ្មាន Promo Code ទេ</b>", parse_mode="HTML",
+                         reply_markup=admin_kb()); return
+    lines = ["🎟️ <b>Promo Codes</b>\n━━━━━━━━━━━━━━━━━━"]
+    for code, p in promos.items():
+        dtype = f"{p['discount']:.0f}%" if p.get("pct") else f"${float(p.get('discount',0)):.2f}"
+        lines.append(f"• <code>{code}</code> — {dtype} | {p.get('used',0)}/{p.get('uses',0)} used")
+    bot.send_message(uid, "\n".join(lines), parse_mode="HTML")
+
+def _utf16_slice(text, offset, length):
+    """ស្រង់ substring ត្រឹមត្រូវតាម UTF-16 code units (របៀបដែល Telegram
+    គិត offset/length របស់ MessageEntity — សម្រាប់ភាសាមានតួអក្សរក្រៅ BMP
+    ដូច emoji, ការគណនាតាម Python string index ធម្មតាមិនត្រឹមត្រូវទេ)."""
+    u = text.encode("utf-16-le")
+    return u[offset * 2: (offset + length) * 2].decode("utf-16-le", errors="ignore")
+
+def _extract_custom_emoji(src):
+    """ត្រឡប់ list of (underlying_unicode_char, custom_emoji_id) ពីសារមួយ —
+    underlying_unicode_char គឺជា emoji placeholder ដែលនៅពីក្រោម premium icon
+    (Telegram រក្សាទុកជានិច្ច ទោះបីជាបង្ហាញ icon ផ្សេង)."""
+    text = src.text or src.caption or ""
+    entities = list(src.entities or []) + list(src.caption_entities or [])
+    out = []
+    for e in entities:
+        if getattr(e, "type", None) != "custom_emoji":
+            continue
+        ch = _utf16_slice(text, e.offset, e.length)
+        if ch:
+            out.append((ch, str(e.custom_emoji_id)))
+    # ── ក៏ចាប់យក Premium Emoji ដែលផ្ញើមកជា "Sticker" ដោយផ្ទាល់ (content_type=
+    # "sticker") ផងដែរ — ករណីនេះកើតឡើងញឹកញាប់ ពេលអ្នកប្រើផ្ញើ custom emoji
+    # តែម្នាក់ឯងពី emoji panel ដោយមិនវាយជាអក្សរ ឬ Forward វា ដោយខ្លួនវាមិនមែន
+    # text entity ទេ តែជា sticker.type == "custom_emoji" វិញ។ បើមិនចាប់ករណីនេះ
+    # ទេ សារនោះនឹងធ្លាក់ចូល content_type ដែលគ្មាន handler ណាដោះស្រាយសោះ —
+    # បណ្តាលឲ្យ Bot ស្ងាត់ស្ងៀមទាំងស្រុង គ្មាន reply អ្វីទាំងអស់។
+    sticker = getattr(src, "sticker", None)
+    if sticker is not None and getattr(sticker, "type", None) == "custom_emoji" \
+            and getattr(sticker, "custom_emoji_id", None):
+        ch = sticker.emoji or ""
+        if ch:
+            out.append((ch, str(sticker.custom_emoji_id)))
+    return out
+
+def _norm_vs(s):
+    """ដក Variation Selector-16 (U+FE0F) ចេញ សម្រាប់ធៀបធៀប emoji ដោយអត់ខ្ជិលរឹង —
+    Telegram ពេលខ្លះត្រឡប់ underlying char ដោយគ្មាន VS16 ខណៈ EMOJI_MAP key មាន
+    VS16 (ឬផ្ទុយមកវិញ), ធ្វើឲ្យការធៀប == ត្រង់ៗពីមុន ខុសទាំងដែលអ្នកប្រើជ្រើសត្រូវ
+    emoji ត្រឹមត្រូវ (bug ដើម្បីនាំឲ្យបង្ហាញ 'Emoji មិនត្រូវគ្នា!' ខុសឆ្គង)។"""
+    return (s or "").replace("\ufe0f", "")
+
+def _emoji_key_lookup(ch):
+    """រក key ពិតប្រាកដក្នុង EMOJI_MAP ដែលត្រូវនឹង ch ដោយអត់ខ្ជិលរឹងចំពោះ VS16។
+    ត្រឡប់ None បើរកមិនឃើញសោះ។"""
+    if ch in EMOJI_MAP:
+        return ch
+    norm = _norm_vs(ch)
+    for k in EMOJI_MAP:
+        if _norm_vs(k) == norm:
+            return k
+    return None
+
+# ═══════════════════════════════════════════════════════════
+#  PREMIUM EMOJI ID FINDER (admin-only utility)
+#  Reply command នេះទៅសារដែលមាន premium emoji — bot បង្ហាញទាំង custom_emoji_id
+#  និង unicode character ដើមដែលនៅពីក្រោម icon នីមួយៗ (មានប្រយោជន៍ដើម្បីដឹងថា
+#  emoji character មួយណានៅក្នុង EMOJI_MAP ដែលនឹងត្រូវផ្គូផ្គង)។
+# ═══════════════════════════════════════════════════════════
+def _emojiid_text(src_msg):
+    """Build the Custom Emoji ID report for a message. Returns None if none found."""
+    found = _extract_custom_emoji(src_msg)
+    if not found:
+        return None
+    lines = ["🆔 <b>Custom Emoji ID(s):</b>"]
+    for i, (ch, eid) in enumerate(found, 1):
+        known = "✅ មានក្នុង EMOJI_MAP" if ch in EMOJI_MAP else "⚠️ មិននៅក្នុង EMOJI_MAP"
+        lines.append(f"{i}. {ch} → <code>{eid}</code> ({known})")
+    return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════
+#  USER BLOCK / UNBLOCK BOT — Telegram my_chat_member update
+#  ពេល User ចុច Stop/Block bot → status = "kicked"
+#  ពេល User Restart/Unblock → status = "member"
+# ═══════════════════════════════════════════════════════════
+@bot.my_chat_member_handler()
+def on_my_chat_member(update):
+    try:
+        chat = update.chat
+        if getattr(chat, "type", None) != "private":
+            return  # មិនចាប់ group/channel
+        uid = chat.id
+        if uid == ADMIN_ID or uid in sub_admins:
+            return
+        new_status = (update.new_chat_member.status or "").lower()
+        old_status = (update.old_chat_member.status or "").lower() if update.old_chat_member else ""
+        # blocked / stopped bot
+        if new_status in ("kicked", "left"):
+            changed = _mark_user_blocked(uid, True)
+            # រក្សា name ពី Telegram បើមាន
+            try:
+                fu = update.from_user
+                if fu and str(uid) in users_db:
+                    if fu.first_name:
+                        users_db[str(uid)]["name"] = fu.first_name
+                    if fu.username:
+                        users_db[str(uid)]["username"] = fu.username
+                    _save(USERS_FILE, users_db)
+            except Exception:
+                pass
+            if changed:
+                _notify_admin_user_block(uid, blocked=True)
+                logger.info(f"[block] user {uid} blocked the bot")
+        # unblocked / restarted
+        elif new_status in ("member", "restricted") and old_status in ("kicked", "left"):
+            changed = _mark_user_blocked(uid, False)
+            if changed:
+                _notify_admin_user_block(uid, blocked=False)
+                logger.info(f"[block] user {uid} unblocked the bot")
+    except Exception as e:
+        logger.warning(f"[my_chat_member] error: {e}")
+
+@bot.message_handler(commands=["emojiid"])
+def cmd_emojiid(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    src = message.reply_to_message
+    if not src:
+        bot.reply_to(message, "សូម Reply command នេះទៅសារដែលមាន premium emoji ជាមុនសិន។")
+        return
+    report = _emojiid_text(src)
+    if not report:
+        bot.reply_to(message, "❌ រកមិនឃើញ premium/custom emoji ក្នុងសារនោះទេ។")
+        return
+    bot.reply_to(message, report, parse_mode="HTML")
+
+# ═══════════════════════════════════════════════════════════
+#  PREMIUM EMOJI AUTO-SET (admin-only) — លំដាប់ណាក៏បាន, ចាំបាច់មិនត្រូវ
+#  ផ្ញើម្តងទាំងអស់ទេ (អាចធ្វើម្តងមួយៗ ឬច្រើនដងតគ្នា) ។ Reply command នេះទៅសារ
+#  ណាមួយដែលមាន premium emoji — bot នឹងផ្គូផ្គង emoji ធម្មតាដែលនៅក្រោម icon
+#  នីមួយៗ ទៅនឹង custom_emoji_id ស្វ័យប្រវត្តិ (មិនអាស្រ័យលំដាប់) រួច save ជា
+#  អចិន្ត្រៃយ៍ទៅ EMOJI_MAP។ ធ្វើម្តងទៀតបានគ្រប់ពេលដើម្បីបន្ថែម/កែ emoji ថ្មី។
+# ═══════════════════════════════════════════════════════════
+def _apply_setemojis(src_msg):
+    """Extract premium emoji from src_msg, apply to EMOJI_MAP, save. Returns report text, or None if no emoji found."""
+    found = _extract_custom_emoji(src_msg)
+    if not found:
+        return None
+    lines = ["✅ <b>បានកំណត់ Emoji ដោយស្វ័យប្រវត្តិ:</b>\n"]
+    unknown = []
+    for ch, eid in found:
+        key = _emoji_key_lookup(ch)   # ✅ ធៀបដោយអត់ខ្ជិលរឹង VS16 (មុននេះ `ch in EMOJI_MAP`
+                                       # ត្រង់ៗ ធ្វើឲ្យខកខានផ្គូផ្គង emoji ត្រឹមត្រូវ)
+        if key:
+            EMOJI_MAP[key] = eid
+            _nk = key.replace("\ufe0f", "").replace("️", "")
+            if _nk and _nk != key:
+                EMOJI_MAP[_nk] = eid
+            lines.append(f"{key} → <code>{eid}</code>")
+        else:
+            unknown.append((ch, eid))
+    _persist_emoji_map()
+
+    if unknown:
+        lines.append(f"\n⚠️ {len(unknown)} emoji មិននៅក្នុងបញ្ជីស្គាល់ (បន្ថែមក្នុង EMOJI_MAP ដោយដៃបើត្រូវការ):")
+        for ch, eid in unknown:
+            lines.append(f"  {ch} → <code>{eid}</code>")
+
+    remaining = sum(1 for v in EMOJI_MAP.values() if not v)
+    lines.append(f"\n📊 សរុប: {sum(1 for v in EMOJI_MAP.values() if v)}/{len(EMOJI_MAP)} កំណត់រួច — នៅសល់ {remaining}")
+    lines.append("✅ អនុវត្តភ្លាម (message + button ថ្មី) — បើ keyboard ចាស់នៅ unicode សូម /start ម្ដងទៀត។")
+    return "\n".join(lines)
+
+@bot.message_handler(commands=["setemojis"])
+def cmd_setemojis(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    src = message.reply_to_message
+    if not src:
+        missing = [ch for ch, v in EMOJI_MAP.items() if not v]
+        bot.reply_to(message,
+            "សូម Reply command នេះទៅសារដែលមាន Premium Emoji (លំដាប់ណាក៏បាន, "
+            "ចំនួនប៉ុន្មានក៏បាន — ធ្វើម្តងច្រើនដងក៏បាន)។\n\n"
+            f"📊 កំណត់រួចហើយ: {sum(1 for v in EMOJI_MAP.values() if v)}/{len(EMOJI_MAP)}\n"
+            f"នៅសល់ {len(missing)} emoji។ ប្រើ /emojilist ដើម្បីមើលបញ្ជីទាំងអស់។",
+            parse_mode="HTML")
+        return
+    report = _apply_setemojis(src)
+    if not report:
+        bot.reply_to(message, "❌ រកមិនឃើញ premium/custom emoji ក្នុងសារនោះទេ។")
+        return
+    bot.reply_to(message, report, parse_mode="HTML")
+
+# ═══════════════════════════════════════════════════════════
+#  PREMIUM EMOJI STATUS (admin-only) — មើលថា emoji មួយណាទាន់កំណត់ /
+#  មិនទាន់កំណត់ premium icon
+# ═══════════════════════════════════════════════════════════
+def _emoji_status_text():
+    done = [ch for ch, v in EMOJI_MAP.items() if v]
+    missing = [ch for ch, v in EMOJI_MAP.items() if not v]
+    lines = [f"📊 <b>Premium Emoji Status</b> — {len(done)}/{len(EMOJI_MAP)} កំណត់រួច\n"]
+    if done:
+        lines.append("✅ រួចហើយ: " + " ".join(done))
+    if missing:
+        lines.append("\n⬜ នៅសល់ (fallback ទៅ unicode ធម្មតា): " + " ".join(missing))
+    return "\n".join(lines)
+
+@bot.message_handler(commands=["emojilist"])
+def cmd_emojilist(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    bot.reply_to(message, _emoji_status_text(), parse_mode="HTML")
+
+# ═══════════════════════════════════════════════════════════
+#  PREMIUM EMOJI PREVIEW (admin-only) — បង្ហាញ icon ជាក់ស្តែងទាំងអស់ក្នុងសារ
+#  តែមួយ ដើម្បីឲ្យ Admin មើលឃើញផ្ទាល់ភ្នែកថា emoji នីមួយៗត្រូវបានប្តូរ
+#  ត្រឹមត្រូវឬអត់ (មិនមែនគ្រាន់តែ checkmark ជាអក្សរនៅក្នុង /emojilist ទេ)
+# ═══════════════════════════════════════════════════════════
+def _build_emoji_preview():
+    """សាងសង់ (text, entities, count) សម្រាប់បង្ហាញ Premium Emoji ទាំងអស់ដែល
+    បានកំណត់រួម គ្នាក្នុងសារតែមួយ។ offset/length គិតជា UTF-16 code units
+    ដូចលក្ខណៈពិតរបស់ MessageEntity (សំខាន់ណាស់សម្រាប់ flag emoji ដូច 🇰🇭
+    ដែលមាន 4 units ក្រៅពី 1)."""
+    done = [(ch, eid) for ch, eid in EMOJI_MAP.items() if eid]
+    if not done:
+        return "", [], 0
+    parts, entities, offset = [], [], 0
+    for ch, eid in done:
+        parts.append(ch)
+        length = len(ch.encode("utf-16-le")) // 2
+        entities.append(_MessageEntity(type="custom_emoji", offset=offset,
+                                        length=length, custom_emoji_id=eid))
+        offset += length + 1  # +1 សម្រាប់ដកឃ្លាបំបែក
+        parts.append(" ")
+    text = "".join(parts).rstrip()
+    return text, entities, len(done)
+
+# ═══════════════════════════════════════════════════════════
+#  START
+# ═══════════════════════════════════════════════════════════
+
+@bot.callback_query_handler(func=lambda c: (c.data or "") == "ref:howto")
+def cb_ref_howto(call):
+    try:
+        bot.answer_callback_query(call.id, "មុខងារណែនាំមិត្តត្រូវបានបិទ", show_alert=True)
+    except Exception:
+        pass
+    return
+    # disabled below
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception:
+        pass
+    uid = call.from_user.id
+    lang = user_lang.get(str(uid), "kh")
+    rate = _ref_rate_pct()
+    link = _ref_link(uid)
+    if lang == "kh":
+        msg = (
+            f"📋 <b>របៀប Forward ឲ្យមិត្តចូល</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"1️⃣ ចុច «📤 ចែករំលែក» → រើស Chat / Group\n"
+            f"   ឬ ចុចសារ​ណែនាំ → Forward\n\n"
+            f"2️⃣ មិត្តចុចតំណក្នុងសារ → បើក <b>Bot</b>\n\n"
+            f"3️⃣ មិត្តដាក់លុយ → អ្នកទទួល <b>{rate:.0f}%</b>\n\n"
+            f"🔗 តំណរបស់អ្នក:\n<code>{link}</code>\n\n"
+            f"💡 គន្លឹះ: Forward ទៅ Group / Channel មានអ្នកច្រើន = កម្រៃច្រើន"
+        )
+    else:
+        msg = (
+            f"📋 <b>How to forward</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"1) Tap Share → pick a chat\n"
+            f"2) Friend opens your link → Bot\n"
+            f"3) They deposit → you earn {rate:.0f}%\n\n"
+            f"🔗 <code>{link}</code>"
+        )
+    try:
+        bot.send_message(uid, msg, parse_mode="HTML", disable_web_page_preview=True)
+    except Exception as e:
+        logger.debug(f"[ref howto] {e}")
+
+
+@bot.message_handler(commands=["start"])
+def cmd_start(message):
+    uid = message.chat.id
+    waiting.pop(uid, None)
+    _track_user(message)
+    # Deep link: /start ref123456789
+    try:
+        parts = (message.text or "").split(maxsplit=1)
+        payload = (parts[1].strip() if len(parts) > 1 else "")
+        if payload.lower().startswith("ref"):
+            ref_raw = payload[3:].lstrip("_").strip()
+            if ref_raw.isdigit():
+                ok, reason = _ref_bind(uid, ref_raw)
+                if ok:
+                    try:
+                        bot.send_message(
+                            uid,
+                            "✅ <b>ភ្ជាប់ណែនាំមិត្តរួច!</b>\n"
+                            f"អ្នកត្រូវបានណែនាំដោយ <code>{ref_raw}</code>",
+                            parse_mode="HTML",
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        bot.send_message(
+                            int(ref_raw),
+                            f"🎉 <b>មានមិត្តថ្មី!</b>\n"
+                            f"👤 <code>{uid}</code> ចូលតាមតំណរបស់អ្នក\n"
+                            f"ពេលគេដាក់លុយ អ្នកនឹងទទួល {float(referral_db.get('rate') or REFERRAL_RATE)*100:.0f}%",
+                            parse_mode="HTML",
+                        )
+                    except Exception:
+                        pass
+                elif reason == "already":
+                    pass  # silent
+                elif reason == "self":
+                    try:
+                        bot.send_message(uid, "❌ មិនអាចណែនាំខ្លួនឯងបានទេ។")
+                    except Exception:
+                        pass
+    except Exception as _se:
+        logger.debug(f"[referral] start payload: {_se}")
+    if is_banned(uid):
+        bot.send_message(uid, t(uid, "banned")); return
+    if uid == ADMIN_ID:
+        _multibot_hint = "\n🤖 /newbot បង្កើត Bot ថ្មី · /mybots គ្រប់គ្រង Bot រង\n" if IS_MASTER else ""
+        bot.send_message(uid,
+            f"🤖 <b>Admin — {_bot_brand()}</b>\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"💹 Profit <b>{_smm_profit_pct():.0f}%</b> · ⏱ Poll <b>{smm_poll.get('interval',5)}s</b>\n"
+            f"📦 Services <b>{len(smm_services)}</b>\n"
+            f"━━━━━━━━━━━━━━{_multibot_hint}"
+            f"ជ្រើស <b>ផ្នែក</b> ខាងក្រោម",
+            parse_mode="HTML", reply_markup=admin_kb())
+        return
+    if uid in sub_admins:
+        bot.send_message(uid,
+            f"🛡️ <b>Sub Admin Panel — {_bot_brand()}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 <code>{uid}</code>\n"
+            f"📊 Services: <b>{len(smm_services)}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━",
+            parse_mode="HTML", reply_markup=sub_admin_kb())
+        return
+    # ── Force-Subscribe gate (User ធម្មតាតែប៉ុណ្ណោះ) ──
+    if not _is_channel_member(uid):
+        bot.send_message(uid, _force_sub_gate_text(), parse_mode="HTML",
+                         reply_markup=_force_sub_kb())
+        return
+    if str(uid) not in user_lang:
+        bot.send_message(uid,
+            "👋 <b>សូមជ្រើសភាសា / Choose language</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            "🇰🇭 ខ្មែរ   ·   🇬🇧 English",
+            parse_mode="HTML", reply_markup=lang_select_kb())
+        return
+    _show_welcome(uid)
+
+WELCOME_SETTINGS_FILE = _dpath("smm_welcome.json")
+welcome_cfg = _load(WELCOME_SETTINGS_FILE, {"photo_id": ""})
+
+TUTORIAL_VIDEO_FILE = _dpath("smm_tutorial.json")
+tutorial_cfg = _load(TUTORIAL_VIDEO_FILE, {"file_id": ""})
+
+# ── វីដេអូ TikTok Khmer ជោគជ័យ — ផ្ញើទៅ User ភ្លាមៗពេលទិញ Package
+#    🇰🇭 TikTok Khmer ជោគជ័យ (បង្ហាញរបៀប Accept Promote Assistant) ──
+TIKTOK_SUCCESS_VIDEO_FILE = _dpath("smm_tiktok_success_video.json")
+tiktok_success_video_cfg = _load(TIKTOK_SUCCESS_VIDEO_FILE, {"file_id": ""})
+
+# ═══════════════════════════════════════════════════════════
+#  MANUAL DEPOSIT (ដាក់លុយដោយដៃ) — User ស្កេន QR ថេរដែល Admin កំណត់ផ្ទាល់
+#  ផ្ញើភស្តុតាង (Screenshot) មក Admin ត្រួតពិនិត្យ + អនុម័តដោយដៃ
+# ═══════════════════════════════════════════════════════════
+MANUAL_QR_FILE = _dpath("manual_qr.json")
+manual_qr_cfg  = _load(MANUAL_QR_FILE, {"enabled": False, "photo_id": "", "info": ""})
+
+MANUAL_DEP_FILE = _dpath("manual_deposits.json")
+manual_deps     = _load(MANUAL_DEP_FILE, {})
+
+def _gen_manual_dep_id():
+    return "MD" + str(int(time.time()))[-8:] + str(len(manual_deps) % 100).zfill(2)
+
+def manual_qr_admin_kb():
+    on = manual_qr_cfg.get("enabled", False)
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("📷 ប្តូររូប QR", callback_data="mqr:photo", color="active"))
+    kb.add(InlineKeyboardButton("✏️ ប្តូរព័ត៌មាន (ឈ្មោះ/លេខគណនី)", callback_data="mqr:info", color="active"))
+    kb.add(InlineKeyboardButton(("🔴 បិទ" if on else "🟢 បើក") + " Manual Deposit",
+                                 callback_data="mqr:toggle", color=("danger" if on else "success")))
+    return kb
+
+def _manual_qr_status_text():
+    on = manual_qr_cfg.get("enabled", False)
+    has_photo = bool(manual_qr_cfg.get("photo_id"))
+    return (f"🧾 <b>QR ដាក់លុយដោយដៃ (Manual Deposit)</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"ស្ថានភាព: {'🟢 បើក' if on else '🔴 បិទ'}\n"
+            f"រូប QR: {'✅ បានកំណត់' if has_photo else '❌ មិនទាន់មាន'}\n"
+            f"ព័ត៌មាន: {manual_qr_cfg.get('info') or '<i>មិនទាន់មាន</i>'}\n\n"
+            f"👇 គ្រប់គ្រង:")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("mqr:"))
+def cb_mqr_admin(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID:
+        bot.answer_callback_query(call.id); return
+    action = call.data.split(":", 1)[1]
+    if action == "photo":
+        bot.answer_callback_query(call.id)
+        waiting[uid] = "await_manual_qr_photo"
+        bot.send_message(uid, "📷 សូមផ្ញើរូប QR (KHQR / ធនាគារ) ដែលចង់ឲ្យ User ស្កេន:",
+                          reply_markup=cancel_kb())
+    elif action == "info":
+        bot.answer_callback_query(call.id)
+        waiting[uid] = "await_manual_qr_info"
+        bot.send_message(uid,
+            "✏️ សូមផ្ញើព័ត៌មានបង្ហាញអោយ User (ឧ. ឈ្មោះម្ចាស់គណនី, លេខទូរស័ព្ទ):",
+            reply_markup=cancel_kb())
+    elif action == "toggle":
+        manual_qr_cfg["enabled"] = not manual_qr_cfg.get("enabled", False)
+        if manual_qr_cfg["enabled"] and not manual_qr_cfg.get("photo_id"):
+            manual_qr_cfg["enabled"] = False
+            bot.answer_callback_query(call.id, "❌ សូមកំណត់រូប QR ជាមុនសិន!", show_alert=True)
+        else:
+            _save(MANUAL_QR_FILE, manual_qr_cfg)
+            bot.answer_callback_query(call.id, "✅ រួចរាល់")
+        try:
+            bot.edit_message_text(_manual_qr_status_text(), chat_id=uid,
+                message_id=call.message.message_id, parse_mode="HTML", reply_markup=manual_qr_admin_kb())
+        except Exception as _e:
+            logger.debug(f"[silent] {_e}")
+
+# ═══════════════════════════════════════════════════════════
+#  FORCE-SUBSCRIBE (ការពារ User ក្លែងក្លាយ) — តម្រូវឲ្យ User ចូល Channel
+#  មុននឹងប្រើប្រាស់ Bot បាន។ Admin/Sub-admin មិនប៉ះពាល់ទេ។
+# ═══════════════════════════════════════════════════════════
+FORCE_SUB_FILE = _dpath("force_sub.json")
+force_sub_cfg  = _load(FORCE_SUB_FILE, {"enabled": False, "channel_id": "", "channel_link": ""})
+
+def _is_channel_member(uid):
+    """ត្រឡប់ True បើ User ជាសមាជិក Channel ដែលកំណត់ (ឬបើ Force-sub មិនបានបើក
+    ឬ channel_id មិនទាន់កំណត់)។ ប្រសិនបើហៅ Telegram API មិនកើត (ឧ. Bot មិន
+    មែនជា admin របស់ channel នោះ, ឬ channel_id ខុស) — fail-open (ត្រឡប់ True)
+    ដើម្បីកុំឲ្យ User ទាំងអស់ ជាប់គាំងទាំងស្រុងដោយសារកំហុស config តែមួយ។"""
+    if not force_sub_cfg.get("enabled"):
+        return True
+    ch = force_sub_cfg.get("channel_id", "")
+    if not ch:
+        return True
+    try:
+        m = bot.get_chat_member(ch, uid)
+        return m.status in ("member", "administrator", "creator")
+    except Exception as e:
+        logger.warning(f"⚠️ Force-sub check failed (fail-open): {e}")
+        return True
+
+def _force_sub_kb():
+    kb = InlineKeyboardMarkup()
+    link = force_sub_cfg.get("channel_link", "")
+    if link:
+        kb.add(InlineKeyboardButton("📢 ចូល Channel", url=link, color="active"))
+    kb.add(InlineKeyboardButton("✅ ខ្ញុំចូលរួចហើយ", callback_data="fsub:check", color="success"))
+    return kb
+
+def _force_sub_gate_text():
+    return ("🔒 <b>សូមចូល Channel មុននឹងប្រើប្រាស់ Bot!</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "ដើម្បីការពារ User ក្លែងក្លាយ និងទទួលព័ត៌មានថ្មីៗ សូម Join Channel ខាងក្រោម "
+            "រួចចុច ✅ ខ្ញុំចូលរួចហើយ")
+
+
+def _force_sub_status_text():
+    on = force_sub_cfg.get("enabled", False)
+    ch = force_sub_cfg.get("channel_id") or "(មិនទាន់កំណត់)"
+    link = force_sub_cfg.get("channel_link") or "(មិនទាន់កំណត់)"
+    return (
+        f"📢 <b>Force Subscribe</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"ស្ថានភាព: <b>{'🟢 បើក' if on else '🔴 បិទ'}</b>\n"
+        f"Channel ID: <code>{ch}</code>\n"
+        f"Link: <code>{link}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"👉 បើបើក — User ធម្មតាត្រូវ Join Channel មុននឹងប្រើ Bot បាន\n"
+        f"(Admin / Sub-admin មិនប៉ះពាល់)\n\n"
+        f"💡 Bot ត្រូវជា <b>Admin</b> នៃ Channel នោះ ដើម្បីពិនិត្យសមាជិកភាពបាន។"
+    )
+
+def _force_sub_admin_kb():
+    on = force_sub_cfg.get("enabled", False)
+    kb = InlineKeyboardMarkup()
+    kb.row(
+        InlineKeyboardButton("🟢 បើក" + (" ✅" if on else ""), callback_data="fsubcfg:on",
+                             color=("success" if on else "active")),
+        InlineKeyboardButton("🔴 បិទ" + (" ✅" if not on else ""), callback_data="fsubcfg:off",
+                             color=("danger" if not on else "active")),
+    )
+    kb.add(InlineKeyboardButton("✏️ កំណត់ Channel ID", callback_data="fsubcfg:setid", color="progress"))
+    kb.add(InlineKeyboardButton("🔗 កំណត់ Channel Link", callback_data="fsubcfg:setlink", color="progress"))
+    return kb
+
+@bot.callback_query_handler(func=lambda c: c.data == "fsub:check")
+def cb_fsub_check(call):
+    uid = call.message.chat.id
+    bot.answer_callback_query(call.id)
+    if _is_channel_member(uid):
+        try:
+            bot.edit_message_text("✅ <b>អ្នកបានចូល Channel រួចហើយ!</b> កំពុងបើក Bot...",
+                chat_id=uid, message_id=call.message.message_id, parse_mode="HTML")
+        except Exception as _e:
+            logger.debug(f"[silent] {_e}")
+        if str(uid) not in user_lang:
+            bot.send_message(uid,
+                "សួស្តី! 👋 ជ្រើសភាសាដែលអ្នកចូលចិត្តសិន\n<i>Hi! Pick your language first 😊</i>",
+                parse_mode="HTML", reply_markup=lang_select_kb())
+        else:
+            _show_welcome(uid)
+    else:
+        bot.answer_callback_query(call.id, "❌ អ្នកមិនទាន់ចូល Channel ទេ! សូម Join រួចចុចម្តងទៀត។", show_alert=True)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("fsubcfg:"))
+def cb_fsubcfg(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID:
+        bot.answer_callback_query(call.id); return
+    action = call.data.split(":", 1)[1]
+    if action == "on":
+        force_sub_cfg["enabled"] = True
+        _save(FORCE_SUB_FILE, force_sub_cfg)
+        bot.answer_callback_query(call.id, "✅ បើក Force Subscribe")
+    elif action == "off":
+        force_sub_cfg["enabled"] = False
+        _save(FORCE_SUB_FILE, force_sub_cfg)
+        bot.answer_callback_query(call.id, "🔴 បិទ Force Subscribe")
+    elif action == "setid":
+        bot.answer_callback_query(call.id)
+        waiting[uid] = "await_fsub_channel_id"
+        bot.send_message(uid,
+            "📢 ផ្ញើ <b>Channel ID</b>\n"
+            "ឧ: <code>-1001234567890</code>\n"
+            "💡 Bot ត្រូវជា Admin នៃ Channel នោះ!",
+            parse_mode="HTML", reply_markup=cancel_kb())
+        return
+    elif action == "setlink":
+        bot.answer_callback_query(call.id)
+        waiting[uid] = "await_fsub_channel_link"
+        bot.send_message(uid,
+            "🔗 ផ្ញើ <b>Channel Link</b>\n"
+            "ឧ: <code>https://t.me/yourchannel</code>",
+            parse_mode="HTML", reply_markup=cancel_kb())
+        return
+    try:
+        bot.edit_message_text(_force_sub_status_text(),
+            chat_id=uid, message_id=call.message.message_id,
+            parse_mode="HTML", reply_markup=_force_sub_admin_kb())
+    except Exception as _e:
+        logger.debug(f"[silent] {_e}")
+
+
+def _save_welcome_photo(file_id):
+    welcome_cfg["photo_id"] = file_id
+    _save(WELCOME_SETTINGS_FILE, welcome_cfg)
+
+def _save_tutorial_video(file_id):
+    tutorial_cfg["file_id"] = file_id
+    _save(TUTORIAL_VIDEO_FILE, tutorial_cfg)
+
+def _save_tiktok_success_video(file_id):
+    tiktok_success_video_cfg["file_id"] = file_id
+    _save(TIKTOK_SUCCESS_VIDEO_FILE, tiktok_success_video_cfg)
+
+def _tiktok_success_video_caption():
+    """Caption ដូចក្នុងវីដេអូគំរូ (Admin @rsbooster_bot) — ប្រើតែ emoji ដែលមាន
+    ស្រាប់ក្នុងបញ្ជី EMOJI_MAP (📢 💰 ✅ 🤖) ដូច្នេះបើ Admin បានកំណត់ Premium
+    Emoji សម្រាប់វារួចហើយ វានឹងបង្ហាញជា Premium icon ភ្លាមៗ (មើល
+    _entities_for_emoji_text)។ @username ប្តូរស្វ័យប្រវត្តិទៅតាម Bot ខ្លួនឯង
+    (Master ឬ Sub Bot នីមួយៗ) ដូច _tutorial_caption()"""
+    return (f"📢 ពេលបងប្អូនដាក់ Like ខ្មែរ រូចសូមចាំ tiktok លោត notification "
+            f"បែបនេះរូចបងប្អូនធ្វើតាមនឹងមក វានឹងដំណើរការ 💰\n\n"
+            f"សម្រាប់តែបងប្អូនអត់ដែរដាក់ពីមុនប៉ុណ្ណោះ បើបងប្អូនធ្លាប់ហើយ"
+            f"មិនបាច់ចាំចុចទៀតទេ ✅\n\n"
+            f"🤖 លីង BOT SMM : @{_bot_username()}")
+
+def _tutorial_caption():
+    """Caption ខ្លីៗសម្រាប់វីដេអូបង្រៀន — ប្រើតែ emoji ដែលមានស្រាប់ក្នុងបញ្ជី
+    /setemojis (💡, 🤖) ដូច្នេះបើ Admin បានកំណត់ Premium Emoji សម្រាប់វា
+    រួចហើយ វានឹងបង្ហាញជា Premium icon ភ្លាមៗ (មើល _entities_for_emoji_text)។
+    @username ប្តូរស្វ័យប្រវត្តិទៅតាម Bot ខ្លួនឯង (Master ឬ Sub Bot នីមួយៗ)"""
+    return (f"💡 នេះជាវីដេអូដែលបង្ហាញនូវរបៀបប្រើប្រាស់\n"
+            f"🤖 @{_bot_username()}")
+
+def _show_welcome(uid):
+    b       = bal(uid)
+    custom_msg = welcome_cfg.get("custom_msg", "")
+    if custom_msg:
+        caption = custom_msg.format(b) if "{}" in custom_msg else custom_msg + f"\n💳 Balance: <b>${b:.2f}</b>"
+    elif BOT_WELCOME_MSG:
+        caption = BOT_WELCOME_MSG.format(b) if "{}" in BOT_WELCOME_MSG else BOT_WELCOME_MSG + f"\n💳 Balance: <b>${b:.2f}</b>"
+    else:
+        caption = t(uid, "welcome", b)
+    photo_id = welcome_cfg.get("photo_id", "")
+    video_id = tutorial_cfg.get("file_id", "")
+    if photo_id:
+        try:
+            bot.send_photo(
+                uid,
+                photo=photo_id,
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=(None if video_id else main_kb(uid))
+            )
+        except Exception:
+            bot.send_message(uid, caption, parse_mode="HTML",
+                              reply_markup=(None if video_id else main_kb(uid)))
+    else:
+        # Fallback: text only
+        bot.send_message(uid, caption, parse_mode="HTML",
+                          reply_markup=(None if video_id else main_kb(uid)))
+    # ── វីដេអូបង្រៀន (ដូចកន្លែង 💡 របៀបប្រើប្រាស់) — ផ្ញើបន្ទាប់ពី Welcome ──
+    if video_id:
+        try:
+            bot.send_video(
+                uid,
+                video_id,
+                caption=_tutorial_caption(),
+                caption_entities=_entities_for_emoji_text(_tutorial_caption()),
+                reply_markup=main_kb(uid)
+            )
+        except Exception as e:
+            logger.warning(f"⚠️ send tutorial video (welcome) failed: {e}")
+            bot.send_message(uid, t(uid, "how_to_use"), parse_mode="HTML", reply_markup=main_kb(uid))
+
+# ═══════════════════════════════════════════════════════════
+#  CALLBACKS
+# ═══════════════════════════════════════════════════════════
+@bot.callback_query_handler(func=lambda c: c.data.startswith("setlang:"))
+def cb_setlang(call):
+    uid  = call.message.chat.id
+    lang = call.data.split(":")[1]
+    user_lang[str(uid)] = lang
+    _save(LANG_FILE, user_lang)
+    bot.answer_callback_query(call.id, t(uid, "lang_set"))
+    try: bot.delete_message(uid, call.message.message_id)
+    except Exception as _e: logger.debug(f"[silent] {_e}")
+    _show_welcome(uid)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("poll:"))
+def cb_poll(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID: bot.answer_callback_query(call.id); return
+    sec = int(call.data.split(":")[1])
+    smm_poll["interval"] = sec; _save(SMM_POLL_FILE, smm_poll)
+    bot.answer_callback_query(call.id, f"✅ Poll = {sec}s")
+    try: bot.edit_message_text(f"✅ Poll Speed = <b>{sec} វិ</b>",
+                               chat_id=uid, message_id=call.message.message_id, parse_mode="HTML")
+    except Exception as _e: logger.debug(f"[silent] {_e}")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("depbonus:"))
+def cb_depbonus(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID and uid not in sub_admins:
+        bot.answer_callback_query(call.id); return
+    action = call.data.split(":", 1)[1]
+    if action == "toggle":
+        dep_bonus_cfg["enabled"] = not dep_bonus_cfg.get("enabled", True)
+        _save(DEP_BONUS_FILE, dep_bonus_cfg)
+        bot.answer_callback_query(call.id, "✅ បានប្តូរស្ថានភាព")
+        btns = InlineKeyboardMarkup()
+        toggle_label = "🔴 បិទ Auto Bonus" if dep_bonus_cfg.get("enabled", True) else "🟢 បើក Auto Bonus"
+        btns.add(InlineKeyboardButton(toggle_label, callback_data="depbonus:toggle",
+                                      color=("danger" if dep_bonus_cfg.get("enabled", True) else "active")))
+        btns.add(InlineKeyboardButton("✏️ កែ % / ចំនួនអប្បបរមា", callback_data="depbonus:edit", color="progress"))
+        try:
+            bot.edit_message_text(
+                f"{_dep_bonus_status_text()}\n━━━━━━━━━━━━━━━━━━\n"
+                f"👉 អ្នកប្រើដាក់លុយចាប់ពី <b>${float(dep_bonus_cfg.get('min_amount',1.0)):.2f}</b> ឡើងទៅ "
+                f"នឹងទទួល Bonus <b>{float(dep_bonus_cfg.get('pct',5.0)):.0f}%</b> បញ្ចូល Balance ដោយស្វ័យប្រវត្តិ "
+                f"(បូកបន្ថែមលើ Promo Code ប្រសិនបើមាន)។",
+                chat_id=uid, message_id=call.message.message_id, parse_mode="HTML", reply_markup=btns)
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        return
+    if action == "edit":
+        bot.answer_callback_query(call.id)
+        waiting[uid] = {"step": "depbonus_edit"}
+        bot.send_message(uid,
+            f"✏️ <b>កែ Bonus ដាក់លុយ</b>\n"
+            f"បច្ចុប្បន្ន: ចាប់ពី ${float(dep_bonus_cfg.get('min_amount',1.0)):.2f} → {float(dep_bonus_cfg.get('pct',5.0)):.0f}%\n\n"
+            f"ផ្ញើជា <code>ចំនួនអប្បបរមា,ភាគរយ</code>\nឧ: <code>1,5</code> (ដាក់ $1 ឡើងទៅ ទទួល 5%)",
+            parse_mode="HTML", reply_markup=cancel_kb())
+        return
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("udisc:"))
+def cb_udisc(call):
+    """🏷️ User Discount — បញ្ចុះតម្លៃសម្រាប់តែ TikTok Khmer"""
+    uid = call.message.chat.id
+    if uid != ADMIN_ID and uid not in sub_admins:
+        bot.answer_callback_query(call.id); return
+    parts = call.data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+    if action == "list":
+        bot.answer_callback_query(call.id)
+        try:
+            bot.edit_message_text(_user_discount_admin_text(),
+                                  chat_id=uid, message_id=call.message.message_id,
+                                  parse_mode="HTML", reply_markup=_user_discount_admin_kb())
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        return
+    if action == "add":
+        bot.answer_callback_query(call.id)
+        waiting[uid] = {"step": "udisc_add"}
+        bot.send_message(uid,
+            "➕ <b>បន្ថែម / កែ បញ្ចុះតម្លៃ User</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "ផ្ញើជា: <code>TelegramID,ភាគរយ</code>\n"
+            "ឧ: <code>123456789,10</code> = User នេះបាន 10% លើ TikTok Khmer\n"
+            "ឧ: <code>123456789,15,VIP</code> = 15% + note VIP\n\n"
+            "💡 បើ User មានរួចហើយ នឹងកែ % ថ្មីជំនួស។",
+            parse_mode="HTML", reply_markup=cancel_kb())
+        return
+    if action == "del":
+        bot.answer_callback_query(call.id)
+        if not user_discounts:
+            bot.send_message(uid, "❌ គ្មាន User ក្នុងបញ្ជី", reply_markup=admin_kb()); return
+        kb = InlineKeyboardMarkup()
+        for u_id, cfg in list(user_discounts.items())[:25]:
+            pct = float(cfg.get("pct", 0) or 0)
+            u = users_db.get(str(u_id), {})
+            name = (u.get("name") or "?")[:12]
+            kb.add(InlineKeyboardButton(
+                f"🗑️ {name} ({u_id}) {pct:.0f}%",
+                callback_data=f"udisc:rm:{u_id}", color="danger"))
+        kb.add(InlineKeyboardButton("🔙 ត្រឡប់", callback_data="udisc:list", color="inactive"))
+        bot.send_message(uid, "🗑️ ចុច User ដែលចង់លុបចេញពីបញ្ជីបញ្ចុះតម្លៃ:",
+                         reply_markup=kb)
+        return
+    if action == "rm" and len(parts) >= 3:
+        target = parts[2]
+        if target in user_discounts:
+            user_discounts.pop(target)
+            _save(USER_DISCOUNT_FILE, user_discounts)
+            bot.answer_callback_query(call.id, f"✅ លុប {target}")
+        else:
+            bot.answer_callback_query(call.id, "❌ រកមិនឃើញ")
+        try:
+            bot.edit_message_text(_user_discount_admin_text(),
+                                  chat_id=uid, message_id=call.message.message_id,
+                                  parse_mode="HTML", reply_markup=_user_discount_admin_kb())
+        except Exception:
+            bot.send_message(uid, _user_discount_admin_text(), parse_mode="HTML",
+                             reply_markup=_user_discount_admin_kb())
+        return
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("qrcd:"))
+def cb_qrcooldown(call):
+    """⏳ QR Cooldown — ការពារ Spam បង្កើត QR ។ Admin/Sub-admin កែបានតែម្នាក់ (v14)"""
+    uid = call.message.chat.id
+    if uid != ADMIN_ID and uid not in sub_admins:
+        bot.answer_callback_query(call.id); return
+    action = call.data.split(":", 1)[1]
+    if action == "off":
+        dep_qr_cooldown_cfg["seconds"] = 0
+        _save(DEP_QR_COOLDOWN_FILE, dep_qr_cooldown_cfg)
+        bot.answer_callback_query(call.id, "✅ Cooldown បិទ")
+        try:
+            bot.edit_message_text(_dep_qr_cooldown_status_text(),
+                                  chat_id=uid, message_id=call.message.message_id, parse_mode="HTML")
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        return
+    if action == "edit":
+        bot.answer_callback_query(call.id)
+        waiting[uid] = {"step": "qrcooldown_edit"}
+        bot.send_message(uid,
+            f"✏️ <b>កែ QR Cooldown</b>\n"
+            f"បច្ចុប្បន្ន: <b>{int(dep_qr_cooldown_cfg.get('seconds', DEP_QR_COOLDOWN_SEC))} វិនាទី</b>\n\n"
+            f"ផ្ញើចំនួន<b>វិនាទី</b>ថ្មី (ឧ: <code>15</code>) — ផ្ញើ <code>0</code> ដើម្បីបិទ Cooldown:",
+            parse_mode="HTML", reply_markup=cancel_kb())
+        return
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("dep:"))
+def cb_dep(call):
+    uid     = call.message.chat.id
+    uid_str = str(uid)
+    lang    = get_lang(uid)
+    val     = call.data[4:]
+    bot.answer_callback_query(call.id)
+
+    if val == "menu":
+        val = "custom"  # re-engage CTA → custom amount
+
+    # ── ជ្រើស amount preset ──
+    if val.startswith("amt:"):
+        try:
+            amount = float(val.split(":")[1])
+            waiting.pop(uid, None)
+            _process_deposit(uid, uid_str, amount, None)
+        except Exception as e:
+            logger.exception(f"[cb_dep] amt failed uid={uid}: {e}")
+            try:
+                bot.send_message(uid,
+                    f"⚠️ <b>មិនអាចបង្កើត QR បានទេ</b>\n"
+                    f"<code>{type(e).__name__}: {e}</code>\n"
+                    f"សូមទំនាក់ Admin ឬព្យាយាមម្តងទៀត។",
+                    parse_mode="HTML")
+            except Exception:
+                pass
+        return
+
+    # ── custom amount ──
+    if val == "custom":
+        waiting[uid] = {"step": "dep_custom_amt"}
+        bot.send_message(uid,
+            "✏️ <b>វាយចំនួន (USD):</b>\nឧ: <code>3</code> ឬ <code>7.50</code>" if lang=="kh" else
+            "✏️ <b>Enter amount (USD):</b>\ne.g. <code>3</code> or <code>7.50</code>",
+            parse_mode="HTML", reply_markup=cancel_kb())
+        return
+
+    # ── Manual Deposit (QR ថេរ + ភស្តុតាង) ──
+    if val == "manual":
+        if not (manual_qr_cfg.get("enabled") and manual_qr_cfg.get("photo_id")):
+            bot.send_message(uid, "❌ Manual Deposit មិនទាន់មានទេ។", reply_markup=main_kb(uid))
+            return
+        waiting[uid] = "await_manual_dep_amount"
+        info = manual_qr_cfg.get("info") or ""
+        caption = (f"🧾 <b>ដាក់លុយដោយដៃ (Manual Deposit)</b>\n"
+                   f"━━━━━━━━━━━━━━━━━━\n"
+                   f"{info}\n\n"
+                   f"👇 ស្កេន QR ខាងលើ ផ្ទេរប្រាក់ រួចវាយចំនួនប្រាក់ដែលបានផ្ទេរ:")
+        try:
+            _pp = manual_qr_cfg.get("photo_path") or ""
+            _full = _dpath(_pp) if _pp else ""
+            if _full and os.path.exists(_full):
+                with open(_full, "rb") as _fh:   # clone: upload the stored file (a master file_id is invalid here)
+                    bot.send_photo(uid, _fh, caption=caption, parse_mode="HTML", reply_markup=cancel_kb())
+            else:
+                bot.send_photo(uid, manual_qr_cfg["photo_id"], caption=caption,
+                                parse_mode="HTML", reply_markup=cancel_kb())
+        except Exception as _e:
+            logger.warning(f"[manual_qr] send_photo failed: {_e}")
+            bot.send_message(uid, caption, parse_mode="HTML", reply_markup=cancel_kb())
+        return
+
+def _process_mdep_action(call, tb):
+    """ដំណើរការ mdep: callback (អនុម័ត/បដិសេធ ការដាក់លុយដោយដៃ)។ `tb` គឺ bot
+    instance ដែលទទួល callback នេះ (bot service ឬ Payment Bot ដាច់ដោយឡែក) —
+    ប្រើ `tb` សម្រាប់ answer/edit សារ notify, ប៉ុន្តែប្រើ `bot` (service bot)
+    ជានិច្ចសម្រាប់ផ្ញើសារទៅកាន់ User ព្រោះ User មាន chat ជាមួយ service bot
+    ប៉ុណ្ណោះ មិនមែនជាមួយ Payment Bot ទេ។"""
+    uid = call.message.chat.id
+    if uid != ADMIN_ID:
+        tb.answer_callback_query(call.id); return
+    _, action, dep_id = call.data.split(":", 2)
+    dep = manual_deps.get(dep_id)
+    if not dep:
+        tb.answer_callback_query(call.id, "❌ រកមិនឃើញសំណើនេះទេ (ប្រហែលត្រូវបានធ្វើរួច)។", show_alert=True)
+        return
+    if dep.get("status") != "pending":
+        tb.answer_callback_query(call.id, f"⚠️ សំណើនេះត្រូវបានធ្វើរួច ({dep.get('status')})", show_alert=True)
+        return
+    target_uid = int(dep["uid"])
+    amount = float(dep["amount"])
+    if action == "ok":
+        bonus = _auto_dep_bonus(amount)
+        total = round(amount + bonus, 2)
+        add_bal(target_uid, total)
+        dep["status"] = "approved"; dep["approved_amount"] = total
+        _save(MANUAL_DEP_FILE, manual_deps)
+        tb.answer_callback_query(call.id, "✅ អនុម័តរួច")
+        new_b = bal(target_uid)
+        msg = (f"✅ <b>ដាក់លុយបានជោគជ័យ!</b> 🎉\n━━━━━━━━━━━━━━━━━━\n"
+               f"💰 បានទទួល: <b>${amount:.2f}</b>")
+        if bonus > 0:
+            msg += f"\n🎁 Bonus: <b>+${bonus:.2f}</b>"
+        msg += f"\n💳 Balance: <b>${new_b:.2f}</b>"
+        try: bot.send_message(target_uid, msg, parse_mode="HTML", reply_markup=main_kb(target_uid))
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        try:
+            tb.edit_message_caption(f"✅ <b>អនុម័តរួច</b> — ${amount:.2f} (+${bonus:.2f} bonus)\n👤 <code>{dep['uid']}</code>",
+                chat_id=uid, message_id=call.message.message_id, parse_mode="HTML")
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+    else:
+        dep["status"] = "rejected"
+        _save(MANUAL_DEP_FILE, manual_deps)
+        tb.answer_callback_query(call.id, "❌ បដិសេធរួច")
+        try:
+            bot.send_message(target_uid,
+                f"❌ <b>សំណើដាក់លុយត្រូវបានបដិសេធ</b>\n💰 ${amount:.2f}\n\nសូមទាក់ទង Admin បើមានចម្ងល់។",
+                parse_mode="HTML", reply_markup=main_kb(target_uid))
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        try:
+            tb.edit_message_caption(f"❌ <b>បដិសេធរួច</b> — ${amount:.2f}\n👤 <code>{dep['uid']}</code>",
+                chat_id=uid, message_id=call.message.message_id, parse_mode="HTML")
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("mdep:"))
+def cb_mdep_admin(call):
+    _process_mdep_action(call, bot)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("back:"))
+def cb_back(call):
+    uid  = call.message.chat.id
+    dest = call.data[5:]
+    bot.answer_callback_query(call.id)
+    waiting.pop(uid, None)
+    if dest == "main":
+        try: bot.delete_message(uid, call.message.message_id)
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        _show_welcome(uid)
+    elif dest == "smmcats":
+        try:
+            bot.edit_message_text("📊 <b>SMM Services</b>\n━━━━━━━━━━━━━━━━━━\nជ្រើស Platform:",
+                                  chat_id=uid, message_id=call.message.message_id,
+                                  parse_mode="HTML", reply_markup=smm_cat_kb())
+        except:
+            bot.send_message(uid, "📊 <b>SMM Services</b>",
+                             parse_mode="HTML", reply_markup=smm_cat_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("smmcat:"))
+def cb_smmcat(call):
+    uid = call.message.chat.id
+    cat = call.data[7:]
+    bot.answer_callback_query(call.id)
+    svcs = _smm_get_svcs_in_cat(cat)
+    if not svcs:
+        try: bot.answer_callback_query(call.id, "❌ គ្មាន Service", show_alert=True)
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        return
+    is_tiktok_khmer = "tiktok khmer" in cat.lower()
+    if is_tiktok_khmer:
+        header = (
+            f"🇰🇭 <b>TikTok Khmer Services!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"• ធានាបានអ្នកមើលខ្មែរ 100%\n"
+            f"• អាចបានលើសទៅតាមវីដេអូ\n\n"
+            f"ជ្រើសសេវាកម្ម:"
+        )
+    else:
+        header = f"📂 <b>{cat}</b>\n━━━━━━━━━━━━━━━━━━\nជ្រើស Service:"
+    try:
+        bot.edit_message_text(header,
+                              chat_id=uid, message_id=call.message.message_id,
+                              parse_mode="HTML", reply_markup=smm_svc_kb(cat))
+    except:
+        bot.send_message(uid, header, parse_mode="HTML", reply_markup=smm_svc_kb(cat))
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("smmsvc:"))
+def cb_smmsvc(call):
+    uid  = call.message.chat.id
+    slug = call.data[7:]
+    bot.answer_callback_query(call.id)
+    s = smm_services.get(slug)
+    if not s: return
+    sr   = _smm_sell_rate(s["cost_rate"], slug)
+    lang = get_lang(uid)
+    # Price display (+ User Discount for TikTok Khmer បើមាន)
+    disc_note = ""
+    if s.get("flat_price"):
+        base_p = float(s["flat_price"])
+        final_p, disc_amt, pct = _apply_user_discount(uid, slug, base_p)
+        if pct > 0:
+            price_line = (f"💰 តម្លៃ: <s>${base_p:.2f}</s> → <b>${final_p:.2f} / order</b>\n"
+                          f"🏷️ បញ្ចុះតម្លៃ <b>{pct:.0f}%</b> (−${disc_amt:.2f})")
+            disc_note = f"\n🏷️ <i>អ្នកទទួលបានបញ្ចុះតម្លៃ {pct:.0f}% (TikTok Khmer)</i>"
+        else:
+            price_line = f"💰 តម្លៃ: <b>${base_p:.2f} / order</b>"
+    else:
+        price_line = f"💰 {'តម្លៃ' if lang=='kh' else 'Price'}: <b>${sr:.2f}/1K</b>\n📏 Min: {s.get('min',10):,}  ·  Max: {s.get('max',100000):,}"
+        pct = _user_discount_pct(uid, slug)
+        if pct > 0:
+            disc_note = f"\n🏷️ <i>អ្នកទទួលបានបញ្ចុះតម្លៃ {pct:.0f}% (TikTok Khmer)</i>"
+    desc_line = f"\n📋 {s['description']}" if s.get("description") else ""
+    txt  = (f"⚡ <b>{s.get('label',slug)}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"{price_line}"
+            f"{desc_line}"
+            f"{disc_note}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"{'ជ្រើស Quantity:' if lang=='kh' else 'Choose Quantity:'}")
+    try:
+        bot.edit_message_text(txt, chat_id=uid, message_id=call.message.message_id,
+                              parse_mode="HTML", reply_markup=smm_qty_kb(slug, s, uid=uid))
+    except:
+        bot.send_message(uid, txt, parse_mode="HTML", reply_markup=smm_qty_kb(slug, s, uid=uid))
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("smmqty:"))
+def cb_smmqty(call):
+    uid = call.message.chat.id
+    bot.answer_callback_query(call.id)
+    parts = call.data.split(":")
+    slug  = parts[1]; qty = int(parts[2])
+    s     = smm_services.get(slug)
+    if not s: return
+    base_price = _smm_price_for_order(slug, qty)
+    price, disc_amt, pct = _apply_user_discount(uid, slug, base_price)
+    lang  = get_lang(uid)
+    is_tiktok_promote = s.get("flat_price") and "tiktok" in slug.lower()
+    disc_line = ""
+    if pct > 0:
+        disc_line = f"\n🏷️ បញ្ចុះ {pct:.0f}%: <s>${base_price:.2f}</s> → <b>${price:.2f}</b> (−${disc_amt:.2f})"
+    if is_tiktok_promote:
+        link_prompt = (
+            f"🔗 <b>ផ្ញើ Link វីដេអូ TikTok:</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"📊 {s.get('label',slug)}\n"
+            f"💰 តម្លៃ: <b>${price:.2f}</b>{disc_line}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"⚠️ <b>សំខាន់!</b> បន្ទាប់ពី order:\n"
+            f"1️⃣ ចូល TikTok Inbox\n"
+            f"2️⃣ System notifications → Promote Assistant\n"
+            f"3️⃣ ចុច <b>Respond</b> → <b>Authorize</b> → <b>Confirm</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"📎 ឧ: <code>https://www.tiktok.com/@user/video/123</code>"
+        )
+    else:
+        price_txt = f"${price:.4f}"
+        if pct > 0:
+            price_txt = f"<s>${base_price:.4f}</s> → <b>${price:.4f}</b> (−{pct:.0f}%)"
+        link_prompt = (
+            f"🔗 <b>{'ផ្ញើ Link:' if lang=='kh' else 'Send Link:'}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"📊 {s.get('label',slug)}\n"
+            f"💰 {qty:,} — {price_txt}"
+        )
+    waiting[uid] = {"step": "smm_link", "slug": slug, "qty": qty, "price": price,
+                    "base_price": base_price, "discount_pct": pct, "discount_amt": disc_amt}
+    try:
+        bot.edit_message_text(
+            link_prompt,
+            chat_id=uid, message_id=call.message.message_id,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="back:main", color="inactive")]]))
+    except:
+        bot.send_message(uid, link_prompt, parse_mode="HTML", reply_markup=cancel_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("smmapi:"))
+def cb_smmapi(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID: return
+    action = call.data[7:]
+    bot.answer_callback_query(call.id)
+
+    if action == "setup":
+        waiting[uid] = "smm_api_url"
+        bot.send_message(uid,
+            "🌐 <b>ផ្ញើ SMM API URL</b>\nឧ: <code>https://smmking.net/api/v2</code>",
+            parse_mode="HTML", reply_markup=cancel_kb())
+
+    elif action == "test":
+        url = smm_api.get("url",""); key = smm_api.get("key","")
+        if not url or not key:
+            bot.send_message(uid, "❌ API មិនទាន់ set!", reply_markup=admin_kb()); return
+        try:
+            r = http.post(url, data={"key": key, "action": "balance"}, timeout=10)
+            d = r.json()
+            balance  = d.get("balance", d.get("Balance", "?"))
+            currency = d.get("currency", d.get("Currency", "USD"))
+            bot.send_message(uid,
+                f"✅ <b>Connection OK!</b>\n━━━━━━━━━━━━━━━━━━\n"
+                f"💰 Balance: <b>{balance} {currency}</b>",
+                parse_mode="HTML", reply_markup=admin_kb())
+        except Exception as e:
+            bot.send_message(uid, f"❌ Connection failed: <code>{e}</code>",
+                             parse_mode="HTML", reply_markup=admin_kb())
+
+    elif action == "clear":
+        smm_api.clear(); smm_api.update({"url":"","key":""})
+        _save(SMM_API_FILE, smm_api)
+        bot.send_message(uid, "🗑️ SMM API cleared!", reply_markup=admin_kb())
+
+# ── Admin: Confirm / Reject deposit ──
+@bot.callback_query_handler(func=lambda c: c.data.startswith("admconf:"))
+def cb_admconf(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID: bot.answer_callback_query(call.id); return
+    dep_id = call.data[8:]
+    dep    = smm_deps.get(dep_id)
+    if not dep or dep.get("status") != "pending":
+        bot.answer_callback_query(call.id, "⚠️ Deposit មិន pending ទេ", show_alert=True); return
+    bot.answer_callback_query(call.id)
+    # Ask admin for amount
+    waiting[uid] = {"step": "adm_confirm_dep", "dep_id": dep_id}
+    bot.send_message(uid,
+        f"💰 <b>Enter amount received (USD):</b>\n"
+        f"📌 Ref: <code>{dep.get('reference','')}</code>\n"
+        f"👤 User: <code>{dep.get('uid','')}</code>",
+        parse_mode="HTML", reply_markup=cancel_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("admrej:"))
+def cb_admrej(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID: bot.answer_callback_query(call.id); return
+    dep_id = call.data[7:]
+    dep    = smm_deps.get(dep_id)
+    if not dep:
+        bot.answer_callback_query(call.id, "❌ Deposit រកមិនឃើញ", show_alert=True); return
+    bot.answer_callback_query(call.id)
+    dep["status"] = "rejected"; _save(SMM_DEP_FILE, smm_deps)
+    try:
+        bot.edit_message_text(
+            f"❌ <b>Deposit Rejected</b>\n📌 Ref: <code>{dep.get('reference','')}</code>",
+            chat_id=uid, message_id=call.message.message_id, parse_mode="HTML")
+    except Exception as _e: logger.debug(f"[silent] {_e}")
+    try:
+        bot.send_message(int(dep["uid"]),
+            "❌ <b>ការ Deposit ត្រូវបាន Reject!</b>\nទំនាក់ Admin: @KhmerSmm099",
+            parse_mode="HTML")
+    except Exception as _e: logger.debug(f"[silent] {_e}")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("mansvc_cat:"))
+def cb_mansvc_cat(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID: bot.answer_callback_query(call.id); return
+    cat = call.data[len("mansvc_cat:"):]
+    bot.answer_callback_query(call.id)
+    step = waiting.get(uid, {})
+    label = step.get("label", "") if isinstance(step, dict) else ""
+    if cat == "__custom__":
+        waiting[uid] = {"step": "manual_svc_cat_custom", "label": label}
+        bot.send_message(uid,
+            "✏️ <b>វាយ Category ផ្ទាល់ខ្លួន:</b>\nឧ: <code>TikTok Khmer</code>",
+            parse_mode="HTML", reply_markup=cancel_kb())
+    else:
+        waiting[uid] = {"step": "manual_svc_price", "label": label, "cat": cat}
+        bot.send_message(uid,
+            f"💰 <b>ដាក់តម្លៃ (USD per 1000)</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"📂 Category: <b>{cat}</b>\n"
+            f"📝 ឈ្មោះ: <b>{label}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"ឧ: <code>0.50</code> = $0.50 per 1K\n"
+            f"ឧ: <code>1.20</code> = $1.20 per 1K",
+            parse_mode="HTML", reply_markup=cancel_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("mansvcplat:"))
+def cb_mansvcplat(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID: bot.answer_callback_query(call.id); return
+    key = call.data[len("mansvcplat:"):]
+    bot.answer_callback_query(call.id)
+    step = waiting.get(uid, {})
+    if not isinstance(step, dict): return
+    waiting[uid] = {"step": "manual_svc_price", "label": step.get("label",""),
+                     "cat": step.get("cat",""), "platform": key}
+    plabel = _PLATFORM_LABEL_BY_KEY.get(key, key)
+    bot.send_message(uid,
+        f"💰 <b>ដាក់តម្លៃ (USD per 1000)</b>\n"
+        f"🌐 Platform: <b>{plabel}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"ឧ: <code>0.50</code> = $0.50 per 1K\n"
+        f"ឧ: <code>1.20</code> = $1.20 per 1K",
+        parse_mode="HTML", reply_markup=cancel_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("pkgcat:"))
+def cb_pkgcat(call):
+    """Admin: choose category for a new flat-price Package"""
+    uid = call.message.chat.id
+    if uid != ADMIN_ID: bot.answer_callback_query(call.id); return
+    cat = call.data[len("pkgcat:"):]
+    bot.answer_callback_query(call.id)
+    step = waiting.get(uid, {})
+    label = step.get("label", "") if isinstance(step, dict) else ""
+    if cat == "__custom__":
+        waiting[uid] = {"step": "pkg_cat_custom", "label": label}
+        bot.send_message(uid,
+            "✏️ <b>វាយ Category ផ្ទាល់ខ្លួន:</b>\nឧ: <code>TikTok Khmer</code>",
+            parse_mode="HTML", reply_markup=cancel_kb())
+    else:
+        waiting[uid] = {"step": "pkg_desc", "label": label, "cat": cat}
+        bot.send_message(uid,
+            f"📂 Category: <b>{cat}</b>\n📝 ឈ្មោះ: <b>{label}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"📝 <b>ការពិពណ៌នា Package (Description)</b>\n"
+            f"ឧ: <code>1K-2K Likes ❤️ + 3.5K Views 👁</code>\n"
+            f"ឬ វាយ <code>-</code> ដើម្បីរំលង",
+            parse_mode="HTML", reply_markup=cancel_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("pkgplat:"))
+def cb_pkgplat(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID: bot.answer_callback_query(call.id); return
+    key = call.data[len("pkgplat:"):]
+    bot.answer_callback_query(call.id)
+    step = waiting.get(uid, {})
+    if not isinstance(step, dict): return
+    waiting[uid] = {"step": "pkg_desc", "label": step.get("label",""),
+                     "cat": step.get("cat",""), "platform": key}
+    plabel = _PLATFORM_LABEL_BY_KEY.get(key, key)
+    bot.send_message(uid,
+        f"🌐 Platform: <b>{plabel}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📝 <b>ការពិពណ៌នា Package (Description)</b>\n"
+        f"ឧ: <code>1K-2K Likes ❤️ + 3.5K Views 👁</code>\n"
+        f"ឬ វាយ <code>-</code> ដើម្បីរំលង",
+        parse_mode="HTML", reply_markup=cancel_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("editprice:"))
+def cb_editprice(call):
+    """Admin: edit the price of an existing service/package"""
+    uid = call.message.chat.id
+    if uid != ADMIN_ID: return
+    bot.answer_callback_query(call.id)
+    slug = call.data[len("editprice:"):]
+    s = smm_services.get(slug)
+    if not s:
+        bot.send_message(uid, "❌ Service រកមិនឃើញ", reply_markup=admin_kb()); return
+    waiting[uid] = {"step": "edit_svc_price", "slug": slug}
+    if s.get("flat_price"):
+        cur = f"${float(s['flat_price']):.2f} / order"
+    else:
+        cur = f"${float(s.get('cost_rate',0)):.2f} / 1K"
+    bot.send_message(uid,
+        f"💰 <b>កែតម្លៃ</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📝 {s.get('label', slug)}\n"
+        f"💵 តម្លៃបច្ចុប្បន្ន: <b>{cur}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"វាយ <b>តម្លៃថ្មី</b> (លេខទទេ):",
+        parse_mode="HTML", reply_markup=cancel_kb())
+
+def _tb_admin_kb(tb):
+    """Reply keyboard សម្រាប់សារឆ្លើយតបលើ Order Bot instance ណាមួយ — admin_kb()
+    (Menu SMM ពេញ) សម្រាប់ bot service ចម្បងប៉ុណ្ណោះ។ Order/Payment Bot ដាច់ដោយឡែក
+    ត្រូវនៅជា Notification bot សុទ្ធ (គ្មាន Menu SMM) ដូច្នេះ return None ដើម្បីកុំឲ្យ
+    Menu ពេញលេចចូល Chat នោះ។"""
+    return admin_kb() if tb is bot else None
+
+def _process_manord_action(call, tb):
+    """ដំណើរការ manord: callback (Done/Reject manual order)។ `tb` = bot instance
+    ដែលទទួល callback (service bot ឬ Order Bot ដាច់ដោយឡែក)។ សារទៅ User (customer)
+    តែងតែប្រើ `bot` (service bot) ព្រោះ User មិនមាន chat ជាមួយ Order Bot ទេ។"""
+    uid = call.message.chat.id
+    if uid != ADMIN_ID: tb.answer_callback_query(call.id); return
+    parts = call.data.split(":")
+    action = parts[1]
+    oid    = parts[2] if len(parts) > 2 else ""
+    tb.answer_callback_query(call.id)
+    o = smm_orders.get(oid)
+    if not o:
+        tb.send_message(uid, f"❌ Order <code>{oid}</code> រកមិនឃើញ",
+                         parse_mode="HTML"); return
+    # ការពារចុច Done/Reject ដដែលៗ (ឧ. Admin ចុចលឿនពីរដង) ដែលអាចធ្វើឲ្យសងលុយ/Complete ២ដង
+    if o.get("status") in ("completed", "rejected", "canceled", "partial"):
+        tb.send_message(uid,
+            f"⚠️ Order <code>{oid}</code> ត្រូវបានដំណើរការរួចហើយ (ស្ថានភាព: <b>{o.get('status')}</b>)",
+            parse_mode="HTML"); return
+    if action == "done":
+        waiting[uid] = {"step": "manual_order_done", "oid": oid, "user_uid": o["uid"], "via_bot": _bot_tag(tb)}
+        tb.send_message(uid,
+            f"✅ <b>Complete Order</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 <code>{oid}</code>\n"
+            f"👤 User: <code>{o['uid']}</code>\n"
+            f"📊 {o.get('label','?')} × {o.get('qty',0):,}\n"
+            f"🔗 <code>{o.get('link','?')}</code>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"📝 <b>វាយ Note ឲ្យ User</b> (ឬ <code>-</code> ដើម្បីរំលង):",
+            parse_mode="HTML", reply_markup=cancel_kb())
+    elif action == "reject":
+        # ស្នើ Admin វាយមូលហេតុ មុន refund + ជូនដំណឹង User (TikTok Khmer / manual)
+        waiting[uid] = {
+            "step": "manual_order_reject",
+            "oid": oid,
+            "user_uid": o["uid"],
+            "via_bot": _bot_tag(tb),
+            "msg_chat": uid,
+            "msg_id": call.message.message_id,
+        }
+        try:
+            tb.edit_message_reply_markup(uid, call.message.message_id, reply_markup=None)
+        except Exception as _e:
+            logger.debug(f"[silent] {_e}")
+        tb.send_message(
+            uid,
+            f"❌ <b>Reject Order</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 <code>{oid}</code>\n"
+            f"👤 User: <code>{o['uid']}</code>\n"
+            f"📊 {o.get('label','?')} × {o.get('qty',0):,}\n"
+            f"🔗 <code>{o.get('link','?')}</code>\n"
+            f"💵 ${float(o.get('price') or 0):.4f}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"📝 <b>វាយមូលហេតុ Reject</b> (នឹងផ្ញើទៅ User + សងលុយស្វ័យប្រវត្តិ)\n"
+            f"ឬផ្ញើ <code>-</code> បើមិនចង់បញ្ជាក់:",
+            parse_mode="HTML",
+            reply_markup=cancel_kb(),
+        )
+
+
+
+
+def _finish_manual_order(uid, tb, step, text):
+    """បញ្ចប់ Manual Order (វាយ Note រួច Complete) — ហៅពី bot service ឬ Order Bot
+    ដាច់ដោយឡែក (`tb`)។ សារទៅ User (customer) ប្រើ `bot` service ជានិច្ច។"""
+    oid      = step.get("oid")
+    user_uid = step.get("user_uid")
+    o        = smm_orders.get(oid)
+    if not o:
+        tb.send_message(uid, "❌ Order រកមិនឃើញ", reply_markup=_tb_admin_kb(tb))
+        waiting.pop(uid, None); return
+    note = text.strip()
+    smm_orders[oid]["status"]   = "completed"
+    smm_orders[oid]["note"]     = note
+    _save(SMM_ORD_FILE, smm_orders)
+    waiting.pop(uid, None)
+    try:
+        bot.send_message(int(user_uid),
+            f"✅ <b>Order បានដំណើរការហើយ!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 <code>{oid}</code>\n"
+            f"📊 {o.get('label','?')}\n"
+            f"🔢 ចំនួន: <b>{o.get('qty',0):,}</b>\n"
+            + (f"📝 Note: {note}\n" if note and note != "-" else "") +
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🙏 អរគុណ!",
+            parse_mode="HTML")
+    except Exception as _e: logger.debug(f"[silent] {_e}")
+    tb.send_message(uid,
+        f"✅ <b>Order Completed!</b>\n🆔 <code>{oid}</code>",
+        parse_mode="HTML", reply_markup=_tb_admin_kb(tb))
+
+
+def _finish_manual_reject(uid, tb, step, text):
+    """Admin វាយមូលហេតុ Reject → refund + ផ្ញើ User + confirm Admin."""
+    oid = step.get("oid")
+    user_uid = step.get("user_uid")
+    o = smm_orders.get(oid)
+    waiting.pop(uid, None)
+    if not o:
+        tb.send_message(uid, "❌ Order រកមិនឃើញ", reply_markup=_tb_admin_kb(tb))
+        return
+    if o.get("status") in ("completed", "rejected", "canceled", "partial"):
+        tb.send_message(
+            uid,
+            f"⚠️ Order <code>{oid}</code> បានដំណើរការរួច (ស្ថានភាព: <b>{o.get('status')}</b>)",
+            parse_mode="HTML",
+            reply_markup=_tb_admin_kb(tb),
+        )
+        return
+    reason = (text or "").strip()
+    if reason in ("-", "—", ""):
+        reason = "Admin មិនបានបញ្ជាក់មូលហេតុ"
+    price = float(o.get("price") or 0)
+    smm_orders[oid]["status"] = "rejected"
+    smm_orders[oid]["refunded"] = price
+    smm_orders[oid]["reject_reason"] = reason
+    _save(SMM_ORD_FILE, smm_orders)
+    # Refund first
+    try:
+        add_bal(int(o["uid"]), price)
+    except Exception as e:
+        logger.warning(f"[reject refund] {e}")
+    # Notify user with reason
+    try:
+        import html as _html
+        _lab = _html.escape(str(o.get("label") or "?"))
+        _rsn = _html.escape(str(reason))
+        bot.send_message(
+            int(user_uid or o["uid"]),
+            f"❌ <b>Order ត្រូវបាន Reject</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 <code>{oid}</code>\n"
+            f"📦 {_lab}\n"
+            f"🔢 {o.get('qty',0):,}\n"
+            f"📝 មូលហេតុ: <b>{_rsn}</b>\n"
+            f"💳 បានសង <b>${price:.4f}</b> វិញ\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"សួរ Admin: {_admin_contact()}",
+            parse_mode="HTML",
+        )
+
+    except Exception as e:
+        logger.warning(f"[reject notify user] {e}")
+    # Channel optional note
+    try:
+        _notify(
+            f"❌ <b>Order Rejected</b>\n"
+            f"🆔 <code>{oid}</code> · User <code>{o.get('uid')}</code>\n"
+            f"📊 {o.get('label','?')}\n"
+            f"📝 {reason}\n"
+            f"💳 Refund ${price:.4f}"
+        )
+    except Exception:
+        pass
+    tb.send_message(
+        uid,
+        f"❌ <b>Rejected & Refunded</b>\n"
+        f"🆔 <code>{oid}</code>\n"
+        f"📝 មូលហេតុ: {reason}",
+        parse_mode="HTML",
+        reply_markup=_tb_admin_kb(tb),
+    )
+
+
+
+
+@bot.callback_query_handler(func=lambda c: (c.data or "").startswith("admreopen:"))
+def cb_admin_reopen_order(call):
+    uid = call.from_user.id
+    if uid != ADMIN_ID:
+        try:
+            bot.answer_callback_query(call.id)
+        except Exception:
+            pass
+        return
+    oid = (call.data or "").split(":", 1)[-1].strip()
+    o = smm_orders.get(oid)
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception:
+        pass
+    if not o:
+        bot.send_message(uid, f"❌ Order <code>{oid}</code> រកមិនឃើញ", parse_mode="HTML")
+        return
+    old = o.get("status")
+    smm_orders[oid]["status"] = "pending"
+    smm_orders[oid].pop("reject_reason", None)
+    _save(SMM_ORD_FILE, smm_orders)
+    bot.send_message(
+        uid,
+        f"🔄 <b>Reopened Order</b>\n"
+        f"🆔 <code>{oid}</code>\n"
+        f"Status: <code>{old}</code> → <b>pending</b>\n\n"
+        f"⚠️ បើធ្លាប់ refund រួច — ពិនិត្យ balance user មុន Mark Done",
+        parse_mode="HTML",
+        reply_markup=admin_kb(),
+    )
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("manord:"))
+def cb_manord(call):
+    """Admin: mark manual order as completed"""
+    _process_manord_action(call, bot)
+
+def _register_order_bot_handlers(tb):
+    """ចុះឈ្មោះ callback (manord:) + follow-up text step (វាយ Note) លើ Order
+    Bot instance ដាច់ដោយឡែក ដូច្នេះប៊ូតុង ✅ Done / ❌ Reject ចុចដំណើរការបានពិត
+    មិនមែនគ្រាន់តែសារឲ្យមើលទេ។"""
+    @tb.callback_query_handler(func=lambda c: c.data.startswith("manord:"))
+    def _ob_cb_manord(call):
+        _process_manord_action(call, tb)
+
+    @tb.message_handler(func=lambda m: (m.chat.id == ADMIN_ID
+                         and isinstance(waiting.get(m.chat.id), dict)
+                         and waiting.get(m.chat.id, {}).get("step") == "manual_order_done"
+                         and waiting.get(m.chat.id, {}).get("via_bot") == "order"))
+    def _ob_finish_order(message):
+        uid = message.chat.id
+        step = waiting.get(uid)
+        _finish_manual_order(uid, tb, step, message.text or "")
+
+    @tb.message_handler(func=lambda m: (m.chat.id == ADMIN_ID
+                         and isinstance(waiting.get(m.chat.id), dict)
+                         and waiting.get(m.chat.id, {}).get("step") == "manual_order_reject"
+                         and waiting.get(m.chat.id, {}).get("via_bot") == "order"))
+    def _ob_finish_reject(message):
+        uid = message.chat.id
+        step = waiting.get(uid)
+        _finish_manual_reject(uid, tb, step, message.text or "")
+
+def _register_pay_bot_handlers(tb):
+    """ចុះឈ្មោះ callback (mdep:) លើ Payment Bot instance ដាច់ដោយឡែក ដូច្នេះ
+    ប៊ូតុង ✅ អនុម័ត / ❌ បដិសេធ ចុចដំណើរការបានពិត។"""
+    @tb.callback_query_handler(func=lambda c: c.data.startswith("mdep:"))
+    def _pb_cb_mdep(call):
+        _process_mdep_action(call, tb)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("editsvc:"))
+def cb_editsvc(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID: return
+    bot.answer_callback_query(call.id)
+    slug = call.data[len("editsvc:"):]
+    s = smm_services.get(slug)
+    if not s:
+        bot.send_message(uid, "❌ Service រកមិនឃើញ", reply_markup=admin_kb()); return
+    old_label = s.get("label", slug)
+    api_id    = s.get("api_id", "?")
+    cur_plabel = _PLATFORM_LABEL_BY_KEY.get(s.get("platform"), "⚠️ មិនទាន់កំណត់ (Guess ស្វ័យប្រវត្តិ)")
+    rf_on = bool(s.get("refill"))
+    waiting[uid] = {"step": "edit_svc_name", "slug": slug}
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("🌐 កែ Platform (សម្រាប់ Link)",
+                                 callback_data=f"editsvcplat:{slug}", color="progress"))
+    if not s.get("manual"):
+        kb.add(InlineKeyboardButton(
+            f"🔄 Refill ស្វ័យប្រវត្តិ: {'✅ បើក' if rf_on else '⭕ បិទ'} (ចុចដើម្បីប្តូរ)",
+            callback_data=f"svcrefill:{slug}", color="active" if rf_on else "inactive"))
+    kb.add(InlineKeyboardButton("❌ Cancel", callback_data="back:main", color="inactive"))
+    bot.send_message(uid,
+        f"✏️ <b>កែ Service</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🆔 API ID: <code>{api_id}</code>\n"
+        f"📝 ឈ្មោះ​បច្ចុប្បន្ន:\n<b>{old_label}</b>\n"
+        f"🌐 Platform បច្ចុប្បន្ន: <b>{cur_plabel}</b>\n"
+        + (f"🔄 Refill ស្វ័យប្រវត្តិ: <b>{'✅ បើក' if rf_on else '⭕ បិទ'}</b>\n" if not s.get("manual") else "")
+        + f"━━━━━━━━━━━━━━━━━━\n"
+        f"វាយ <b>ឈ្មោះថ្មី</b> ដើម្បីប្ដូរ, ឬចុច 🌐 ដើម្បីកែ Platform:",
+        parse_mode="HTML", reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("svcrefill:"))
+def cb_svcrefill(call):
+    """Admin ចុចប្តូរបើក/បិទ Refill ស្វ័យប្រវត្តិ សម្រាប់ Service មួយ ដោយដៃ —
+    មានប្រយោជន៍បើ Supplier API មិនរាយការណ៍ត្រឹមត្រូវថា Service គាំទ្រ Refill ។"""
+    uid = call.message.chat.id
+    if uid != ADMIN_ID: bot.answer_callback_query(call.id); return
+    slug = call.data[len("svcrefill:"):]
+    s = smm_services.get(slug)
+    if not s:
+        bot.answer_callback_query(call.id, "❌ Service រកមិនឃើញ"); return
+    s["refill"] = not bool(s.get("refill"))
+    _save(SMM_SVC_FILE, smm_services)
+    bot.answer_callback_query(call.id,
+        f"🔄 Refill ស្វ័យប្រវត្តិ: {'✅ បើក' if s['refill'] else '⭕ បិទ'}")
+    cur_plabel = _PLATFORM_LABEL_BY_KEY.get(s.get("platform"), "⚠️ មិនទាន់កំណត់ (Guess ស្វ័យប្រវត្តិ)")
+    rf_on = bool(s.get("refill"))
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("🌐 កែ Platform (សម្រាប់ Link)",
+                                 callback_data=f"editsvcplat:{slug}", color="progress"))
+    kb.add(InlineKeyboardButton(
+        f"🔄 Refill ស្វ័យប្រវត្តិ: {'✅ បើក' if rf_on else '⭕ បិទ'} (ចុចដើម្បីប្តូរ)",
+        callback_data=f"svcrefill:{slug}", color="active" if rf_on else "inactive"))
+    kb.add(InlineKeyboardButton("❌ Cancel", callback_data="back:main", color="inactive"))
+    try:
+        bot.edit_message_text(
+            f"✏️ <b>កែ Service</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 API ID: <code>{s.get('api_id','?')}</code>\n"
+            f"📝 ឈ្មោះ​បច្ចុប្បន្ន:\n<b>{s.get('label',slug)}</b>\n"
+            f"🌐 Platform បច្ចុប្បន្ន: <b>{cur_plabel}</b>\n"
+            f"🔄 Refill ស្វ័យប្រវត្តិ: <b>{'✅ បើក' if rf_on else '⭕ បិទ'}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"វាយ <b>ឈ្មោះថ្មី</b> ដើម្បីប្ដូរ, ឬចុច 🌐 ដើម្បីកែ Platform:",
+            uid, call.message.message_id, parse_mode="HTML", reply_markup=kb)
+    except Exception as _e: logger.debug(f"[silent] {_e}")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("editsvcplat:"))
+def cb_editsvcplat(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID: bot.answer_callback_query(call.id); return
+    bot.answer_callback_query(call.id)
+    slug = call.data[len("editsvcplat:"):]
+    if slug not in smm_services:
+        bot.send_message(uid, "❌ Service រកមិនឃើញ", reply_markup=admin_kb()); return
+    waiting[uid] = {"step": "edit_svc_platform_pick", "slug": slug}
+    bot.send_message(uid,
+        f"🌐 <b>ជ្រើស Platform ថ្មី</b>\n"
+        f"📝 {smm_services[slug].get('label', slug)}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"ចុច 🔓 ផ្សេង បើ Service នេះទទួល Link ណាក៏បាន",
+        parse_mode="HTML", reply_markup=_platform_pick_kb("editsvcplatpick"))
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("editsvcplatpick:"))
+def cb_editsvcplatpick(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID: bot.answer_callback_query(call.id); return
+    bot.answer_callback_query(call.id)
+    key = call.data[len("editsvcplatpick:"):]
+    step = waiting.get(uid, {})
+    slug = step.get("slug") if isinstance(step, dict) else None
+    if not slug or slug not in smm_services:
+        bot.send_message(uid, "❌ Service រកមិនឃើញ", reply_markup=admin_kb()); return
+    smm_services[slug]["platform"] = key
+    _save(SMM_SVC_FILE, smm_services)
+    waiting.pop(uid, None)
+    plabel = _PLATFORM_LABEL_BY_KEY.get(key, key)
+    bot.send_message(uid,
+        f"✅ <b>Platform កែរួច!</b>\n"
+        f"📝 {smm_services[slug].get('label', slug)}\n"
+        f"🌐 Platform: <b>{plabel}</b>",
+        parse_mode="HTML", reply_markup=admin_kb())
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("smmaddcat:"))
+def cb_smmaddcat(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID: return
+    cat = call.data[len("smmaddcat:"):]
+    bot.answer_callback_query(call.id)
+    if cat == "custom":
+        waiting[uid] = "smm_add_cat"
+        bot.send_message(uid, "✏️ វាយ Category name (ឧ: TikTok Live, Spotify):",
+                         reply_markup=cancel_kb())
+    else:
+        waiting[uid] = {"step": "smm_add_ids", "cat": cat}
+        bot.send_message(uid,
+            f"📂 Category: <b>{cat}</b>\n━━━━━━━━━━━━━━━━━━\n"
+            f"ផ្ញើ Service IDs (comma separated):\n"
+            f"ឧ: <code>5441,5448,5502</code>\n\n"
+            f"💡 IDs រក នៅ SMM Panel → Services",
+            parse_mode="HTML", reply_markup=cancel_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("smmaddplat:"))
+def cb_smmaddplat(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID: bot.answer_callback_query(call.id); return
+    key = call.data[len("smmaddplat:"):]
+    bot.answer_callback_query(call.id)
+    step = waiting.get(uid, {})
+    if not isinstance(step, dict): return
+    cat = step.get("cat","")
+    waiting[uid] = {"step": "smm_add_ids", "cat": cat, "platform": key}
+    plabel = _PLATFORM_LABEL_BY_KEY.get(key, key)
+    bot.send_message(uid,
+        f"📂 Category: <b>{cat}</b> · 🌐 Platform: <b>{plabel}</b>\n"
+        f"ផ្ញើ API Service IDs (comma):\n"
+        f"ឧ: <code>5441,5448,5502</code>\n\n"
+        f"💡 រក IDs នៅ SMM API Panel ➡️ Services",
+        parse_mode="HTML", reply_markup=cancel_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("delsvc:"))
+def cb_delsvc(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID: return
+    bot.answer_callback_query(call.id)
+    parts = call.data.split(":", 2)
+
+    if len(parts) == 3 and parts[1] == "cat":
+        cat = parts[2]
+        to_del = [slug for slug, s in smm_services.items() if s.get("category") == cat]
+        for slug in to_del:
+            smm_services.pop(slug, None)
+        _save(SMM_SVC_FILE, smm_services)
+        try: bot.edit_message_reply_markup(uid, call.message.message_id, reply_markup=None)
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        bot.send_message(uid,
+            f"✅ Deleted <b>{len(to_del)}</b> services in <b>{cat}</b>",
+            parse_mode="HTML", reply_markup=admin_kb())
+        return
+
+    slug = parts[1]
+    s    = smm_services.get(slug)
+    if not s:
+        bot.send_message(uid, "❌ Service រកមិនឃើញ", reply_markup=admin_kb()); return
+    label  = s.get("label", slug)
+    api_id = s.get("api_id", "?")
+    smm_services.pop(slug, None)
+    _save(SMM_SVC_FILE, smm_services)
+    try: bot.edit_message_reply_markup(uid, call.message.message_id, reply_markup=None)
+    except Exception as _e: logger.debug(f"[silent] {_e}")
+    bot.send_message(uid,
+        f"✅ Deleted: <b>[{api_id}] {label}</b>\n"
+        f"📊 Remaining: <b>{len(smm_services)}</b>",
+        parse_mode="HTML", reply_markup=admin_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("useraction:"))
+def cb_useraction(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID: return
+    bot.answer_callback_query(call.id)
+    parts  = call.data.split(":")
+    action = parts[1]
+    target = parts[2] if len(parts) > 2 else ""
+
+    if action == "addbal":
+        bot.send_message(uid,
+            f"💸 <b>បន្ថែមប្រាក់</b>\n👤 UID: <code>{target}</code>\n"
+            f"💳 Balance: <b>${bal(int(target)):.2f}</b>\n"
+            f"ជ្រើសរើសចំនួន ឬ ចុច ✏️ ចំនួនផ្សេង ដើម្បីវាយបញ្ចូល:",
+            parse_mode="HTML", reply_markup=admin_bal_amt_kb(target, "add"))
+
+    elif action == "dedbal":
+        bot.send_message(uid,
+            f"💔 <b>កាត់ប្រាក់</b>\n👤 UID: <code>{target}</code>\n"
+            f"💳 Balance: <b>${bal(int(target)):.2f}</b>\n"
+            f"ជ្រើសរើសចំនួន ឬ ចុច ✏️ ចំនួនផ្សេង ដើម្បីវាយបញ្ចូល:",
+            parse_mode="HTML", reply_markup=admin_bal_amt_kb(target, "ded"))
+
+    elif action == "ban":
+        if target not in users_db:
+            users_db[target] = {"name": "", "username": "", "last": int(time.time()), "banned": True}
+        users_db[target]["banned"] = True; _save(USERS_FILE, users_db)
+        _log_ban(target, "ban", uid)
+        bot.send_message(uid, f"🚫 Banned <code>{target}</code>",
+                         parse_mode="HTML", reply_markup=admin_kb())
+        try:
+            bot.send_message(int(target), t(int(target), "banned"))
+        except Exception as _e:
+            logger.debug(f"[silent] {_e}")
+
+    elif action == "unban":
+        if target not in users_db:
+            users_db[target] = {"name": "", "username": "", "last": int(time.time()), "banned": False}
+        users_db[target]["banned"] = False; _save(USERS_FILE, users_db)
+        _log_ban(target, "unban", uid)
+        bot.send_message(uid, f"🔓 Unbanned <code>{target}</code>",
+                         parse_mode="HTML", reply_markup=admin_kb())
+        try:
+            bot.send_message(int(target), "✅ គណនីរបស់អ្នកត្រូវបាន unban ហើយ! សូម /start ម្ដងទៀត។")
+        except Exception as _e:
+            logger.debug(f"[silent] {_e}")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("balamt:"))
+def cb_balamt(call):
+    """Admin ចុចប៊ូតុងចំនួន (ឬ ចំនួនផ្សេង) ដើម្បី បន្ថែម/កាត់ Balance — ដូច flow QR Auto."""
+    uid = call.message.chat.id
+    if uid != ADMIN_ID:
+        bot.answer_callback_query(call.id); return
+    bot.answer_callback_query(call.id)
+    try:
+        _, kind, target, val = call.data.split(":", 3)
+    except Exception as _e:
+        logger.debug(f"[silent] {_e}"); return
+
+    # ── ចំនួនផ្សេង → ស្នើឲ្យវាយបញ្ចូល ដូច custom deposit ──
+    if val == "custom":
+        waiting[uid] = {"step": "add_balance_amt" if kind == "add" else "deduct_balance_amt",
+                         "target": target}
+        bot.send_message(uid,
+            "✏️ <b>វាយចំនួន (USD):</b>\nឧ: <code>3</code> ឬ <code>7.50</code>",
+            parse_mode="HTML", reply_markup=cancel_kb())
+        return
+
+    # ── ចុចចំនួន preset ──
+    try:
+        amt = float(val)
+    except Exception as _e:
+        logger.debug(f"[silent] {_e}"); return
+    waiting.pop(uid, None)
+
+    if kind == "add":
+        add_bal(int(target), amt)
+        _save(WALLETS_FILE, wallets)
+        bot.send_message(uid,
+            f"✅ <b>បន្ថែម Balance</b>\n👤 <code>{target}</code>\n"
+            f"💰 +${amt:.2f} | Balance: <b>${bal(int(target)):.2f}</b>",
+            parse_mode="HTML", reply_markup=admin_kb())
+        try: bot.send_message(int(target),
+            f"✅ <b>Admin បន្ថែមលុយ!</b>\n💰 +${amt:.2f} | Balance: <b>${bal(int(target)):.2f}</b>",
+            parse_mode="HTML")
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+    else:
+        cur = bal(int(target))
+        ded = min(amt, cur)
+        ded_bal(int(target), ded)
+        bot.send_message(uid,
+            f"✅ <b>កាត់ Balance</b>\n👤 <code>{target}</code>\n"
+            f"💔 -${ded:.2f} | Balance: <b>${bal(int(target)):.2f}</b>",
+            parse_mode="HTML", reply_markup=admin_kb())
+        try: bot.send_message(int(target),
+            f"⚠️ <b>Admin កាត់លុយ!</b>\n💔 -${ded:.2f} | Balance: <b>${bal(int(target)):.2f}</b>",
+            parse_mode="HTML")
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adminpromo:"))
+def cb_adminpromo(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID: return
+    bot.answer_callback_query(call.id)
+    action = call.data[len("adminpromo:"):]
+    if action == "add":
+        waiting[uid] = "promo_add_code"
+        bot.send_message(uid,
+            "🎟️ <b>បន្ថែម Promo Code</b>\n━━━━━━━━━━━━━━━━━━\n"
+            "Format: <code>CODE DISCOUNT TYPE USES</b></code>\n\n"
+            "TYPE: <code>pct</code> (%) ឬ <code>fix</code> ($)\n\n"
+            "ឧទាហរណ៍:\n"
+            "<code>SAVE50 50 pct 100</code>  → 50% off, 100 uses\n"
+            "<code>GIFT1 1.00 fix 50</code>  → $1 bonus, 50 uses",
+            parse_mode="HTML", reply_markup=cancel_kb())
+    elif action == "list":
+        _show_promos(uid)
+
+# ═══════════════════════════════════════════════════════════
+#  /newbot CONFIRMATION + CLONE MANAGEMENT CALLBACKS
+# ═══════════════════════════════════════════════════════════
+@bot.callback_query_handler(func=lambda c: c.data == "newbot_confirm_yes")
+def cb_newbot_confirm_yes(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID or not IS_MASTER:
+        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
+    step = waiting.get(uid)
+    if not isinstance(step, dict) or step.get("step") != "newbot_confirm":
+        bot.answer_callback_query(call.id, "Session ផុតកំណត់"); return
+    name = step["name"]
+    pay_method = step.get("pay_method", "auto")
+    cfg = {
+        "token": step["token"],
+        "admin_id": step["new_admin_id"],
+        "camrapid_key": step.get("camrapid_key", ""),
+        "port": step["port"],
+        "display_name": step.get("display_name", step["name"]),
+        "welcome_msg":  step.get("welcome_msg", ""),
+        "pay_method": pay_method,
+        "manual_qr_photo_id": step.get("manual_qr_photo_id", ""),
+        "manual_qr_info": step.get("manual_qr_info", ""),
+        "aba_key": step.get("aba_key", ""),
+        "aba_merchant": step.get("aba_merchant", ""),
+        "khpay_key": step.get("khpay_key", ""),
+        "khpay_merchant": step.get("khpay_merchant", ""),
+    }
+    clone_registry[name] = cfg
+    _save(CLONES_REGISTRY, clone_registry)
+    if pay_method == "manual" and cfg["manual_qr_photo_id"]:
+        try:
+            wdir = _clone_dir(name)
+            _save(os.path.join(wdir, "manual_qr.json"), {
+                "enabled": True,
+                "photo_id": cfg["manual_qr_photo_id"],
+                "info": cfg["manual_qr_info"],
+            })
+        except Exception as _e:
+            logger.error(f"Pre-seed manual_qr.json failed for clone '{name}': {_e}")
+    waiting.pop(uid, None)
+    bot.answer_callback_query(call.id, "កំពុងបង្កើត...")
+    try:
+        _spawn_clone(name, cfg)
+        bot.send_message(uid,
+            f"🎉 បានបង្កើត Bot '<b>{name}</b>' ជោគជ័យ ហើយកំពុងដំណើរការ!\n"
+            f"មាន feature ដូចគ្នា ១០០% ជា bot នេះ តែទិន្នន័យដាច់ដោយឡែកទាំងស្រុង។\n"
+            f"ប្រើ /mybots ដើម្បីគ្រប់គ្រង។",
+            parse_mode="HTML", reply_markup=admin_kb())
+    except Exception as e:
+        bot.send_message(uid, f"❌ បង្កើតមិនជោគជ័យ: {e}", reply_markup=admin_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data == "newbot_confirm_no")
+def cb_newbot_confirm_no(call):
+    uid = call.message.chat.id
+    waiting.pop(uid, None)
+    bot.answer_callback_query(call.id, "បានបោះបង់")
+    bot.send_message(uid, "❌ បានបោះបង់ការបង្កើត bot ថ្មី។", reply_markup=admin_kb())
+
+def _clone_pay_txt(pay_method):
+    """Label ស្តង់ដារសម្រាប់វិធីទូទាត់របស់ clone មួយ"""
+    if pay_method == "manual":
+        return "🖼 Manual QR (Step 2)"
+    if pay_method == "aba":
+        return "🏦 ABA PayWay Auto (Step 3)"
+    if pay_method == "khpay":
+        return "💠 KHPAY Auto (khpay.site)"
+    return "💳 ABA / KHPAY / Manual"
+
+_STEP_EMOJI = ["0️⃣","1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣"]
+def _step_label(n, total=None):
+    """បង្កើត label ជំហានស្តង់ដារ ('3️⃣ ជំហានទី 3/7') សម្រាប់ wizard /newbot
+    — ធានាថាលេខមិនត្រូវគ្នា/ដដែលៗរវាងជំហាន ហើយ total (7=Auto, 8=Manual)
+    បង្ហាញភ្លាមៗពេលដឹងផ្លូវ (Auto/Manual) ។"""
+    e = _STEP_EMOJI[n] if 0 <= n < len(_STEP_EMOJI) else f"{n}."
+    return f"{e} ជំហានទី {n}/{total}" if total else f"{e} ជំហានទី {n}"
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("newbot_pay|"))
+def cb_newbot_paymethod(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID or not IS_MASTER:
+        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
+    step = waiting.get(uid)
+    if not isinstance(step, dict) or step.get("step") != "newbot_paymethod":
+        bot.answer_callback_query(call.id, "Session ផុតកំណត់"); return
+    method = call.data.split("|", 1)[1]
+    bot.answer_callback_query(call.id)
+    if method == "auto":
+        bot.send_message(uid,
+            "⚠️ <b>CamRapidPay ត្រូវបានលុបចេញ។</b>\nសូមជ្រើស ABA / KHPAY / Manual។",
+            parse_mode="HTML")
+        return
+    elif method == "aba":
+        waiting[uid] = {**step, "step": "newbot_aba_key", "pay_method": "aba", "camrapid_key": ""}
+        bot.send_message(uid,
+            f"{_step_label(5, 7)} — វាយ <b>ABA PayWay Profile Key</b> សម្រាប់ bot នេះ "
+            "(ពី khmer-system.com/operator/profile):",
+            parse_mode="HTML", reply_markup=cancel_kb())
+    elif method == "khpay":
+        waiting[uid] = {**step, "step": "newbot_khpay_key", "pay_method": "khpay", "camrapid_key": ""}
+        bot.send_message(uid,
+            f"{_step_label(5, 7)} — វាយ <b>KHPAY API Key</b> សម្រាប់ bot នេះ "
+            "(ពី https://khpay.site/dashboard/settings):",
+            parse_mode="HTML", reply_markup=cancel_kb())
+    else:
+        waiting[uid] = {**step, "step": "newbot_manual_qr_photo", "pay_method": "manual", "camrapid_key": ""}
+        bot.send_message(uid,
+            f"{_step_label(5, 7)} — ផ្ញើ <b>រូបភាព QR</b> (KHQR) សម្រាប់ bot នេះ (ផ្ញើជារូបភាព):",
+            parse_mode="HTML", reply_markup=cancel_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cln_view|"))
+def cb_cln_view(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID or not IS_MASTER:
+        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
+    name = call.data.split("|", 1)[1]
+    cfg = clone_registry.get(name)
+    if not cfg:
+        bot.answer_callback_query(call.id, "រកមិនឃើញ"); return
+    bot.answer_callback_query(call.id)
+    status = "🟢 កំពុងដំណើរការ" if _clone_is_running(name) else "🔴 បិទ"
+    masked = cfg["token"][:10] + "..." + cfg["token"][-4:]
+    pay_txt = _clone_pay_txt(cfg.get("pay_method"))
+    text = (f"🤖 <b>{name}</b>\nស្ថានភាព: {status}\n"
+            f"ឈ្មោះ Display: <code>{cfg.get('display_name', name)}</code>\n"
+            f"Admin ID: <code>{cfg['admin_id']}</code>\nToken: <code>{masked}</code>\n"
+            f"ការទូទាត់: {pay_txt}\n"
+            f"Port: <code>{cfg['port']}</code>")
+    kb = InlineKeyboardMarkup(row_width=2)
+    if _clone_is_running(name):
+        kb.add(InlineKeyboardButton("🛑 បិទ", callback_data=f"cln_stop|{name}", color="inactive"),
+               InlineKeyboardButton("🔄 Restart", callback_data=f"cln_restart|{name}", color="progress"))
+    else:
+        kb.add(InlineKeyboardButton("▶️ ដំណើរការ", callback_data=f"cln_start|{name}", color="active"))
+    kb.add(InlineKeyboardButton("🔁 ប្តូរ Step ទូទាត់", callback_data=f"cln_pay|{name}", color="progress"))
+    kb.add(InlineKeyboardButton("👤 ប្តូរ Admin", callback_data=f"cln_admin|{name}", color="progress"))
+    kb.add(InlineKeyboardButton("✏️ ប្តូរ ឈ្មោះ Bot", callback_data=f"cln_rename|{name}", color="progress"))
+    kb.add(InlineKeyboardButton("⚙️ ការកំណត់ផ្សេងទៀត", callback_data=f"cln_more|{name}", color="progress"))
+    kb.add(InlineKeyboardButton("🗑️ លុប", callback_data=f"cln_delete|{name}", color="inactive"))
+    kb.add(InlineKeyboardButton("⬅️ ត្រឡប់", callback_data="cln_list", color="inactive"))
+    bot.send_message(uid, text, parse_mode="HTML", reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cln_pay|"))
+def cb_cln_pay(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID or not IS_MASTER:
+        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
+    name = call.data.split("|", 1)[1]
+    if name not in clone_registry:
+        bot.answer_callback_query(call.id, "រកមិនឃើញ"); return
+    bot.answer_callback_query(call.id)
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(InlineKeyboardButton("💳 ABA PayWay ស្វ័យប្រវត្តិ", callback_data=f"cln_paysel|aba|{name}", color="active"))
+    kb.add(InlineKeyboardButton("💠 KHPAY ស្វ័យប្រវត្តិ", callback_data=f"cln_paysel|khpay|{name}", color="progress"))
+    kb.add(InlineKeyboardButton("🖼 QR ដាក់ដោយដៃ (Manual)", callback_data=f"cln_paysel|manual|{name}", color="progress"))
+    kb.add(InlineKeyboardButton("⬅️ ត្រឡប់", callback_data=f"cln_view|{name}", color="inactive"))
+    bot.send_message(uid,
+        f"🔁 <b>ប្តូរ Step ទូទាត់ — {name}</b>\n\n"
+        "💳 <b>ABA PayWay</b> — Profile Key + Merchant ID\n"
+        "💠 <b>KHPAY</b> — API Key + Merchant ID\n"
+        "🖼 <b>Manual</b> — Upload រូប QR ដាក់ដោយដៃ\n"
+        "<i>CamRapidPay ត្រូវបានលុបចេញ</i>",
+        parse_mode="HTML", reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cln_paysel|"))
+def cb_cln_paysel(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID or not IS_MASTER:
+        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
+    _, method, name = call.data.split("|", 2)
+    if name not in clone_registry:
+        bot.answer_callback_query(call.id, "រកមិនឃើញ"); return
+    bot.answer_callback_query(call.id)
+    if method == "auto":
+        bot.send_message(uid,
+            "⚠️ <b>CamRapidPay ត្រូវបានលុបចេញ។</b>\nសូមជ្រើស ABA / KHPAY / Manual។",
+            parse_mode="HTML", reply_markup=admin_kb())
+        return
+    elif method == "aba":
+        waiting[uid] = {"step": "cln_pay_aba_key", "clone": name}
+        bot.send_message(uid, f"វាយ <b>ABA PayWay Profile Key</b> ថ្មីសម្រាប់ '{name}':",
+                          parse_mode="HTML", reply_markup=cancel_kb())
+    elif method == "khpay":
+        waiting[uid] = {"step": "cln_pay_khpay_key", "clone": name}
+        bot.send_message(uid, f"វាយ <b>KHPAY API Key</b> ថ្មីសម្រាប់ '{name}'\n"
+                          f"(ពី https://khpay.site/dashboard/settings):",
+                          parse_mode="HTML", reply_markup=cancel_kb())
+    elif method == "manual":
+        waiting[uid] = {"step": "cln_pay_qr_photo", "clone": name}
+        bot.send_message(uid, f"ផ្ញើ <b>រូបភាព QR</b> (KHQR) ថ្មីសម្រាប់ '{name}':",
+                          parse_mode="HTML", reply_markup=cancel_kb())
+    else:
+        bot.send_message(uid, f"⚠️ វិធីទូទាត់មិនស្គាល់: <code>{method}</code>", parse_mode="HTML")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cln_admin|"))
+def cb_cln_admin(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID or not IS_MASTER:
+        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
+    name = call.data.split("|", 1)[1]
+    cfg = clone_registry.get(name)
+    if not cfg:
+        bot.answer_callback_query(call.id, "រកមិនឃើញ"); return
+    bot.answer_callback_query(call.id)
+    waiting[uid] = {"step": "cln_change_admin", "clone": name}
+    bot.send_message(uid,
+        f"👤 <b>ប្តូរ Admin — {name}</b>\n"
+        f"Admin ID បច្ចុប្បន្ន: <code>{cfg['admin_id']}</code>\n\n"
+        f"វាយ <b>Telegram ID</b> ថ្មីរបស់ admin (លេខ):",
+        parse_mode="HTML", reply_markup=cancel_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cln_rename|"))
+def cb_cln_rename(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID or not IS_MASTER:
+        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
+    name = call.data.split("|", 1)[1]
+    cfg = clone_registry.get(name)
+    if not cfg:
+        bot.answer_callback_query(call.id, "រកមិនឃើញ"); return
+    bot.answer_callback_query(call.id)
+    waiting[uid] = {"step": "cln_rename_name", "clone": name}
+    bot.send_message(uid,
+        f"✏️ <b>ប្តូរ ឈ្មោះ Bot (Display Name) — {name}</b>\n"
+        f"ឈ្មោះបច្ចុប្បន្ន: <code>{cfg.get('display_name', name)}</code>\n\n"
+        f"វាយ <b>ឈ្មោះថ្មី</b> ដែលបង្ហាញដល់អ្នកប្រើ (ឧ. <code>Jak Like Shop</code>)\n"
+        f"ចំណាំ: នេះជាឈ្មោះបង្ហាញ (display) ប៉ុណ្ណោះ — មិនប៉ះពាល់ឈ្មោះ internal (<code>{name}</code>) ដែលប្រើសម្គាល់ក្នុង /mybots ទេ:",
+        parse_mode="HTML", reply_markup=cancel_kb())
+
+# ═══════════════════════════════════════════════════════════
+#  Clone ⚙️ ការកំណត់ផ្សេងទៀត (Support / Sub Admins / QR Cooldown)
+#  — កែផ្ទាល់ពី Master តាម /mybots ដោយសរសេរ file JSON ចូល bot_clones/<n>/
+#    ដោយផ្ទាល់ (ដូចលក្ខណៈ manual_qr.json ដែលមានស្រាប់) — clone process
+#    ត្រូវ restart ដើម្បីអានតម្លៃថ្មី (config files ទាំងនេះផ្ទុកតែម្តងពេល startup)
+# ═══════════════════════════════════════════════════════════
+def _clone_file(name, filename):
+    return os.path.join(_clone_dir(name), filename)
+
+def _clone_load(name, filename, default):
+    return _load(_clone_file(name, filename), default)
+
+def _clone_save_restart(uid, name, filename, data, ok_text):
+    _save(_clone_file(name, filename), data)
+    cfg = clone_registry.get(name)
+    was_running = cfg and _clone_is_running(name)
+    if was_running:
+        _stop_clone(name); time.sleep(1); _spawn_clone(name, cfg)
+    bot.send_message(uid, ok_text + (" ហើយ restart រួច។" if was_running else " (bot នេះកំពុងបិទ — ចាប់ផ្តើមវាដើម្បីអនុវត្ត)។"),
+                      parse_mode="HTML", reply_markup=admin_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cln_more|"))
+def cb_cln_more(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID or not IS_MASTER:
+        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
+    name = call.data.split("|", 1)[1]
+    if name not in clone_registry:
+        bot.answer_callback_query(call.id, "រកមិនឃើញ"); return
+    bot.answer_callback_query(call.id)
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(InlineKeyboardButton("💬 Support Message", callback_data=f"cln_support|{name}", color="progress"))
+    kb.add(InlineKeyboardButton("👥 Sub Admins", callback_data=f"cln_subadmin|{name}", color="progress"))
+    kb.add(InlineKeyboardButton("⏳ QR Cooldown", callback_data=f"cln_cooldown|{name}", color="progress"))
+    kb.add(InlineKeyboardButton("⬅️ ត្រឡប់", callback_data=f"cln_view|{name}", color="inactive"))
+    bot.send_message(uid, f"⚙️ <b>ការកំណត់ផ្សេងទៀត — {name}</b>", parse_mode="HTML", reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cln_support|"))
+def cb_cln_support(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID or not IS_MASTER:
+        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
+    name = call.data.split("|", 1)[1]
+    if name not in clone_registry:
+        bot.answer_callback_query(call.id, "រកមិនឃើញ"); return
+    bot.answer_callback_query(call.id)
+    cur = _clone_load(name, "smm_support.json", {"kh": "", "en": ""})
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(InlineKeyboardButton("✏️ កែ ខ្មែរ", callback_data=f"cln_support_lang|kh|{name}", color="progress"))
+    kb.add(InlineKeyboardButton("✏️ កែ English", callback_data=f"cln_support_lang|en|{name}", color="progress"))
+    kb.add(InlineKeyboardButton("⬅️ ត្រឡប់", callback_data=f"cln_more|{name}", color="inactive"))
+    bot.send_message(uid,
+        f"💬 <b>Support Message — {name}</b>\n"
+        f"ខ្មែរ: <code>{(cur.get('kh') or '(default)')[:200]}</code>\n"
+        f"English: <code>{(cur.get('en') or '(default)')[:200]}</code>",
+        parse_mode="HTML", reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cln_support_lang|"))
+def cb_cln_support_lang(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID or not IS_MASTER:
+        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
+    _, lang, name = call.data.split("|", 2)
+    if name not in clone_registry:
+        bot.answer_callback_query(call.id, "រកមិនឃើញ"); return
+    bot.answer_callback_query(call.id)
+    waiting[uid] = {"step": "cln_support_text", "clone": name, "lang": lang}
+    bot.send_message(uid,
+        f"✏️ <b>វាយ Support Message {'(ខ្មែរ)' if lang=='kh' else '(English)'} — {name}</b>\n"
+        "ឬផ្ញើ <code>-</code> ដើម្បី reset ទៅ default:",
+        parse_mode="HTML", reply_markup=cancel_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cln_subadmin|"))
+def cb_cln_subadmin(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID or not IS_MASTER:
+        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
+    name = call.data.split("|", 1)[1]
+    if name not in clone_registry:
+        bot.answer_callback_query(call.id, "រកមិនឃើញ"); return
+    bot.answer_callback_query(call.id)
+    cur = _clone_load(name, "smm_sub_admins.json", [])
+    kb = InlineKeyboardMarkup(row_width=1)
+    for sa in cur:
+        kb.add(InlineKeyboardButton(f"🗑️ លុប {sa}", callback_data=f"cln_subadmin_del|{sa}|{name}", color="inactive"))
+    kb.add(InlineKeyboardButton("➕ បន្ថែម Sub Admin", callback_data=f"cln_subadmin_add|{name}", color="active"))
+    kb.add(InlineKeyboardButton("⬅️ ត្រឡប់", callback_data=f"cln_more|{name}", color="inactive"))
+    bot.send_message(uid,
+        f"👥 <b>Sub Admins — {name}</b> ({len(cur)})",
+        parse_mode="HTML", reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cln_subadmin_add|"))
+def cb_cln_subadmin_add(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID or not IS_MASTER:
+        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
+    name = call.data.split("|", 1)[1]
+    if name not in clone_registry:
+        bot.answer_callback_query(call.id, "រកមិនឃើញ"); return
+    bot.answer_callback_query(call.id)
+    waiting[uid] = {"step": "cln_subadmin_add_id", "clone": name}
+    bot.send_message(uid, f"➕ <b>បន្ថែម Sub Admin — {name}</b>\nផ្ញើ Telegram ID (លេខ):",
+                      parse_mode="HTML", reply_markup=cancel_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cln_subadmin_del|"))
+def cb_cln_subadmin_del(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID or not IS_MASTER:
+        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
+    _, sa_id, name = call.data.split("|", 2)
+    if name not in clone_registry:
+        bot.answer_callback_query(call.id, "រកមិនឃើញ"); return
+    bot.answer_callback_query(call.id)
+    cur = _clone_load(name, "smm_sub_admins.json", [])
+    sa_id = int(sa_id)
+    if sa_id in cur:
+        cur.remove(sa_id)
+    _clone_save_restart(uid, name, "smm_sub_admins.json", cur,
+                         f"✅ លុប Sub Admin <code>{sa_id}</code> ចេញពី '<b>{name}</b>'")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cln_cooldown|"))
+def cb_cln_cooldown(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID or not IS_MASTER:
+        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
+    name = call.data.split("|", 1)[1]
+    if name not in clone_registry:
+        bot.answer_callback_query(call.id, "រកមិនឃើញ"); return
+    bot.answer_callback_query(call.id)
+    cur = _clone_load(name, "dep_qr_cooldown.json", {"seconds": DEP_QR_COOLDOWN_SEC})
+    waiting[uid] = {"step": "cln_cooldown_sec", "clone": name}
+    bot.send_message(uid,
+        f"⏳ <b>QR Cooldown — {name}</b>\nបច្ចុប្បន្ន: <b>{cur.get('seconds', DEP_QR_COOLDOWN_SEC)} វិនាទី</b>\n\n"
+        "វាយ <b>ចំនួនវិនាទី</b> ថ្មី (0 = បិទ Cooldown):",
+        parse_mode="HTML", reply_markup=cancel_kb())
+
+def _apply_clone_pay_update(uid, name, pay_method, camrapid_key="", manual_photo_id="", manual_info="",
+                             aba_key="", aba_merchant="", khpay_key="", khpay_merchant=""):
+    """កែប្រែ payment method របស់ clone ដែលមានស្រាប់ ហើយ restart វា"""
+    cfg = clone_registry.get(name)
+    if not cfg:
+        bot.send_message(uid, "❌ រកមិនឃើញ bot នេះទេ (ប្រហែលត្រូវបានលុប)។", reply_markup=admin_kb())
+        return
+    cfg["pay_method"] = pay_method
+    if pay_method == "auto":
+        cfg["camrapid_key"] = camrapid_key
+        cfg["manual_qr_photo_id"] = ""
+        cfg["manual_qr_info"] = ""
+        cfg["aba_key"] = ""
+        cfg["aba_merchant"] = ""
+        cfg["khpay_key"] = ""
+        cfg["khpay_merchant"] = ""
+    elif pay_method == "aba":
+        cfg["aba_key"] = aba_key
+        cfg["aba_merchant"] = aba_merchant
+        cfg["manual_qr_photo_id"] = ""
+        cfg["manual_qr_info"] = ""
+        cfg["camrapid_key"] = ""
+        cfg["khpay_key"] = ""
+        cfg["khpay_merchant"] = ""
+    elif pay_method == "khpay":
+        cfg["khpay_key"] = khpay_key
+        cfg["khpay_merchant"] = khpay_merchant
+        cfg["camrapid_key"] = ""
+        cfg["aba_key"] = ""
+        cfg["aba_merchant"] = ""
+        cfg["manual_qr_photo_id"] = ""
+        cfg["manual_qr_info"] = ""
+    else:
+        cfg["manual_qr_photo_id"] = manual_photo_id
+        cfg["manual_qr_info"] = manual_info
+        cfg["camrapid_key"] = ""
+        cfg["aba_key"] = ""
+        cfg["aba_merchant"] = ""
+        cfg["khpay_key"] = ""
+        cfg["khpay_merchant"] = ""
+    clone_registry[name] = cfg
+    _save(CLONES_REGISTRY, clone_registry)
+    qr_warn = ""
+    try:
+        wdir = _clone_dir(name)
+        _seed_clone_payment_files(wdir, cfg)
+        if pay_method == "manual" and not os.path.exists(os.path.join(wdir, "manual_qr.jpg")):
+            qr_warn = "\n\u26a0\ufe0f \u1798\u17b7\u1793\u17a2\u17b6\u1785\u1785\u1798\u17d2\u179b\u1784\u179a\u17bc\u1794 QR \u1791\u17c5 bot \u1793\u17c4\u17c7\u1794\u17b6\u1793 \u17d4 \u179f\u17bc\u1798\u1795\u17d2\u1789\u17be\u179a\u17bc\u1794 QR \u1798\u17d2\u178f\u1784\u1791\u17c0\u178f"
+    except Exception as _e:
+        logger.error(f"Seed payment files failed for clone '{name}': {_e}")
+        qr_warn = f"\n\u26a0\ufe0f seed error: {_e}"
+    restart_note = ""
+    try:
+        was_running = _clone_is_running(name)
+        if was_running:
+            _stop_clone(name)
+            time.sleep(1)
+            _spawn_clone(name, cfg)
+            restart_note = " ហើយ restart រួច។"
+        else:
+            restart_note = " (bot នេះកំពុងបិទ — ចាប់ផ្តើមវាដើម្បីអនុវត្ត)។"
+    except Exception as e:
+        logger.error(f"[clone_pay_update] restart failed for {name}: {e}")
+        restart_note = f" (⚠️ restart បរាជ័យ: {e})"
+    pay_txt = _clone_pay_txt(pay_method)
+    try:
+        bot.send_message(
+            uid,
+            f"✅ បានប្តូរការទូទាត់សម្រាប់ '<b>{name}</b>' ទៅជា {pay_txt}"
+            + restart_note
+            + (qr_warn or ""),
+            parse_mode="HTML",
+            reply_markup=admin_kb(),
+        )
+    except Exception as e:
+        logger.error(f"[clone_pay_update] notify admin failed: {e}")
+
+@bot.callback_query_handler(func=lambda c: c.data == "cln_list")
+def cb_cln_list(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID or not IS_MASTER:
+        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
+    bot.answer_callback_query(call.id)
+    if not clone_registry:
+        bot.send_message(uid, "📭 មិនទាន់មាន Bot រងណាមួយទេ។", reply_markup=admin_kb()); return
+    kb = InlineKeyboardMarkup(row_width=1)
+    for nm in clone_registry:
+        st = "🟢" if _clone_is_running(nm) else "🔴"
+        kb.add(InlineKeyboardButton(f"{st} {nm}", callback_data=f"cln_view|{nm}", color="default"))
+    kb.add(InlineKeyboardButton("🔄 Restart All (ទាញកូដ/Feature ថ្មីចូល Bot រងទាំងអស់)",
+                                 callback_data="cln_restart_all", color="progress"))
+    bot.send_message(uid, "📋 <b>Bot រងទាំងអស់</b>", parse_mode="HTML", reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda c: c.data == "cln_restart_all")
+def cb_cln_restart_all(call):
+    """Admin ចុចម្តង Restart Bot រង (Clone) ទាំងអស់ម្តងតែម្តង — ព្រោះ Clone រត់ script
+    ឯកសារដដែលនឹង Bot ដើម (មិនមែន copy ដាច់ដោយឡែកទេ) ដូច្នេះ Feature/ការកែថ្មីៗ
+    ណាមួយ (ដូចជា emoji list, refill/cancel ។ល។) ចូលទៅ Bot រងទាំងអស់ស្វ័យប្រវត្តិ
+    ភ្លាមតែ Restart — មិនចាំបាច់ Deploy ដាច់ដោយឡែកម្នាក់ៗឡើយ។"""
+    uid = call.message.chat.id
+    if uid != ADMIN_ID or not IS_MASTER:
+        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
+    bot.answer_callback_query(call.id, "កំពុង Restart...")
+    if not clone_registry:
+        bot.send_message(uid, "📭 មិនទាន់មាន Bot រងណាមួយទេ។", reply_markup=admin_kb()); return
+    ok, fail = [], []
+    for name, cfg in list(clone_registry.items()):
+        try:
+            _stop_clone(name); time.sleep(1); _spawn_clone(name, cfg)
+            ok.append(name)
+        except Exception as e:
+            logger.error(f"cln_restart_all '{name}': {e}")
+            fail.append(name)
+    msg = f"🔄 <b>Restart All បានបញ្ចប់!</b>\n━━━━━━━━━━━━━━━━━━\n✅ ជោគជ័យ ({len(ok)}): {', '.join(ok) if ok else '-'}"
+    if fail:
+        msg += f"\n❌ បរាជ័យ ({len(fail)}): {', '.join(fail)}"
+    bot.send_message(uid, msg, parse_mode="HTML", reply_markup=admin_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith(("cln_start|", "cln_stop|", "cln_restart|", "cln_delete|")))
+def cb_cln_actions(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID or not IS_MASTER:
+        bot.answer_callback_query(call.id, "🚫 គ្មានសិទ្ធិ"); return
+    action, name = call.data.split("|", 1)
+    cfg = clone_registry.get(name)
+    if not cfg:
+        bot.answer_callback_query(call.id, "រកមិនឃើញ"); return
+
+    if action == "cln_start":
+        _spawn_clone(name, cfg)
+        bot.answer_callback_query(call.id, "ដំណើរការ...")
+        bot.send_message(uid, f"✅ ដំណើរការ '{name}' ជោគជ័យ")
+    elif action == "cln_stop":
+        _stop_clone(name)
+        bot.answer_callback_query(call.id, "បានបិទ")
+        bot.send_message(uid, f"🛑 បានបិទ '{name}'")
+    elif action == "cln_restart":
+        _stop_clone(name); time.sleep(1); _spawn_clone(name, cfg)
+        bot.answer_callback_query(call.id, "Restarting...")
+        bot.send_message(uid, f"🔄 បាន restart '{name}'")
+    elif action == "cln_delete":
+        _stop_clone(name)
+        clone_registry.pop(name, None)
+        _save(CLONES_REGISTRY, clone_registry)
+        bot.answer_callback_query(call.id, "បានលុប")
+        bot.send_message(uid, f"🗑️ បានលុប '{name}' ចេញពី registry (ទិន្នន័យ bot_clones/{name}/ នៅសល់)")
+        return
+    bot.send_message(uid, f"ស្ថានភាព '{name}':")
+    cb_cln_view_inline = InlineKeyboardMarkup(row_width=2)
+    if _clone_is_running(name):
+        cb_cln_view_inline.add(InlineKeyboardButton("🛑 បិទ", callback_data=f"cln_stop|{name}", color="inactive"),
+                                InlineKeyboardButton("🔄 Restart", callback_data=f"cln_restart|{name}", color="progress"))
+    else:
+        cb_cln_view_inline.add(InlineKeyboardButton("▶️ ដំណើរការ", callback_data=f"cln_start|{name}", color="active"))
+    cb_cln_view_inline.add(InlineKeyboardButton("🗑️ លុប", callback_data=f"cln_delete|{name}", color="inactive"))
+    bot.send_message(uid, f"🤖 {name}", reply_markup=cb_cln_view_inline)
+
+# ═══════════════════════════════════════════════════════════
+#  SETTINGS CALLBACKS — Support / Sub Admin / CamRapidPay / Welcome
+# ═══════════════════════════════════════════════════════════
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("set_support:"))
+def cb_set_support(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID: bot.answer_callback_query(call.id, "🚫"); return
+    lang = call.data.split(":")[1]
+    bot.answer_callback_query(call.id)
+    waiting[uid] = {"step": "set_support_text", "lang": lang}
+    bot.send_message(uid,
+        f"✏️ <b>វាយ Support Message {'(ខ្មែរ)' if lang=='kh' else '(English)'}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"💡 HTML tags អនុញ្ញាត: <code>&lt;b&gt;</code>, <code>&lt;i&gt;</code>, <code>&lt;code&gt;</code>\n"
+        f"ឬផ្ញើ <code>-</code> ដើម្បី reset ទៅ default:",
+        parse_mode="HTML", reply_markup=cancel_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("subadmin:"))
+def cb_subadmin(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID: bot.answer_callback_query(call.id, "🚫"); return
+    action = call.data.split(":")[1]
+    bot.answer_callback_query(call.id)
+    if action == "add":
+        waiting[uid] = "subadmin_add_id"
+        bot.send_message(uid,
+            "➕ <b>បន្ថែម Sub Admin</b>\n━━━━━━━━━━━━━━━━━━\nផ្ញើ Telegram ID (លេខ) របស់ Sub Admin:",
+            parse_mode="HTML", reply_markup=cancel_kb())
+    elif action == "list_del":
+        if not sub_admins:
+            bot.send_message(uid, "📭 គ្មាន Sub Admin ទេ", reply_markup=admin_kb()); return
+        kb2 = InlineKeyboardMarkup(row_width=1)
+        for sa in sub_admins:
+            kb2.add(InlineKeyboardButton(f"🗑️ លុប {sa}", callback_data=f"subadmin:del:{sa}", color="inactive"))
+        bot.send_message(uid, "👥 <b>ជ្រើស Sub Admin ដើម្បីលុប:</b>",
+                         parse_mode="HTML", reply_markup=kb2)
+    else:
+        # del:<id>
+        parts = call.data.split(":")
+        if len(parts) == 3:
+            del_id = int(parts[2])
+            if del_id in sub_admins:
+                sub_admins.remove(del_id)
+                _save(SUB_ADMIN_FILE, sub_admins)
+            bot.send_message(uid, f"✅ លុប Sub Admin <code>{del_id}</code> ចេញ",
+                             parse_mode="HTML", reply_markup=admin_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("set_camrapid:"))
+def cb_set_camrapid(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID: bot.answer_callback_query(call.id, "🚫"); return
+    action = call.data.split(":")[1]
+    bot.answer_callback_query(call.id)
+    if action == "edit":
+        waiting[uid] = "set_camrapid_key"
+        bot.send_message(uid,
+            "🔑 <b>ផ្ញើ CamRapidPay API Key ថ្មី:</b>\n"
+            "ឬផ្ញើ <code>-</code> ដើម្បី reset ទៅ env/default",
+            parse_mode="HTML", reply_markup=cancel_kb())
+    elif action == "webhook":
+        waiting[uid] = "set_webhook_url"
+        bot.send_message(uid,
+            "🌐 <b>ផ្ញើ Webhook URL ថ្មី:</b>\n"
+            "ឧ: <code>https://your-domain.com/webhook/camrapid</code>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "💡 CamRapidPay ទាមទារ Field នេះជានិច្ច (Required) — Bot មាន Route "
+            "<code>/webhook/camrapid</code> ស្រាប់ដើម្បីទទួល។\n"
+            "ឬផ្ញើ <code>-</code> ដើម្បី Reset ទៅ Auto-detect (Render URL ឬ Placeholder)",
+            parse_mode="HTML", reply_markup=cancel_kb())
+    elif action == "test":
+        key = _effective_camrapid_key()
+        try:
+            r = http.get(CAMRAPID_CHECK, params={"api_key": key, "reference": "test_ping"}, timeout=10)
+            d = r.json()
+            ok = r.status_code < 500
+            bot.send_message(uid,
+                f"{'✅' if ok else '❌'} <b>CamRapidPay Test (Check Endpoint)</b>\n"
+                f"Status: <b>{r.status_code}</b>\n"
+                f"Response: <code>{str(d)[:200]}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"💡 <i>Status 404 + \"Transaction not found\" នៅទីនេះជារឿងធម្មតា — "
+                f"មិនមែនសញ្ញាបញ្ហាទេ ព្រោះ reference ដែល Test ជា Fake។ Endpoint នេះមិនមែនជាកន្លែង "
+                f"Generate QR ទេ — ប្រើ 🧾 Test Generate QR ខាងក្រោមដើម្បីរកមូលហេតុពិត។</i>",
+                parse_mode="HTML", reply_markup=admin_kb())
+        except Exception as e:
+            bot.send_message(uid, f"❌ Test failed: <code>{e}</code>",
+                             parse_mode="HTML", reply_markup=admin_kb())
+    elif action == "testcreate":
+        key = _effective_camrapid_key()
+        test_ref = f"TEST{uid}_{int(time.time())}"[:50]
+        bot.send_message(uid, "⏳ កំពុង Test ការ Generate QR ជាមួយ CAMRAPID_CREATE endpoint ($0.10)...")
+        try:
+            payload = {"api_key": key, "amount": 0.10, "reference": test_ref,
+                       "webhook_url": _effective_webhook_url()}
+            r = http.post(CAMRAPID_CREATE, json=payload,
+                          headers={"Content-Type": "application/json", "Accept": "application/json"},
+                          timeout=15)
+            try:
+                d = r.json()
+            except Exception:
+                d = {"raw_text": r.text[:300]}
+            ok = isinstance(d, dict) and d.get("success")
+            bot.send_message(uid,
+                f"{'✅' if ok else '❌'} <b>CamRapidPay Test (Create Endpoint — QR ពិតប្រាកដ)</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🌐 URL: <code>{CAMRAPID_CREATE}</code>\n"
+                f"🔑 Key: <code>{key[:8]}...{key[-4:] if len(key)>12 else ''}</code>\n"
+                f"📡 HTTP Status: <b>{r.status_code}</b>\n"
+                f"📋 Response: <code>{str(d)[:500]}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                + ("✅ QR គួរតែចេញបានធម្មតា!" if ok else
+                   "❌ នេះជាមូលហេតុពិតប្រាកដដែល QR មិនចេញ — សូមអានសារ Error ខាងលើ "
+                   "(ឧ. \"Invalid API Key\", \"Insufficient balance\", \"Merchant not found\" ។ល។)"),
+                parse_mode="HTML", reply_markup=admin_kb())
+        except Exception as e:
+            bot.send_message(uid,
+                f"❌ <b>Connection Failed</b>\n<code>{e}</code>\n\n"
+                f"💡 ប្រហែល Network/Egress ត្រូវបាន Block លើ Server ដែល Deploy Bot នេះ "
+                f"(Render/VPS) ពី <code>pay.camrapidpay.com</code>",
+                parse_mode="HTML", reply_markup=admin_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("set_aba:"))
+def cb_set_aba(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID: bot.answer_callback_query(call.id, "🚫"); return
+    action = call.data.split(":")[1]
+    bot.answer_callback_query(call.id)
+    if action == "edit_key":
+        waiting[uid] = "set_aba_key"
+        bot.send_message(uid,
+            "🔑 <b>ផ្ញើ ABA PayWay Profile Key ថ្មី</b> (khmer-system.com/operator/profile):\n"
+            "ឬផ្ញើ <code>-</code> ដើម្បី reset ទៅ env/default",
+            parse_mode="HTML", reply_markup=cancel_kb())
+    elif action == "edit_merchant":
+        waiting[uid] = "set_aba_merchant"
+        bot.send_message(uid,
+            "🏪 <b>ផ្ញើ ABA PayWay Merchant ID ថ្មី</b> (ឧ. <code>r72mCt</code>):\n"
+            "ឬផ្ញើ <code>-</code> ដើម្បី reset ទៅ env/default",
+            parse_mode="HTML", reply_markup=cancel_kb())
+    elif action == "testcreate":
+        bot.send_message(uid, "⏳ កំពុង Test Generate QR ជាមួយ ABA PayWay ($0.10)...")
+        test_data = _aba_create(uid, 0.10, f"tg{uid}")
+        ok = bool(test_data)
+        bot.send_message(uid,
+            f"{'✅' if ok else '❌'} <b>ABA PayWay Test (Generate QR)</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🌐 URL: <code>{ABA_CREATE_URL}</code>\n"
+            f"📋 Response: <code>{_tg_escape(test_data if ok else _last_aba_error, 400)}</code>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            + ("✅ QR គួរតែចេញបានធម្មតា!" if ok else
+               "❌ សូមអានសារ Error ខាងលើ (ឧ. Key/Merchant ID មិនត្រឹមត្រូវ, service down ។ល។)"),
+            parse_mode="HTML", reply_markup=admin_kb())
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("set_khpay:"))
+def cb_set_khpay(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID:
+        bot.answer_callback_query(call.id, "🚫"); return
+    action = call.data.split(":")[1]
+    bot.answer_callback_query(call.id)
+    if action == "edit":
+        waiting[uid] = "set_khpay_key"
+        bot.send_message(uid,
+            "💠 <b>ផ្ញើ KHPAY API Key ថ្មី:</b>\n"
+            "(យកពី https://khpay.site/dashboard/settings)\n"
+            "ឬផ្ញើ <code>-</code> ដើម្បី reset ទៅ env/default",
+            parse_mode="HTML", reply_markup=cancel_kb())
+        return
+    if action == "edit_merchant":
+        waiting[uid] = "set_khpay_merchant"
+        bot.send_message(uid,
+            "🏪 <b>ផ្ញើ KHPAY Merchant ID:</b>\n"
+            "ឧ: <code>mch_ea4352a8ebc20c43</code>\n"
+            "ឬផ្ញើ <code>-</code> ដើម្បីលុប (ប្រើ default merchant)",
+            parse_mode="HTML", reply_markup=cancel_kb())
+        return
+    if action == "testcreate":
+        bot.send_message(uid, "⏳ កំពុង Test Generate QR ជាមួយ KHPAY ($0.10)...")
+        test_data = _khpay_create(uid, 0.10, note="KHPAY test")
+        ok = bool(test_data)
+        detail = _tg_escape(test_data if ok else _last_khpay_error, 400)
+        mid = _effective_khpay_merchant() or "(default)"
+        msg = (
+            "%s <b>KHPAY Test (Generate QR)</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "🌐 URL: <code>%s</code>\n"
+            "🏪 Merchant: <code>%s</code>\n"
+            "📋 Response: <code>%s</code>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "%s"
+        ) % (
+            "✅" if ok else "❌",
+            KHPAY_CREATE_URL,
+            mid,
+            detail,
+            "✅ QR គួរតែចេញបានធម្មតា!" if ok else "❌ សូមពិនិត្យ API Key / Merchant / account នៅ khpay.site",
+        )
+        bot.send_message(uid, msg, parse_mode="HTML", reply_markup=admin_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("set_welcome:"))
+def cb_set_welcome(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID: bot.answer_callback_query(call.id, "🚫"); return
+    action = call.data.split(":")[1]
+    bot.answer_callback_query(call.id)
+    if action == "text":
+        waiting[uid] = "set_welcome_msg_text"
+        bot.send_message(uid,
+            "📝 <b>វាយ Welcome Message ថ្មី:</b>\n"
+            "💡 ប្រើ <code>{}</code> ដើម្បីដាក់ balance\n"
+            "ឬផ្ញើ <code>-</code> ដើម្បី reset ទៅ default:",
+            parse_mode="HTML", reply_markup=cancel_kb())
+    elif action == "reset":
+        welcome_cfg.pop("custom_msg", None)
+        _save(WELCOME_SETTINGS_FILE, welcome_cfg)
+        bot.send_message(uid, "✅ Welcome Message reset ទៅ default!", reply_markup=admin_kb())
+# ═══════════════════════════════════════════════════════════
+@bot.callback_query_handler(func=lambda c: c.data.startswith("emojimenu:"))
+def cb_emojimenu(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID:
+        bot.answer_callback_query(call.id, "🚫 Master Admin only!"); return
+    action = call.data.split(":", 1)[1]
+    bot.answer_callback_query(call.id)
+    if action == "set":
+        waiting.pop(uid, None)   # ជម្រះ state ចាស់ ពេលបើក grid ថ្មី
+        missing = [ch for ch, v in EMOJI_MAP.items() if not v]
+        if not missing:
+            bot.send_message(uid, "🎉 <b>Emoji ទាំងអស់បានកំណត់រួច 100% ហើយ!</b>",
+                parse_mode="HTML", reply_markup=admin_kb()); return
+        bot.send_message(uid,
+            "✏️ <b>ជ្រើស Emoji ដែលចង់កំណត់</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "👇 ចុចលើ emoji ណាមួយខាងក្រោម រួចផ្ញើ ឬ Forward Premium version របស់វា\n"
+            "<i>bot នឹងចាប់យក custom_emoji_id ដោយស្វ័យប្រវត្តិ — មិនចាំបាច់ដឹង ID ដោយខ្លួនឯងទេ</i>\n\n"
+            f"📊 កំណត់រួច: {sum(1 for v in EMOJI_MAP.values() if v)}/{len(EMOJI_MAP)} — នៅសល់ {len(missing)}",
+            parse_mode="HTML", reply_markup=missing_emoji_kb())
+    elif action == "change":
+        waiting.pop(uid, None)   # ជម្រះ state ចាស់ ពេលបើក grid ថ្មី
+        done_n = sum(1 for v in EMOJI_MAP.values() if v)
+        bot.send_message(uid,
+            "🔄 <b>ប្តូរ Premium Emoji ដែលមានស្រាប់</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "👇 ចុចលើ Emoji ណាមួយខាងក្រោម (✅ = មានស្រាប់, ⬜ = មិនទាន់កំណត់)\n"
+            "រួចផ្ញើ ឬ Forward Premium version ថ្មី — Bot នឹងជំនួស ID ចាស់ភ្លាមៗ\n\n"
+            f"📊 កំណត់រួច: {done_n}/{len(EMOJI_MAP)}",
+            parse_mode="HTML", reply_markup=all_emoji_kb())
+    elif action == "menu":
+        waiting.pop(uid, None)   # ជម្រះ state ចាស់ (ដូចជា await_setemoji_single) បើនៅសល់
+        done_n = sum(1 for v in EMOJI_MAP.values() if v)
+        bot.send_message(uid,
+            f"😊 <b>Premium Emoji Settings</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"កំណត់រួច: <b>{done_n}/{len(EMOJI_MAP)}</b>\n\n"
+            f"ជ្រើសសកម្មភាព:",
+            parse_mode="HTML", reply_markup=emoji_menu_kb())
+    elif action == "setmulti":
+        waiting[uid] = "await_setemojis"
+        missing = [ch for ch, v in EMOJI_MAP.items() if not v]
+        preview = " ".join(missing[:40]) + (" ..." if len(missing) > 40 else "")
+        bot.send_message(uid,
+            "📋 <b>កំណត់ Emoji ច្រើនម្តង (Advanced)</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "📤 ផ្ញើ ឬ Forward សារដែលមាន Premium Emoji ច្រើនក្នុងសារតែមួយ\n"
+            "<i>(លំដាប់ណាក៏បាន — ផ្ញើជាប់ៗគ្នាបានច្រើនសារដោយមិនចាំបាច់ចុច Menu ម្តងទៀត)</i>\n\n"
+            f"📊 កំណត់រួចហើយ: {sum(1 for v in EMOJI_MAP.values() if v)}/{len(EMOJI_MAP)} — នៅសល់ {len(missing)}\n"
+            + (f"⬜ នៅសល់: {preview}\n\n" if missing else "\n") +
+            "✕ Cancel ពេលរួចរាល់",
+            parse_mode="HTML", reply_markup=cancel_kb())
+    elif action == "list":
+        bot.send_message(uid, _emoji_status_text(), parse_mode="HTML", reply_markup=admin_kb())
+    elif action == "preview":
+        text, entities, n = _build_emoji_preview()
+        if n == 0:
+            bot.send_message(uid, "⚠️ មិនទាន់មាន Emoji ណាមួយបានកំណត់ទេ។\nAdmin → កំណត់ Emoji ថ្មី",
+                reply_markup=emoji_menu_kb())
+            return
+        bot.send_message(uid,
+            f"🎨 <b>មើលសាកល្បង Premium Emoji</b> ({n} icon)\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"👇 ក្នុងសារ (tg-emoji / entities):\n"
+            f"<i>បើនៅជា unicode ធម្មតា → ID ខូច ឬ account គ្មាន Premium</i>",
+            parse_mode="HTML")
+        try:
+            bot.send_message(uid, text, entities=entities, reply_markup=emoji_menu_kb())
+        except Exception as e:
+            bot.send_message(uid,
+                f"⚠️ entities បរាជ័យ: <code>{e}</code>\nសាក HTML:",
+                parse_mode="HTML")
+            # HTML fallback of same icons
+            html = " ".join(
+                f'<tg-emoji emoji-id="{_valid_emoji_id(eid)}">{ch}</tg-emoji>'
+                for ch, eid in EMOJI_MAP.items() if _valid_emoji_id(eid)
+            )
+            bot.send_message(uid, html or text, parse_mode="HTML", reply_markup=emoji_menu_kb())
+        # also show user main menu so reply-keyboard icons are visible
+        bot.send_message(uid, "📱 <b>Menu ខាងក្រោម</b> — មើល icon លើប៊ូតុង",
+            parse_mode="HTML", reply_markup=main_kb(uid))
+    elif action == "id":
+        waiting[uid] = "await_emojiid"
+        bot.send_message(uid,
+            "🆔 <b>យក Emoji ID</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "📤 ផ្ញើ ឬ Forward សារដែលមាន Premium Emoji មកទីនេះ",
+            parse_mode="HTML", reply_markup=cancel_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("emojipick:"))
+def cb_emojipick(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID:
+        bot.answer_callback_query(call.id, "🚫 Master Admin only!"); return
+    ch = call.data.split(":", 1)[1]
+    ch = _emoji_key_lookup(ch) or ch
+    if ch not in EMOJI_MAP:
+        bot.answer_callback_query(call.id, "❌ Emoji នេះលែងមាន!"); return
+    bot.answer_callback_query(call.id)
+    waiting[uid] = {"step": "await_setemoji_single", "char": ch}
+    bot.send_message(uid,
+        f"✏️ <b>កំណត់ Premium Emoji សម្រាប់ {ch}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📤 ផ្ញើ ឬ Forward សារដែលមាន Premium version របស់ {ch} ចូលទីនេះ\n"
+        f"<i>bot នឹងចាប់យក ID ដោយស្វ័យប្រវត្តិ ហើយភ្ជាប់ទៅ {ch} ភ្លាមៗ</i>",
+        parse_mode="HTML", reply_markup=cancel_kb())
+
+def _do_broadcast(admin_uid, message):
+    """ផ្សព្វផ្សាយទៅ User — skip banned + blocked, rate-limit, រាយការណ៍ progress"""
+    waiting.pop(admin_uid, None)
+    targets = [
+        u for u in users_db.keys()
+        if not users_db[u].get("banned") and not users_db[u].get("blocked")
+    ]
+    total = len(targets)
+    bot.send_message(admin_uid,
+        f"📢 កំពុងផ្សព្វផ្សាយទៅ <b>{total}</b> users\n"
+        f"<i>(skip banned + blocked)</i>\n"
+        f"⏱ ~{max(1, total // 25)}–{max(2, total // 12)} វិនាទី (លឿនជាងមុន)",
+        parse_mode="HTML")
+    sent = failed = blocked_n = 0
+    for i, u_id in enumerate(targets, 1):
+        try:
+            if message.photo:
+                bot.send_photo(int(u_id), message.photo[-1].file_id, caption=message.caption or "")
+            elif message.video:
+                bot.send_video(int(u_id), message.video.file_id, caption=message.caption or "")
+            elif message.voice:
+                bot.send_voice(int(u_id), message.voice.file_id, caption=message.caption or "")
+            else:
+                bot.send_message(int(u_id), message.text or "", parse_mode="HTML")
+            sent += 1
+        except Exception as e:
+            err = str(e)
+            if _is_block_error(e):
+                _mark_user_blocked(u_id, True)
+                blocked_n += 1
+            elif "retry after" in err.lower() or "Too Many Requests" in err or "Flood" in err:
+                # Telegram FloodWait — pause then retry once
+                import re as _re
+                m = _re.search(r"retry after (\d+)", err, _re.I)
+                wait = int(m.group(1)) if m else 3
+                wait = min(max(wait, 1), 30)
+                time.sleep(wait)
+                try:
+                    if message.photo:
+                        bot.send_photo(int(u_id), message.photo[-1].file_id, caption=message.caption or "")
+                    elif message.video:
+                        bot.send_video(int(u_id), message.video.file_id, caption=message.caption or "")
+                    elif message.voice:
+                        bot.send_voice(int(u_id), message.voice.file_id, caption=message.caption or "")
+                    else:
+                        bot.send_message(int(u_id), message.text or "", parse_mode="HTML")
+                    sent += 1
+                except Exception as e2:
+                    if _is_block_error(e2):
+                        _mark_user_blocked(u_id, True)
+                        blocked_n += 1
+                    else:
+                        failed += 1
+            else:
+                failed += 1
+        time.sleep(0.035)  # ~25–28 msg/s soft limit — លឿនជាង 0.05
+        if i % 50 == 0 and i < total:
+            try:
+                bot.send_message(admin_uid,
+                    f"⏳ Progress: {i}/{total} (✅{sent} 🚫{blocked_n} ❌{failed})")
+            except Exception:
+                pass
+    bot.send_message(admin_uid,
+        f"📢 <b>ផ្សព្វផ្សាយរួចរាល់!</b>\n━━━━━━━━━━━━━━━━━━\n"
+        f"✅ ជោគជ័យ: <b>{sent}</b>\n"
+        f"🚫 Blocked (ថ្មី): <b>{blocked_n}</b>\n"
+        f"❌ បរាជ័យផ្សេង: <b>{failed}</b>\n"
+        f"👥 គោលដៅ: <b>{total}</b>",
+        parse_mode="HTML",
+        reply_markup=admin_kb() if admin_uid == ADMIN_ID else sub_admin_kb())
+
+
+
+# ═══════════════════════════════════════════════════════════
+#  PHOTO HANDLER
+# ═══════════════════════════════════════════════════════════
+@bot.message_handler(content_types=["photo"])
+def handle_photo(message):
+    uid = message.chat.id
+    step = waiting.get(uid)
+
+    # ── User (រួមទាំង Admin បើសាកល្បង) ផ្ញើភស្តុតាង ដាក់លុយដោយដៃ ──────
+    if isinstance(step, dict) and step.get("step") == "await_manual_dep_proof":
+        amount   = float(step.get("amount", 0))
+        uid_str  = str(uid)
+        dep_id   = _gen_manual_dep_id()
+        proof_id = message.photo[-1].file_id
+        manual_deps[dep_id] = {
+            "uid": uid_str, "amount": amount, "proof_photo_id": proof_id,
+            "status": "pending", "ts": int(time.time()),
+        }
+        _save(MANUAL_DEP_FILE, manual_deps)
+        waiting.pop(uid, None)
+        bot.send_message(uid,
+            f"⏳ <b>សំណើដាក់លុយរបស់អ្នកកំពុងត្រូវបានពិនិត្យ!</b>\n"
+            f"💰 ចំនួន: <b>${amount:.2f}</b>\n"
+            f"📌 Ref: <code>{dep_id}</code>\n\n"
+            f"Admin នឹងអនុម័តក្នុងពេលឆាប់ៗនេះ 🙏",
+            parse_mode="HTML", reply_markup=main_kb(uid))
+        try:
+            u = users_db.get(uid_str, {})
+            name = u.get("name") or u.get("username") or "?"
+            kb = InlineKeyboardMarkup()
+            kb.row(
+                InlineKeyboardButton("✅ អនុម័ត", callback_data=f"mdep:ok:{dep_id}", color="success"),
+                InlineKeyboardButton("❌ បដិសេធ", callback_data=f"mdep:no:{dep_id}", color="danger"),
+            )
+            pnotify_photo(proof_id,
+                caption=f"🧾 <b>សំណើដាក់លុយដោយដៃ ថ្មី!</b>\n"
+                        f"👤 {name} (<code>{uid_str}</code>)\n"
+                        f"💰 ចំនួន: <b>${amount:.2f}</b>\n"
+                        f"📌 Ref: <code>{dep_id}</code>",
+                reply_markup=kb)
+        except Exception as _e:
+            logger.debug(f"[silent] {_e}")
+        return
+
+    if uid == ADMIN_ID and step == "await_manual_qr_photo":
+        if not getattr(message, "photo", None):
+            bot.send_message(uid, "⚠️ សូមផ្ញើរូបភាព QR (Photo)។", reply_markup=cancel_kb())
+            return
+        try:
+            manual_qr_cfg["photo_id"] = message.photo[-1].file_id
+            try:
+                _fi = bot.get_file(manual_qr_cfg["photo_id"])
+                _data = bot.download_file(_fi.file_path)
+                with open(_dpath("manual_qr.jpg"), "wb") as _f:
+                    _f.write(_data)
+                manual_qr_cfg["photo_path"] = "manual_qr.jpg"
+            except Exception as _dl:
+                logger.warning(f"[manual_qr] local save failed: {_dl}")
+            _save(MANUAL_QR_FILE, manual_qr_cfg)
+            waiting.pop(uid, None)
+            bot.send_message(uid, "✅ រូប QR បានកំណត់ជោគជ័យ!", parse_mode="HTML",
+                              reply_markup=manual_qr_admin_kb())
+        except Exception as e:
+            logger.error(f"[manual_qr] set photo failed: {e}")
+            bot.send_message(uid, f"⚠️ កំណត់រូប QR បរាជ័យ: {e}", reply_markup=cancel_kb())
+        return
+
+    if uid == ADMIN_ID and isinstance(step, dict) and step.get("step") == "newbot_manual_qr_photo":
+        if not getattr(message, "photo", None):
+            bot.send_message(uid, "⚠️ សូមផ្ញើរូបភាព QR (Photo)។", parse_mode="HTML", reply_markup=cancel_kb())
+            return
+        photo_id = message.photo[-1].file_id
+        waiting[uid] = {**step, "step": "newbot_manual_qr_info", "manual_qr_photo_id": photo_id}
+        bot.send_message(uid,
+            f"{_step_label(6, 7)} — វាយ <b>ព័ត៌មានបន្ថែម</b> ខាងក្រោម QR (ឧ. ឈ្មោះគណនី/លេខទូរស័ព្ទ)\n"
+            "ឬផ្ញើ <code>-</code> បើគ្មាន:",
+            parse_mode="HTML", reply_markup=cancel_kb())
+        return
+
+    if uid == ADMIN_ID and isinstance(step, dict) and step.get("step") == "cln_pay_qr_photo":
+        if not getattr(message, "photo", None):
+            bot.send_message(uid, "⚠️ សូមផ្ញើ <b>រូបភាព</b> QR (Photo)។", parse_mode="HTML", reply_markup=cancel_kb())
+            return
+        photo_id = message.photo[-1].file_id
+        waiting[uid] = {**step, "step": "cln_pay_qr_info", "manual_qr_photo_id": photo_id}
+        bot.send_message(uid,
+            "វាយ <b>ព័ត៌មានបន្ថែម</b> ខាងក្រោម QR (ឧ. ឈ្មោះគណនី/លេខទូរស័ព្ទ)\n"
+            "ឬផ្ញើ <code>-</code> បើគ្មាន:",
+            parse_mode="HTML", reply_markup=cancel_kb())
+        return
+
+    if uid == ADMIN_ID:
+        # ── Premium Emoji flows also accept forwarded photos (caption emoji) ──
+        if isinstance(step, dict) and step.get("step") == "await_setemoji_single":
+            ch = step["char"]
+            found = _extract_custom_emoji(message)
+            if not found:
+                bot.send_message(uid,
+                    f"❌ រកមិនឃើញ premium emoji ក្នុងសារនោះទេ។ ផ្ញើ Emoji ថ្មី ឬ ✕ Cancel។",
+                    parse_mode="HTML", reply_markup=cancel_kb())
+                return
+            # ✅ ទទួល emoji ណាក៏បាន (មិនតម្រូវឲ្យដូច ch ដើមទេ — តាមសំណើអ្នកប្រើ)
+            match_eid = found[0][1]
+            EMOJI_MAP[ch] = match_eid
+            _nch = ch.replace("\ufe0f", "").replace("️", "")
+            if _nch and _nch != ch:
+                EMOJI_MAP[_nch] = match_eid
+            if not ch.endswith("️"):
+                EMOJI_MAP[ch + "️"] = match_eid
+            _persist_emoji_map()
+            waiting.pop(uid, None)
+            remaining = [c for c, v in EMOJI_MAP.items() if not v]
+            done_n = sum(1 for v in EMOJI_MAP.values() if v)
+            if remaining:
+                bot.send_message(uid,
+                    f"✅ {ch} → <code>{match_eid}</code> កំណត់ជោគជ័យ!\n"
+                    f"📊 {done_n}/{len(EMOJI_MAP)} — នៅសល់ {len(remaining)}\n\n"
+                    f"👇 ជ្រើស emoji បន្ត:",
+                    parse_mode="HTML", reply_markup=missing_emoji_kb())
+            else:
+                bot.send_message(uid,
+                    f"✅ {ch} → <code>{match_eid}</code> កំណត់ជោគជ័យ!\n\n"
+                    f"🎉 <b>រួចរាល់! Emoji ទាំងអស់បានកំណត់ 100%!</b>",
+                    parse_mode="HTML", reply_markup=admin_kb())
+            return
+        if step == "await_setemojis":
+            report = _apply_setemojis(message)
+            remaining = sum(1 for v in EMOJI_MAP.values() if not v)
+            if not report:
+                bot.send_message(uid,
+                    "❌ រកមិនឃើញ premium/custom emoji ក្នុងសារនោះទេ។ ផ្ញើសារផ្សេងទៀត ឬ ✕ Cancel។",
+                    parse_mode="HTML", reply_markup=cancel_kb())
+                return
+            if remaining == 0:
+                waiting.pop(uid, None)
+                bot.send_message(uid,
+                    report + "\n\n🎉 <b>រួចរាល់! Emoji ទាំងអស់បានកំណត់ 100%!</b>",
+                    parse_mode="HTML", reply_markup=admin_kb())
+            else:
+                missing_preview = " ".join(ch for ch, v in EMOJI_MAP.items() if not v)[:200]
+                bot.send_message(uid,
+                    report + f"\n\n📤 ផ្ញើសារបន្តទៀត ({remaining} នៅសល់) ឬ ✕ Cancel ពេលរួច:\n⬜ {missing_preview}",
+                    parse_mode="HTML", reply_markup=cancel_kb())
+            return
+        if step == "await_emojiid":
+            report = _emojiid_text(message)
+            if report:
+                bot.send_message(uid, report + "\n\n📤 ផ្ញើសារបន្តទៀត ឬ ✕ Cancel ពេលរួច:",
+                    parse_mode="HTML", reply_markup=cancel_kb())
+            else:
+                bot.send_message(uid,
+                    "❌ រកមិនឃើញ premium/custom emoji ក្នុងសារនោះទេ។ ផ្ញើសារផ្សេងទៀត ឬ ✕ Cancel។",
+                    parse_mode="HTML", reply_markup=cancel_kb())
+            return
+        if step == "broadcast_msg":
+            _do_broadcast(uid, message)
+        elif step == "set_welcome_photo":
+            file_id = message.photo[-1].file_id
+            _save_welcome_photo(file_id)
+            waiting.pop(uid, None)
+            bot.send_message(uid,
+                "✅ <b>Welcome Photo បានរក្សា!</b>\n"
+                "រូបនេះនឹងបង្ហាញពេល User ចុច /start",
+                parse_mode="HTML", reply_markup=admin_kb())
+        return
+
+# ═══════════════════════════════════════════════════════════
+#  VIDEO HANDLER — Admin ផ្ញើវីដេអូបង្រៀន (Tutorial Video) ដែលនឹង
+#  បង្ហាញដល់ User ពេលចុច 💡 របៀបប្រើប្រាស់ ក្នុង Main Menu ។
+# ═══════════════════════════════════════════════════════════
+@bot.message_handler(content_types=["video"])
+def handle_video(message):
+    uid  = message.chat.id
+    step = waiting.get(uid)
+    if uid != ADMIN_ID and uid not in sub_admins:
+        return
+    if step == "set_tutorial_video":
+        file_id = message.video.file_id
+        _save_tutorial_video(file_id)
+        waiting.pop(uid, None)
+        bot.send_message(uid,
+            "✅ <b>វីដេអូបង្រៀនបានរក្សា!</b>\n"
+            "វីដេអូនេះនឹងបង្ហាញពេល User ចុច 💡 របៀបប្រើប្រាស់",
+            parse_mode="HTML", reply_markup=admin_kb())
+    elif step == "set_tiktok_success_video":
+        file_id = message.video.file_id
+        _save_tiktok_success_video(file_id)
+        waiting.pop(uid, None)
+        bot.send_message(uid,
+            "✅ <b>វីដេអូ TikTok ជោគជ័យ បានរក្សា!</b>\n"
+            "វីដេអូនេះនឹងផ្ញើទៅ User ភ្លាមៗ ក្រោយពេលទិញ Package "
+            "🇰🇭 TikTok Khmer ជោគជ័យ",
+            parse_mode="HTML", reply_markup=admin_kb())
+    elif step == "broadcast_msg":
+        _do_broadcast(uid, message)
+
+# ═══════════════════════════════════════════════════════════
+#  VOICE HANDLER — Admin ផ្ញើសារជា Voice (ឧ. សម្រាប់ ផ្សព្វផ្សាយ)
+# ═══════════════════════════════════════════════════════════
+@bot.message_handler(content_types=["voice"])
+def handle_voice(message):
+    uid  = message.chat.id
+    step = waiting.get(uid)
+    if uid != ADMIN_ID and uid not in sub_admins:
+        return
+    if step == "broadcast_msg":
+        _do_broadcast(uid, message)
+
+# ═══════════════════════════════════════════════════════════
+#  STICKER HANDLER — ចាំបាច់សម្រាប់ Premium Emoji ដែលផ្ញើមកជា
+#  content_type="sticker" (sticker.type == "custom_emoji") ។ ដោយគ្មាន
+#  content_type="sticker" (sticker.type == "custom_emoji") ។ ដោយគ្មាន
+#  handler នេះ សារបែបនេះនឹងមិនចូល photo handler ក៏មិនចូល handle_msg
+#  (ដែល default content_types=['text'] តែប៉ុណ្ណោះ ព្រោះមិនបានបញ្ជាក់
+#  content_types ច្បាស់លាស់) ធ្វើឲ្យ Bot ស្ងាត់ស្ងៀមទាំងស្រុងគ្មាន reply
+#  ═══════════════════════════════════════════════════════════
+@bot.message_handler(content_types=["sticker"])
+def handle_sticker(message):
+    uid = message.chat.id
+    step = waiting.get(uid)
+    if uid != ADMIN_ID:
+        return
+    if isinstance(step, dict) and step.get("step") == "await_setemoji_single":
+        ch = step["char"]
+        found = _extract_custom_emoji(message)
+        if not found:
+            bot.send_message(uid,
+                f"❌ រកមិនឃើញ premium emoji ក្នុងសារនោះទេ។ ផ្ញើ Emoji ថ្មី ឬ ✕ Cancel។",
+                parse_mode="HTML", reply_markup=cancel_kb())
+            return
+        # ✅ ទទួល emoji ណាក៏បាន (មិនតម្រូវឲ្យដូច ch ដើមទេ — តាមសំណើអ្នកប្រើ)
+        match_eid = found[0][1]
+        EMOJI_MAP[ch] = match_eid
+        _persist_emoji_map()
+        waiting.pop(uid, None)
+        remaining = [c for c, v in EMOJI_MAP.items() if not v]
+        done_n = sum(1 for v in EMOJI_MAP.values() if v)
+        if remaining:
+            bot.send_message(uid,
+                f"✅ {ch} → <code>{match_eid}</code> កំណត់ជោគជ័យ!\n"
+                f"📊 {done_n}/{len(EMOJI_MAP)} — នៅសល់ {len(remaining)}\n\n"
+                f"👇 ជ្រើស emoji បន្ត:",
+                parse_mode="HTML", reply_markup=missing_emoji_kb())
+        else:
+            bot.send_message(uid,
+                f"✅ {ch} → <code>{match_eid}</code> កំណត់ជោគជ័យ!\n\n"
+                f"🎉 <b>រួចរាល់! Emoji ទាំងអស់បានកំណត់ 100%!</b>",
+                parse_mode="HTML", reply_markup=admin_kb())
+        return
+    if step == "await_setemojis":
+        report = _apply_setemojis(message)
+        remaining = sum(1 for v in EMOJI_MAP.values() if not v)
+        if not report:
+            bot.send_message(uid,
+                "❌ រកមិនឃើញ premium/custom emoji ក្នុងសារនោះទេ។ ផ្ញើសារផ្សេងទៀត ឬ ✕ Cancel។",
+                parse_mode="HTML", reply_markup=cancel_kb())
+            return
+        if remaining == 0:
+            waiting.pop(uid, None)
+            bot.send_message(uid,
+                report + "\n\n🎉 <b>រួចរាល់! Emoji ទាំងអស់បានកំណត់ 100%!</b>",
+                parse_mode="HTML", reply_markup=admin_kb())
+        else:
+            missing_preview = " ".join(ch for ch, v in EMOJI_MAP.items() if not v)[:200]
+            bot.send_message(uid,
+                report + f"\n\n📤 ផ្ញើសារបន្តទៀត ({remaining} នៅសល់) ឬ ✕ Cancel ពេលរួច:\n⬜ {missing_preview}",
+                parse_mode="HTML", reply_markup=cancel_kb())
+        return
+    if step == "await_emojiid":
+        report = _emojiid_text(message)
+        if report:
+            bot.send_message(uid, report + "\n\n📤 ផ្ញើសារបន្តទៀត ឬ ✕ Cancel ពេលរួច:",
+                parse_mode="HTML", reply_markup=cancel_kb())
+        else:
+            bot.send_message(uid,
+                "❌ រកមិនឃើញ premium/custom emoji ក្នុងសារនោះទេ។ ផ្ញើសារផ្សេងទៀត ឬ ✕ Cancel។",
+                parse_mode="HTML", reply_markup=cancel_kb())
+        return
+
+# ═══════════════════════════════════════════════════════════
+#  MAIN MESSAGE HANDLER
+# ═══════════════════════════════════════════════════════════
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("stats:"))
+def cb_stats(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID and uid not in sub_admins:
+        bot.answer_callback_query(call.id); return
+    bot.answer_callback_query(call.id)
+    action = call.data.split(":", 1)[1]
+    if action == "newusers30":
+        txt = _new_users_report_text(30)
+    elif action == "newusers7":
+        txt = _new_users_report_text(7)
+    elif action == "banlog":
+        txt = _ban_log_text(25)
+    elif action == "blockednow":
+        txt = _blocked_users_list_text(50)
+    elif action == "blocklog":
+        txt = _block_log_text(40)
+    else:
+        return
+    # split if too long
+    if len(txt) > 4000:
+        parts = [txt[i:i+3900] for i in range(0, len(txt), 3900)]
+        for p in parts:
+            bot.send_message(uid, p, parse_mode="HTML")
+    else:
+        bot.send_message(uid, txt, parse_mode="HTML")
+
+@bot.message_handler(func=lambda m: True)
+def handle_msg(message):
+    uid     = message.chat.id
+    uid_str = str(uid)
+    text    = message.text or ""
+    # ── Restore stripped-emoji text ──
+    # បើ text នេះជា button ដែលមាន premium emoji icon (KeyboardButton.to_dict()
+    # បានកាត់ emoji unicode ចេញពី label ដើម្បីកុំឲ្យស្ទួន icon), Telegram នឹង
+    # ត្រឡប់តែ text ដែលកាត់រួច (គ្មាន emoji) មកវិញ។ ត្រូវ restore ទៅ text ដើម
+    # (មាន emoji) វិញនៅទីនេះ មុននឹង logic ខាងក្រោម match text == / text in (...)
+    # ណាមួយ — បើមិនធ្វើដូច្នេះទេ ប៊ូតុងទាំងអស់ដែលកំណត់ emoji premium នឹងធ្លាក់
+    # ចូល fallback "មិនស្គាល់ button" រាល់ដង។
+    text    = _STRIPPED_TEXT_MAP.get(text, text)
+    lang    = get_lang(uid)
+    step    = waiting.get(uid)
+
+    _track_user(message)
+
+    if is_banned(uid) and uid != ADMIN_ID:
+        bot.send_message(uid, t(uid, "banned")); return
+
+    # ── Force-Subscribe gate — User ធម្មតាត្រូវ Join Channel មុនប្រើ Bot ──
+    if uid != ADMIN_ID and uid not in sub_admins and not _is_channel_member(uid):
+        bot.send_message(uid, _force_sub_gate_text(), parse_mode="HTML",
+                         reply_markup=_force_sub_kb())
+        return
+
+    # ── Cancel ──
+    if text == "✕ Cancel":
+        waiting.pop(uid, None)
+        bot.send_message(uid, t(uid, "cancel_ok"),
+                         reply_markup=main_kb(uid) if uid not in sub_admins and uid != ADMIN_ID
+                         else (admin_kb() if uid == ADMIN_ID else sub_admin_kb()))
+        return
+
+    # ════════════════════════════════════════
+    #  ADMIN SECTION
+    # ════════════════════════════════════════
+    if uid == ADMIN_ID or uid in sub_admins:
+        _is_master_admin = (uid == ADMIN_ID)  # gate for master-only features
+
+        # ── Premium Emoji button flow (replaces manual /setemojis, /emojiid) ──
+        if isinstance(step, dict) and step.get("step") == "await_setemoji_single" and uid == ADMIN_ID:
+            ch = step["char"]
+            found = _extract_custom_emoji(message)
+            if not found:
+                bot.send_message(uid,
+                    f"❌ រកមិនឃើញ premium emoji ក្នុងសារនោះទេ។ ផ្ញើ Emoji ថ្មី ឬ ✕ Cancel។",
+                    parse_mode="HTML", reply_markup=cancel_kb())
+                return  # stay in loop, waiting untouched
+            # ✅ ទទួល emoji ណាក៏បាន (មិនតម្រូវឲ្យដូច ch ដើមទេ — តាមសំណើអ្នកប្រើ)
+            match_eid = found[0][1]
+            EMOJI_MAP[ch] = match_eid
+            _nch = ch.replace("\ufe0f", "").replace("️", "")
+            if _nch and _nch != ch:
+                EMOJI_MAP[_nch] = match_eid
+            if not ch.endswith("️"):
+                EMOJI_MAP[ch + "️"] = match_eid
+            _persist_emoji_map()
+            waiting.pop(uid, None)
+            remaining = [c for c, v in EMOJI_MAP.items() if not v]
+            done_n = sum(1 for v in EMOJI_MAP.values() if v)
+            if remaining:
+                bot.send_message(uid,
+                    f"✅ {ch} → <code>{match_eid}</code> កំណត់ជោគជ័យ!\n"
+                    f"📊 {done_n}/{len(EMOJI_MAP)} — នៅសល់ {len(remaining)}\n\n"
+                    f"👇 ជ្រើស emoji បន្ត:",
+                    parse_mode="HTML", reply_markup=missing_emoji_kb())
+            else:
+                bot.send_message(uid,
+                    f"✅ {ch} → <code>{match_eid}</code> កំណត់ជោគជ័យ!\n\n"
+                    f"🎉 <b>រួចរាល់! Emoji ទាំងអស់បានកំណត់ 100%!</b>",
+                    parse_mode="HTML", reply_markup=admin_kb())
+            return
+
+        if step == "await_setemojis" and uid == ADMIN_ID:
+            report = _apply_setemojis(message)
+            remaining = sum(1 for v in EMOJI_MAP.values() if not v)
+            if not report:
+                bot.send_message(uid,
+                    "❌ រកមិនឃើញ premium/custom emoji ក្នុងសារនោះទេ។ ផ្ញើសារផ្សេងទៀត ឬ ✕ Cancel។",
+                    parse_mode="HTML", reply_markup=cancel_kb())
+                return  # stay in loop, waiting untouched
+            if remaining == 0:
+                waiting.pop(uid, None)
+                bot.send_message(uid,
+                    report + "\n\n🎉 <b>រួចរាល់! Emoji ទាំងអស់បានកំណត់ 100%!</b>",
+                    parse_mode="HTML", reply_markup=admin_kb())
+            else:
+                # stay in the flow so admin can keep forwarding messages back-to-back
+                missing_preview = " ".join(ch for ch, v in EMOJI_MAP.items() if not v)[:200]
+                bot.send_message(uid,
+                    report + f"\n\n📤 ផ្ញើសារបន្តទៀត ({remaining} នៅសល់) ឬ ✕ Cancel ពេលរួច:\n⬜ {missing_preview}",
+                    parse_mode="HTML", reply_markup=cancel_kb())
+            return
+
+        if step == "await_emojiid" and uid == ADMIN_ID:
+            report = _emojiid_text(message)
+            if report:
+                bot.send_message(uid, report + "\n\n📤 ផ្ញើសារបន្តទៀត ឬ ✕ Cancel ពេលរួច:",
+                    parse_mode="HTML", reply_markup=cancel_kb())
+            else:
+                bot.send_message(uid,
+                    "❌ រកមិនឃើញ premium/custom emoji ក្នុងសារនោះទេ។ ផ្ញើសារផ្សេងទៀត ឬ ✕ Cancel។",
+                    parse_mode="HTML", reply_markup=cancel_kb())
+            return  # stay in loop, waiting untouched
+
+        # Admin commands
+        if text.startswith("/addbal"):
+            parts = text.split()
+            if len(parts) < 3:
+                bot.send_message(uid, "ប្រើ: /addbal UID AMOUNT"); return
+            try:
+                target = parts[1]; amt = float(parts[2])
+                add_bal(int(target), amt)
+                bot.send_message(uid,
+                    f"✅ +${amt:.2f} → <code>{target}</code>\n💳 Balance: <b>${bal(int(target)):.2f}</b>",
+                    parse_mode="HTML", reply_markup=admin_kb())
+                try: bot.send_message(int(target),
+                    f"✅ Admin បន្ថែមលុយ! +${amt:.2f} | Balance: <b>${bal(int(target)):.2f}</b>",
+                    parse_mode="HTML")
+                except Exception as _e: logger.debug(f"[silent] {_e}")
+            except: bot.send_message(uid, "❌ Format ខុស")
+            return
+
+        if text.startswith("/deductbal"):
+            parts = text.split()
+            if len(parts) < 3:
+                bot.send_message(uid, "ប្រើ: /deductbal UID AMOUNT"); return
+            try:
+                target = parts[1]; amt = float(parts[2])
+                cur = bal(int(target))
+                ded = min(amt, cur)
+                ded_bal(int(target), ded)
+                bot.send_message(uid,
+                    f"✅ -${ded:.2f} → <code>{target}</code>\n💳 Balance: <b>${bal(int(target)):.2f}</b>",
+                    parse_mode="HTML", reply_markup=admin_kb())
+            except: bot.send_message(uid, "❌ Format ខុស")
+            return
+
+        # ── /newbot — បង្កើត Bot ថ្មីដោយផ្ទាល់ខាងក្នុង Telegram (តែ master bot) ──
+        if text == "/newbot":
+            if not IS_MASTER:
+                bot.send_message(uid, "🚫 Bot នេះជា bot រង — មិនអាចបង្កើត bot ថ្មីបានទេ។ សូមប្រើ bot ដើម។")
+                return
+            waiting[uid] = {"step": "newbot_name"}
+            bot.send_message(uid,
+                "🤖 <b>បង្កើត Bot ថ្មី</b>\n\n"
+                f"{_step_label(1)} — វាយឈ្មោះសម្គាល់ bot នេះ (អក្សរ/លេខ/_ តែប៉ុណ្ណោះ គ្មានគម្លាត)\n"
+                "ឧ. <code>shop2</code>, <code>freefire_shop</code>\n\n✕ Cancel ដើម្បីបោះបង់",
+                parse_mode="HTML", reply_markup=cancel_kb())
+            return
+
+        # ── /mybots — មើល/គ្រប់គ្រង bot ដែលបានបង្កើតទាំងអស់ (តែ master bot) ──
+        if text == "/mybots":
+            if not IS_MASTER:
+                bot.send_message(uid, "🚫 Bot នេះជា bot រង — មិនមាន bot រងផ្សេងទេ។")
+                return
+            if not clone_registry:
+                bot.send_message(uid, "📭 មិនទាន់មាន Bot រងណាមួយត្រូវបានបង្កើតទេ។ ប្រើ /newbot ដើម្បីបង្កើត។")
+                return
+            kb = InlineKeyboardMarkup(row_width=1)
+            for nm in clone_registry:
+                status = "🟢" if _clone_is_running(nm) else "🔴"
+                kb.add(InlineKeyboardButton(f"{status} {nm}", callback_data=f"cln_view|{nm}", color="active" if _clone_is_running(nm) else "inactive"))
+            bot.send_message(uid, "📋 <b>Bot រងទាំងអស់</b>\n🟢 = ដំណើរការ  🔴 = បិទ",
+                              parse_mode="HTML", reply_markup=kb)
+            return
+
+        # ── Waiting steps for /newbot wizard ──
+        if isinstance(step, dict) and step.get("step") == "newbot_name":
+            safe = "".join(ch for ch in text.strip() if (ch.isascii() and ch.isalnum()) or ch == "_")
+            if not safe:
+                bot.send_message(uid, "⚠️ ឈ្មោះមិនត្រឹមត្រូវ សូមវាយម្តងទៀត:", reply_markup=cancel_kb()); return
+            if safe in clone_registry:
+                bot.send_message(uid, "⚠️ ឈ្មោះនេះមានរួចហើយ សូមប្រើឈ្មោះផ្សេង:", reply_markup=cancel_kb()); return
+            waiting[uid] = {"step": "newbot_token", "name": safe}
+            bot.send_message(uid, f"{_step_label(2)} — វាយ <b>Bot Token</b> (ពី @BotFather):",
+                              parse_mode="HTML", reply_markup=cancel_kb())
+            return
+
+        if isinstance(step, dict) and step.get("step") == "newbot_token":
+            tok = text.strip()
+            if ":" not in tok or len(tok) < 20:
+                bot.send_message(uid, "⚠️ Token មិនត្រឹមត្រូវ សូមផ្ញើម្តងទៀត:", reply_markup=cancel_kb()); return
+            if tok == (BOT_TOKEN or "").strip():
+                bot.send_message(uid, "⚠️ Token នេះជា token របស់ <b>Master Bot</b> — មិនអាចប្រើសម្រាប់ sub-bot (នឹង error 409)។\nសូមបង្កើត bot ថ្មីពី @BotFather។", parse_mode="HTML", reply_markup=cancel_kb()); return
+            for _cn, _cc in list(clone_registry.items()):
+                if (_cc.get("token") or "").strip() == tok:
+                    bot.send_message(uid, f"⚠️ Token នេះប្រើរួចសម្រាប់ sub-bot <b>{_cn}</b> — មិនអាចស្ទួន (409 Conflict)។", parse_mode="HTML", reply_markup=cancel_kb()); return
+            waiting[uid] = {**step, "step": "newbot_admin", "token": tok}
+            bot.send_message(uid, f"{_step_label(3)} — វាយ <b>Admin Telegram ID</b> របស់អ្នកគ្រប់គ្រង bot នេះ (លេខ):",
+                              parse_mode="HTML", reply_markup=cancel_kb())
+            return
+
+        if isinstance(step, dict) and step.get("step") == "newbot_admin":
+            if not text.strip().isdigit():
+                bot.send_message(uid, "⚠️ សូមផ្ញើជាលេខតែប៉ុណ្ណោះ:", reply_markup=cancel_kb()); return
+            waiting[uid] = {**step, "step": "newbot_paymethod", "new_admin_id": int(text.strip())}
+            kb = InlineKeyboardMarkup(row_width=1)
+            # CamRapidPay removed
+            kb.add(InlineKeyboardButton("🏦 ABA PayWay ស្វ័យប្រវត្តិ", callback_data="newbot_pay|aba", color="active"))
+            kb.add(InlineKeyboardButton("💠 KHPAY ស្វ័យប្រវត្តិ (khpay.site)", callback_data="newbot_pay|khpay", color="progress"))
+            kb.add(InlineKeyboardButton("🖼 QR ដាក់ដោយដៃ Manual", callback_data="newbot_pay|manual", color="progress"))
+            bot.send_message(uid,
+                f"{_step_label(4)} — ជ្រើសរើស <b>របៀបទទួលទឹក</b> សម្រាប់ bot នេះ:\n\n"
+                "🏦 <b>ABA PayWay Auto</b> — Profile Key + Merchant ID (KHMER SYSTEM)\n"
+                "💠 <b>KHPAY Auto</b> — API Key + Merchant ID (khpay.site)\n"
+                "🖼 <b>Manual QR</b> — Upload រូប QR ដាក់ដោយដៃ\n"
+                "<i>CamRapidPay ត្រូវបានលុបចេញ</i>",
+                parse_mode="HTML", reply_markup=kb)
+            return
+
+        if isinstance(step, dict) and step.get("step") == "newbot_key":
+            key = text.strip()
+            if len(key) < 10:
+                bot.send_message(uid, "⚠️ API Key ខ្លីពេក សូមផ្ញើម្តងទៀត:", reply_markup=cancel_kb()); return
+            name = step["name"]; tok = step["token"]; new_admin = step["new_admin_id"]
+            port = _next_clone_port()
+            masked_tok = tok[:10] + "..." + tok[-4:]
+            masked_key = key[:6] + "..." + key[-4:]
+            waiting[uid] = {**step, "step": "newbot_display", "camrapid_key": key, "port": port}
+            bot.send_message(uid,
+                f"{_step_label(6, 6)} — វាយ <b>ឈ្មោះ bot</b> ដែលបង្ហាញដល់អ្នកប្រើ (ឧ. <code>Jak Like Shop</code>)\n"
+                "ឬផ្ញើ <code>-</code> ដើម្បីប្រើឈ្មោះ internal (<code>"
+                + step["name"] + "</code>) ជំនួស:",
+                parse_mode="HTML", reply_markup=cancel_kb())
+            return
+
+        if isinstance(step, dict) and step.get("step") == "newbot_aba_key":
+            key = text.strip()
+            if len(key) < 10:
+                bot.send_message(uid, "⚠️ Profile Key ខ្លីពេក សូមផ្ញើម្តងទៀត:", reply_markup=cancel_kb()); return
+            waiting[uid] = {**step, "step": "newbot_aba_merchant", "aba_key": key}
+            bot.send_message(uid,
+                f"{_step_label(6, 7)} — វាយ <b>ABA Merchant ID</b> សម្រាប់ bot នេះ (ឧ. <code>r72mCt</code>):",
+                parse_mode="HTML", reply_markup=cancel_kb())
+            return
+
+        if isinstance(step, dict) and step.get("step") == "newbot_aba_merchant":
+            merchant = text.strip()
+            if not merchant:
+                bot.send_message(uid, "⚠️ Merchant ID មិនត្រឹមត្រូវ សូមផ្ញើម្តងទៀត:", reply_markup=cancel_kb()); return
+            name = step["name"]
+            port = _next_clone_port()
+            waiting[uid] = {**step, "step": "newbot_display", "aba_merchant": merchant, "port": port}
+            bot.send_message(uid,
+                f"{_step_label(7, 7)} — វាយ <b>ឈ្មោះ bot</b> ដែលបង្ហាញដល់អ្នកប្រើ (ឧ. <code>Jak Like Shop</code>)\n"
+                "ឬផ្ញើ <code>-</code> ដើម្បីប្រើឈ្មោះ internal (<code>"
+                + name + "</code>) ជំនួស:",
+                parse_mode="HTML", reply_markup=cancel_kb())
+            return
+
+        if isinstance(step, dict) and step.get("step") == "newbot_khpay_key":
+            key = text.strip()
+            if len(key) < 8:
+                bot.send_message(uid, "⚠️ KHPAY Key ខ្លីពេក សូមផ្ញើម្តងទៀត:", reply_markup=cancel_kb()); return
+            waiting[uid] = {**step, "step": "newbot_khpay_merchant", "khpay_key": key}
+            bot.send_message(uid,
+                f"{_step_label(6, 7)} — វាយ <b>KHPAY Merchant ID</b> (optional)\n"
+                "ឧ: <code>mch_ea4352a8ebc20c43</code>\n"
+                "ឬផ្ញើ <code>-</code> ដើម្បីប្រើ default merchant:",
+                parse_mode="HTML", reply_markup=cancel_kb())
+            return
+
+        if isinstance(step, dict) and step.get("step") == "newbot_khpay_merchant":
+            raw = text.strip()
+            merchant = "" if raw == "-" else raw
+            name = step["name"]
+            port = _next_clone_port()
+            waiting[uid] = {**step, "step": "newbot_display", "khpay_merchant": merchant, "port": port}
+            bot.send_message(uid,
+                f"{_step_label(7, 7)} — វាយ <b>ឈ្មោះ bot</b> ដែលបង្ហាញដល់អ្នកប្រើ (ឧ. <code>Jak Like Shop</code>)\n"
+                "ឬផ្ញើ <code>-</code> ដើម្បីប្រើឈ្មោះ internal (<code>"
+                + name + "</code>) ជំនួស:",
+                parse_mode="HTML", reply_markup=cancel_kb())
+            return
+
+        if isinstance(step, dict) and step.get("step") == "newbot_manual_qr_info":
+            raw = text.strip()
+            info = "" if raw == "-" else raw
+            port = _next_clone_port()
+            waiting[uid] = {**step, "step": "newbot_display", "manual_qr_info": info, "port": port}
+            bot.send_message(uid,
+                f"{_step_label(7, 7)} — វាយ <b>ឈ្មោះ bot</b> ដែលបង្ហាញដល់អ្នកប្រើ (ឧ. <code>Jak Like Shop</code>)\n"
+                "ឬផ្ញើ <code>-</code> ដើម្បីប្រើឈ្មោះ internal (<code>"
+                + step["name"] + "</code>) ជំនួស:",
+                parse_mode="HTML", reply_markup=cancel_kb())
+            return
+
+        # ── ប្តូរ Step ទូទាត់ របស់ clone ដែលមានស្រាប់ (ពី /mybots) ──
+        if isinstance(step, dict) and step.get("step") == "cln_pay_key":
+            key = text.strip()
+            if len(key) < 10:
+                bot.send_message(uid, "⚠️ API Key ខ្លីពេក សូមផ្ញើម្តងទៀត:", reply_markup=cancel_kb()); return
+            name = step["clone"]
+            waiting.pop(uid, None)
+            _apply_clone_pay_update(uid, name, "auto", camrapid_key=key)
+            return
+
+        if isinstance(step, dict) and step.get("step") == "cln_pay_aba_key":
+            key = text.strip()
+            if len(key) < 10:
+                bot.send_message(uid, "⚠️ Profile Key ខ្លីពេក សូមផ្ញើម្តងទៀត:", reply_markup=cancel_kb()); return
+            name = step["clone"]
+            waiting[uid] = {"step": "cln_pay_aba_merchant", "clone": name, "aba_key": key}
+            bot.send_message(uid, f"វាយ <b>ABA Merchant ID</b> ថ្មីសម្រាប់ '{name}' (ឧ. <code>r72mCt</code>):",
+                              parse_mode="HTML", reply_markup=cancel_kb())
+            return
+
+        if isinstance(step, dict) and step.get("step") == "cln_pay_aba_merchant":
+            merchant = text.strip()
+            if not merchant:
+                bot.send_message(uid, "⚠️ Merchant ID មិនត្រឹមត្រូវ សូមផ្ញើម្តងទៀត:", reply_markup=cancel_kb()); return
+            name = step["clone"]
+            waiting.pop(uid, None)
+            _apply_clone_pay_update(uid, name, "aba", aba_key=step.get("aba_key", ""), aba_merchant=merchant)
+            return
+
+        if isinstance(step, dict) and step.get("step") == "cln_pay_khpay_key":
+            key = text.strip()
+            if len(key) < 8:
+                bot.send_message(uid, "⚠️ KHPAY Key ខ្លីពេក សូមផ្ញើម្តងទៀត:", reply_markup=cancel_kb()); return
+            name = step["clone"]
+            waiting[uid] = {"step": "cln_pay_khpay_merchant", "clone": name, "khpay_key": key}
+            bot.send_message(uid,
+                f"វាយ <b>KHPAY Merchant ID</b> សម្រាប់ '{name}' (optional)\n"
+                "ឧ: <code>mch_ea4352a8ebc20c43</code> ឬ <code>-</code> សម្រាប់ default:",
+                parse_mode="HTML", reply_markup=cancel_kb())
+            return
+
+        if isinstance(step, dict) and step.get("step") == "cln_pay_khpay_merchant":
+            raw = text.strip()
+            merchant = "" if raw == "-" else raw
+            name = step["clone"]
+            waiting.pop(uid, None)
+            _apply_clone_pay_update(uid, name, "khpay",
+                                     khpay_key=step.get("khpay_key", ""),
+                                     khpay_merchant=merchant)
+            return
+
+        if isinstance(step, dict) and step.get("step") == "cln_pay_qr_info":
+            raw = text.strip()
+            info = "" if raw == "-" else raw
+            name = step["clone"]
+            waiting.pop(uid, None)
+            _apply_clone_pay_update(uid, name, "manual",
+                                     manual_photo_id=step.get("manual_qr_photo_id", ""),
+                                     manual_info=info)
+            return
+
+        if isinstance(step, dict) and step.get("step") == "cln_change_admin":
+            if not text.strip().isdigit():
+                bot.send_message(uid, "⚠️ សូមផ្ញើជាលេខតែប៉ុណ្ណោះ:", reply_markup=cancel_kb()); return
+            name = step["clone"]
+            new_admin_id = int(text.strip())
+            cfg = clone_registry.get(name)
+            waiting.pop(uid, None)
+            if not cfg:
+                bot.send_message(uid, "❌ រកមិនឃើញ bot នេះទេ (ប្រហែលត្រូវបានលុប)។", reply_markup=admin_kb())
+                return
+            old_admin_id = cfg["admin_id"]
+            cfg["admin_id"] = new_admin_id
+            clone_registry[name] = cfg
+            _save(CLONES_REGISTRY, clone_registry)
+            was_running = _clone_is_running(name)
+            if was_running:
+                _stop_clone(name); time.sleep(1); _spawn_clone(name, cfg)
+            bot.send_message(uid,
+                f"✅ បានប្តូរ Admin សម្រាប់ '<b>{name}</b>'\n"
+                f"ចាស់: <code>{old_admin_id}</code> → ថ្មី: <code>{new_admin_id}</code>"
+                + (" ហើយ restart រួច។" if was_running else " (bot នេះកំពុងបិទ — ចាប់ផ្តើមវាដើម្បីអនុវត្ត)។"),
+                parse_mode="HTML", reply_markup=admin_kb())
+            return
+
+        if isinstance(step, dict) and step.get("step") == "cln_rename_name":
+            new_name = text.strip()[:60]
+            if not new_name:
+                bot.send_message(uid, "⚠️ ឈ្មោះមិនត្រឹមត្រូវ សូមផ្ញើម្តងទៀត:", reply_markup=cancel_kb()); return
+            name = step["clone"]
+            cfg = clone_registry.get(name)
+            waiting.pop(uid, None)
+            if not cfg:
+                bot.send_message(uid, "❌ រកមិនឃើញ bot នេះទេ (ប្រហែលត្រូវបានលុប)។", reply_markup=admin_kb())
+                return
+            old_name = cfg.get("display_name", name)
+            cfg["display_name"] = new_name
+            clone_registry[name] = cfg
+            _save(CLONES_REGISTRY, clone_registry)
+            was_running = _clone_is_running(name)
+            if was_running:
+                _stop_clone(name); time.sleep(1); _spawn_clone(name, cfg)
+            bot.send_message(uid,
+                f"✅ បានប្តូរ ឈ្មោះ Bot សម្រាប់ '<b>{name}</b>'\n"
+                f"ចាស់: <code>{old_name}</code> → ថ្មី: <code>{new_name}</code>"
+                + (" ហើយ restart រួច។" if was_running else " (bot នេះកំពុងបិទ — ចាប់ផ្តើមវាដើម្បីអនុវត្ត)។"),
+                parse_mode="HTML", reply_markup=admin_kb())
+            return
+
+        # ── Clone ⚙️ ការកំណត់ផ្សេងទៀត — Support / Sub Admins / QR Cooldown ──
+        if isinstance(step, dict) and step.get("step") == "cln_support_text":
+            name = step["clone"]; lang = step["lang"]
+            raw = text.strip()
+            cur = _clone_load(name, "smm_support.json", {"kh": "", "en": ""})
+            cur[lang] = "" if raw == "-" else raw
+            waiting.pop(uid, None)
+            _clone_save_restart(uid, name, "smm_support.json", cur,
+                f"✅ Support Message ({'ខ្មែរ' if lang=='kh' else 'English'}) បានរក្សាទុកសម្រាប់ '<b>{name}</b>'")
+            return
+
+        if isinstance(step, dict) and step.get("step") == "cln_subadmin_add_id":
+            if not text.strip().isdigit():
+                bot.send_message(uid, "⚠️ សូមផ្ញើជាលេខតែប៉ុណ្ណោះ:", reply_markup=cancel_kb()); return
+            name = step["clone"]
+            new_id = int(text.strip())
+            cur = _clone_load(name, "smm_sub_admins.json", [])
+            if new_id not in cur:
+                cur.append(new_id)
+            waiting.pop(uid, None)
+            _clone_save_restart(uid, name, "smm_sub_admins.json", cur,
+                f"✅ បន្ថែម Sub Admin <code>{new_id}</code> ចូល '<b>{name}</b>'")
+            return
+
+        if isinstance(step, dict) and step.get("step") == "cln_cooldown_sec":
+            raw = text.strip()
+            if not raw.isdigit():
+                bot.send_message(uid, "⚠️ សូមផ្ញើជាលេខតែប៉ុណ្ណោះ (0 = បិទ):", reply_markup=cancel_kb()); return
+            name = step["clone"]
+            sec = int(raw)
+            waiting.pop(uid, None)
+            _clone_save_restart(uid, name, "dep_qr_cooldown.json", {"seconds": sec},
+                f"✅ QR Cooldown បានកំណត់ទៅ <b>{sec} វិនាទី</b> សម្រាប់ '<b>{name}</b>'")
+            return
+
+        if isinstance(step, dict) and step.get("step") == "newbot_display":
+            raw = text.strip()
+            display = step["name"] if raw == "-" else raw[:60]
+            name = step["name"]; tok = step["token"]; new_admin = step["new_admin_id"]
+            port = step["port"]
+            # ★ Welcome Message ប្រើ default ជានិច្ច (មិនសួរ admin ទៀត) — default
+            # welcome message auto ដាក់ឈ្មោះ bot ខ្លួនឯង (តាម _bot_brand()) រួចស្រាប់
+            # ដូច្នេះមិនចាំបាច់ឲ្យ admin វាយបំពេញដោយដៃទេ
+            welcome = ""
+            pay_method = step.get("pay_method", "auto")
+            masked_tok = tok[:10] + "..." + tok[-4:]
+            if pay_method == "manual":
+                pay_line = "🖼 QR ដាក់ដោយដៃ (Manual) — Step 2"
+            elif pay_method == "aba":
+                masked_key = step["aba_key"][:6] + "..." + step["aba_key"][-4:]
+                pay_line = f"🏦 ABA PayWay — Key (<code>{masked_key}</code>) / Merchant (<code>{step['aba_merchant']}</code>)"
+            else:
+                masked_key = step["camrapid_key"][:6] + "..." + step["camrapid_key"][-4:]
+                pay_line = f"🔄 CamRapidPay Key — Step 1 (<code>{masked_key}</code>)"
+            waiting[uid] = {**step, "step": "newbot_confirm", "display_name": display, "welcome_msg": welcome}
+            kb = InlineKeyboardMarkup()
+            kb.add(InlineKeyboardButton("✅ បង្កើត ហើយ ដំណើរការ", callback_data="newbot_confirm_yes", color="active"))
+            kb.add(InlineKeyboardButton("❌ បោះបង់", callback_data="newbot_confirm_no", color="inactive"))
+            bot.send_message(uid,
+                f"📋 <b>ត្រួតពិនិត្យ</b>\n\n"
+                f"ឈ្មោះ internal: <code>{name}</code>\n"
+                f"ឈ្មោះ display: <code>{display}</code>\n"
+                f"Token: <code>{masked_tok}</code>\n"
+                f"Admin ID: <code>{new_admin}</code>\n"
+                f"ការទូទាត់: {pay_line}\n"
+                f"Welcome: <code>(default — auto ដាក់ឈ្មោះ '{display}')</code>\n\n"
+                f"ត្រឹមត្រូវទេ?",
+                parse_mode="HTML", reply_markup=kb)
+            return
+
+        # ── Waiting steps ──
+        if isinstance(step, dict) and step.get("step") == "add_balance_amt":
+            target = step["target"]
+            try:
+                amt = float(text.replace("$",""))
+                add_bal(int(target), amt)
+                _save(WALLETS_FILE, wallets)
+                waiting.pop(uid, None)
+                bot.send_message(uid,
+                    f"✅ <b>បន្ថែម Balance</b>\n👤 <code>{target}</code>\n"
+                    f"💰 +${amt:.2f} | Balance: <b>${bal(int(target)):.2f}</b>",
+                    parse_mode="HTML", reply_markup=admin_kb())
+                try: bot.send_message(int(target),
+                    f"✅ <b>Admin បន្ថែមលុយ!</b>\n💰 +${amt:.2f} | Balance: <b>${bal(int(target)):.2f}</b>",
+                    parse_mode="HTML")
+                except Exception as _e: logger.debug(f"[silent] {_e}")
+            except: bot.send_message(uid, "❌ Amount ខុស! ឧ: <code>5.00</code>", parse_mode="HTML")
+            return
+
+        if isinstance(step, dict) and step.get("step") == "deduct_balance_amt":
+            target = step["target"]
+            try:
+                amt  = float(text.replace("$",""))
+                cur  = bal(int(target))
+                ded  = min(amt, cur)
+                ded_bal(int(target), ded)
+                waiting.pop(uid, None)
+                bot.send_message(uid,
+                    f"✅ <b>កាត់ Balance</b>\n👤 <code>{target}</code>\n"
+                    f"💔 -${ded:.2f} | Balance: <b>${bal(int(target)):.2f}</b>",
+                    parse_mode="HTML", reply_markup=admin_kb())
+                try: bot.send_message(int(target),
+                    f"⚠️ <b>Admin កាត់លុយ!</b>\n💔 -${ded:.2f} | Balance: <b>${bal(int(target)):.2f}</b>",
+                    parse_mode="HTML")
+                except Exception as _e: logger.debug(f"[silent] {_e}")
+            except: bot.send_message(uid, "❌ Amount ខុស!")
+            return
+
+        if isinstance(step, dict) and step.get("step") == "edit_svc_name":
+            slug = step.get("slug")
+            s    = smm_services.get(slug)
+            if not s:
+                bot.send_message(uid, "❌ Service រកមិនឃើញ", reply_markup=admin_kb())
+                waiting.pop(uid, None); return
+            old_label = s.get("label", slug)
+            new_label = text.strip()
+            if not new_label:
+                bot.send_message(uid, "❌ ឈ្មោះទទេ! សូមវាយម្តងទៀត"); return
+            smm_services[slug]["label"] = new_label
+            _save(SMM_SVC_FILE, smm_services)
+            waiting.pop(uid, None)
+            bot.send_message(uid,
+                f"✅ <b>ឈ្មោះ Service បានផ្លាស់ប្តូរ!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🆔 API ID: <code>{s.get('api_id','?')}</code>\n"
+                f"📝 ចាស់: <s>{old_label}</s>\n"
+                f"✨ ថ្មី: <b>{new_label}</b>",
+                parse_mode="HTML", reply_markup=admin_kb())
+            return
+
+        if step == "promo_add_code":
+            parts = text.strip().split()
+            if len(parts) < 4:
+                bot.send_message(uid,
+                    "❌ Format ខុស!\nឧ: <code>SAVE50 50 pct 100</code>\n"
+                    "ឬ: <code>GIFT1 1.00 fix 50</code>", parse_mode="HTML"); return
+            code = parts[0].upper()
+            try:
+                discount = float(parts[1])
+                pct  = (parts[2].lower() == "pct")
+                uses = int(parts[3])
+            except:
+                bot.send_message(uid, "❌ Format ខុស!", parse_mode="HTML"); return
+            promos[code] = {"discount": discount, "pct": pct, "uses": uses, "used": 0}
+            _save(PROMO_FILE, promos)
+            waiting.pop(uid, None)
+            dtype = f"{discount:.0f}%" if pct else f"${discount:.2f}"
+            bot.send_message(uid,
+                f"✅ <b>Promo Code Created!</b>\n"
+                f"🎟️ <code>{code}</code> — <b>{dtype}</b> | {uses} uses",
+                parse_mode="HTML", reply_markup=admin_kb()); return
+
+        if step == "broadcast_msg":
+            _do_broadcast(uid, message); return
+
+        if step == "smm_add_cat":
+            waiting[uid] = {"step": "smm_add_platform", "cat": text}
+            bot.send_message(uid,
+                f"🌐 <b>ជ្រើស Platform</b> (សម្រាប់ផ្គូផ្គង Link)\n"
+                f"📂 Category: <b>{text}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"ជ្រើស Platform ត្រឹមត្រូវ ដើម្បីឲ្យ Bot ច្រានចោល Link ខុស Platform\n"
+                f"(ចុច 🔓 ផ្សេង បើ Service ទាំងនេះទទួល Link ណាក៏បាន)",
+                parse_mode="HTML", reply_markup=_platform_pick_kb("smmaddplat")); return
+
+        if isinstance(step, dict) and step.get("step") == "smm_add_ids":
+            cat = step["cat"]
+            platform = step.get("platform") or _CAT_TO_PLATFORM_KEY.get(cat)
+            # Check API configured first
+            if not smm_api.get("url") or not smm_api.get("key"):
+                waiting.pop(uid, None)
+                bot.send_message(uid,
+                    "❌ <b>SMM API មិនទាន់ Set!</b>\n"
+                    "━━━━━━━━━━━━━━━━━━\n"
+                    "ចុច <b>🔗 Set SMM API</b> ជាមុន រួចទើបបន្ថែម Service",
+                    parse_mode="HTML", reply_markup=admin_kb()); return
+            ids = [i.strip() for i in text.replace(" ", "").split(",") if i.strip().isdigit()]
+            if not ids:
+                bot.send_message(uid, "❌ ផ្ញើ IDs ជាលេខ ឧ: <code>5441,5448</code>",
+                                 parse_mode="HTML"); return
+            bot.send_message(uid, f"⏳ Fetching {len(ids)} service(s) from API...")
+            ok, fail = [], []
+            for api_id in ids:
+                info = _smm_fetch_service(api_id)
+                if info:
+                    slug = f"{cat.lower().replace(' ', '_')}_{api_id}"
+                    smm_services[slug] = {
+                        "api_id":    api_id,
+                        "cost_rate": info["cost_rate"],
+                        "min":       info["min"],
+                        "max":       info["max"],
+                        "label":     _smm_clean_name(info["raw_name"]),
+                        "category":  cat,
+                        "platform":  platform,
+                        "refill":    info.get("refill", False),
+                    }
+                    rf_tag = " 🔄" if info.get("refill") else ""
+                    ok.append(f"✅ <code>{api_id}</code> — {smm_services[slug]['label']}{rf_tag}")
+                else:
+                    fail.append(f"❌ <code>{api_id}</code> — not found / API error")
+            if ok:
+                _save(SMM_SVC_FILE, smm_services)
+            waiting.pop(uid, None)
+            msg = f"<b>📊 SMM Import — {cat}</b>\n━━━━━━━━━━━━━━━━━━\n" + "\n".join(ok)
+            if fail: msg += "\n\n<b>Failed:</b>\n" + "\n".join(fail)
+            msg += f"\n\n✅ Total services: <b>{len(smm_services)}</b>"
+            bot.send_message(uid, msg, parse_mode="HTML", reply_markup=admin_kb()); return
+
+        if step == "smm_api_url":
+            smm_api["url"] = text.strip().rstrip("/")
+            waiting[uid] = "smm_api_key"
+            bot.send_message(uid,
+                f"✅ URL: <code>{smm_api['url']}</code>\n\n🔑 ឥឡូវ ផ្ញើ API Key:",
+                parse_mode="HTML", reply_markup=cancel_kb()); return
+
+        if step == "smm_api_key":
+            smm_api["key"] = text.strip()
+            _save(SMM_API_FILE, smm_api)
+            waiting.pop(uid, None)
+            bot.send_message(uid, "⏳ Testing connection...", reply_markup=admin_kb())
+            try:
+                r = http.post(smm_api["url"],
+                              data={"key": smm_api["key"], "action": "balance"}, timeout=10)
+                d = r.json()
+                balance  = d.get("balance", d.get("Balance", "?"))
+                currency = d.get("currency", d.get("Currency", "USD"))
+                bot.send_message(uid,
+                    f"✅ <b>SMM API ភ្ជាប់ហើយ!</b>\n━━━━━━━━━━━━━━━━━━\n"
+                    f"🌐 URL: <code>{smm_api['url']}</code>\n"
+                    f"💰 Balance: <b>{balance} {currency}</b>",
+                    parse_mode="HTML", reply_markup=admin_kb())
+            except Exception as e:
+                bot.send_message(uid,
+                    f"⚠️ API Saved ប៉ុន្តែ test failed: <code>{e}</code>",
+                    parse_mode="HTML", reply_markup=admin_kb())
+            return
+
+        if isinstance(step, dict) and step.get("step") == "depbonus_edit":
+            try:
+                parts = [p.strip() for p in text.replace("$", "").split(",")]
+                if len(parts) != 2:
+                    raise ValueError
+                min_amt = float(parts[0]); pct = float(parts[1])
+                if min_amt < 0 or pct < 0:
+                    raise ValueError
+                dep_bonus_cfg["min_amount"] = min_amt
+                dep_bonus_cfg["pct"] = pct
+                _save(DEP_BONUS_FILE, dep_bonus_cfg)
+                waiting.pop(uid, None)
+                bot.send_message(uid, f"✅ បានកែ!\n{_dep_bonus_status_text()}",
+                                 parse_mode="HTML", reply_markup=admin_kb())
+            except Exception:
+                bot.send_message(uid,
+                    "❌ ទម្រង់ខុស! សូមផ្ញើជា <code>ចំនួនអប្បបរមា,ភាគរយ</code>\nឧ: <code>1,5</code> (ដាក់ $1 ឡើងទៅ ទទួល 5%)",
+                    parse_mode="HTML", reply_markup=cancel_kb())
+            return
+
+        if isinstance(step, dict) and step.get("step") == "qrcooldown_edit":
+            try:
+                sec = int(float(text.strip()))
+                if sec < 0:
+                    raise ValueError
+                dep_qr_cooldown_cfg["seconds"] = sec
+                _save(DEP_QR_COOLDOWN_FILE, dep_qr_cooldown_cfg)
+                waiting.pop(uid, None)
+                bot.send_message(uid, f"✅ បានកែ!\n{_dep_qr_cooldown_status_text()}",
+                                 parse_mode="HTML", reply_markup=admin_kb())
+            except Exception:
+                bot.send_message(uid,
+                    "❌ ទម្រង់ខុស! សូមផ្ញើជាលេខវិនាទី (ចំនួនគត់, ≥ 0)\nឧ: <code>15</code>",
+                    parse_mode="HTML", reply_markup=cancel_kb())
+            return
+
+        if isinstance(step, dict) and step.get("step") == "udisc_add":
+            try:
+                parts = [p.strip() for p in text.split(",")]
+                if len(parts) < 2:
+                    raise ValueError
+                target_id = parts[0].lstrip("@")
+                if not target_id.isdigit():
+                    raise ValueError("id")
+                pct = float(parts[1])
+                if pct < 0 or pct > 100:
+                    raise ValueError("pct")
+                note = parts[2] if len(parts) >= 3 else ""
+                user_discounts[str(target_id)] = {"pct": pct, "note": note}
+                _save(USER_DISCOUNT_FILE, user_discounts)
+                waiting.pop(uid, None)
+                u = users_db.get(str(target_id), {})
+                name = u.get("name") or u.get("username") or "?"
+                bot.send_message(uid,
+                    f"✅ <b>បានកំណត់បញ្ចុះតម្លៃ!</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"👤 <code>{target_id}</code> {name}\n"
+                    f"🏷️ បញ្ចុះ <b>{pct:.0f}%</b> លើ <b>🇰🇭 TikTok Khmer</b> តែប៉ុណ្ណោះ\n"
+                    f"{('📝 Note: ' + note) if note else ''}",
+                    parse_mode="HTML", reply_markup=admin_kb())
+            except Exception:
+                bot.send_message(uid,
+                    "❌ ទម្រង់ខុស! ផ្ញើជា <code>TelegramID,ភាគរយ</code>\n"
+                    "ឧ: <code>123456789,10</code> ឬ <code>123456789,15,VIP</code>",
+                    parse_mode="HTML", reply_markup=cancel_kb())
+            return
+
+        if isinstance(step, dict) and step.get("step") == "smm_set_profit":
+            try:
+                pct = float(text)
+                smm_profit["pct"] = pct; _save(SMM_PROFIT_FILE, smm_profit)
+                waiting.pop(uid, None)
+                bot.send_message(uid, f"✅ SMM Profit <b>{pct:.0f}%</b>",
+                                 parse_mode="HTML", reply_markup=admin_kb())
+            except: bot.send_message(uid, "❌ ត្រូវជាលេខ")
+            return
+
+        if step == "await_dreport_hour":
+            try:
+                hour = int(text.strip())
+                if not (0 <= hour <= 23):
+                    raise ValueError
+                daily_report_cfg["hour"] = hour; _save(DAILY_REPORT_FILE, daily_report_cfg)
+                waiting.pop(uid, None)
+                bot.send_message(uid, f"✅ កំណត់ម៉ោងផ្ញើ Daily Report ទៅ {hour:02d}:00 (ម៉ោងកម្ពុជា)",
+                                 parse_mode="HTML", reply_markup=daily_report_kb())
+            except (ValueError, TypeError):
+                bot.send_message(uid, "❌ ត្រូវជាលេខ 0-23", reply_markup=cancel_kb())
+            return
+
+        if step == "await_manual_qr_info":
+            manual_qr_cfg["info"] = text.strip()
+            _save(MANUAL_QR_FILE, manual_qr_cfg)
+            waiting.pop(uid, None)
+            bot.send_message(uid, "✅ ព័ត៌មានបានកំណត់ជោគជ័យ!", parse_mode="HTML",
+                              reply_markup=manual_qr_admin_kb())
+            return
+
+        # ── Manual service: step 1 label ──
+        if isinstance(step, dict) and step.get("step") == "manual_svc_label":
+            label = text.strip()
+            if not label:
+                bot.send_message(uid, "❌ ឈ្មោះទទេ! វាយម្តងទៀត:", reply_markup=cancel_kb()); return
+            waiting[uid] = {"step": "manual_svc_cat", "label": label}
+            cats_kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🎵 TikTok",    callback_data="mansvc_cat:TikTok", color="active"),
+                 InlineKeyboardButton("📘 Facebook",  callback_data="mansvc_cat:Facebook", color="active")],
+                [InlineKeyboardButton("📸 Instagram", callback_data="mansvc_cat:Instagram", color="active"),
+                 InlineKeyboardButton("▶️ YouTube",   callback_data="mansvc_cat:YouTube", color="active")],
+                [InlineKeyboardButton("📱 Telegram",  callback_data="mansvc_cat:Telegram", color="active"),
+                 InlineKeyboardButton("🐦 Twitter",   callback_data="mansvc_cat:Twitter", color="active")],
+                [InlineKeyboardButton("✏️ ផ្សេង (Custom)", callback_data="mansvc_cat:__custom__", color="progress")],
+            ])
+            bot.send_message(uid,
+                f"📂 <b>ជ្រើស Category</b>\n"
+                f"📝 ឈ្មោះ: <b>{label}</b>",
+                parse_mode="HTML", reply_markup=cats_kb); return
+
+        if isinstance(step, dict) and step.get("step") == "manual_svc_cat_custom":
+            cat = text.strip()
+            if not cat:
+                bot.send_message(uid, "❌ Category ទទេ!", reply_markup=cancel_kb()); return
+            waiting[uid] = {"step": "manual_svc_platform", "label": step["label"], "cat": cat}
+            bot.send_message(uid,
+                f"🌐 <b>ជ្រើស Platform</b> (សម្រាប់ផ្គូផ្គង Link)\n"
+                f"📂 Category: <b>{cat}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"ជ្រើស Platform ត្រឹមត្រូវ ដើម្បីឲ្យ Bot ច្រានចោល Link ខុស Platform\n"
+                f"(ចុច 🔓 ផ្សេង បើ Service នេះទទួល Link ណាក៏បាន)",
+                parse_mode="HTML", reply_markup=_platform_pick_kb("mansvcplat")); return
+
+        if isinstance(step, dict) and step.get("step") == "manual_svc_price":
+            try:
+                price = float(text.replace("$","").strip())
+                if price <= 0: raise ValueError
+            except:
+                bot.send_message(uid, "❌ តម្លៃខុស! ឧ: <code>0.50</code>",
+                                 parse_mode="HTML", reply_markup=cancel_kb()); return
+            waiting[uid] = {**step, "step": "manual_svc_min", "price": price}
+            bot.send_message(uid,
+                f"🔢 <b>Min Order</b> (ចំនួនអប្បបរមា)\n"
+                f"ឧ: <code>100</code>",
+                parse_mode="HTML", reply_markup=cancel_kb()); return
+
+        if isinstance(step, dict) and step.get("step") == "manual_svc_min":
+            try:
+                mn = int(text.strip())
+                if mn <= 0: raise ValueError
+            except:
+                bot.send_message(uid, "❌ ត្រូវជាលេខ! ឧ: <code>100</code>",
+                                 parse_mode="HTML", reply_markup=cancel_kb()); return
+            waiting[uid] = {**step, "step": "manual_svc_max", "min": mn}
+            bot.send_message(uid,
+                f"🔢 <b>Max Order</b> (ចំនួនអតិបរមា)\n"
+                f"ឧ: <code>50000</code>",
+                parse_mode="HTML", reply_markup=cancel_kb()); return
+
+        if isinstance(step, dict) and step.get("step") == "manual_svc_max":
+            try:
+                mx = int(text.strip())
+                if mx <= 0: raise ValueError
+            except:
+                bot.send_message(uid, "❌ ត្រូវជាលេខ! ឧ: <code>50000</code>",
+                                 parse_mode="HTML", reply_markup=cancel_kb()); return
+            # Save manual service
+            label = step["label"]; cat = step["cat"]; price = step["price"]; mn = step["min"]
+            slug  = f"manual_{cat.lower().replace(' ','_')}_{int(time.time())}"
+            platform = step.get("platform") or _CAT_TO_PLATFORM_KEY.get(cat)
+            smm_services[slug] = {
+                "api_id":       None,          # No API — manual
+                "manual":       True,
+                "cost_rate":    price,
+                "min":          mn,
+                "max":          mx,
+                "label":        label,
+                "category":     cat,
+                "platform":     platform,
+            }
+            _save(SMM_SVC_FILE, smm_services)
+            waiting.pop(uid, None)
+            plabel = _PLATFORM_LABEL_BY_KEY.get(platform, "គ្មាន (Any Link)")
+            bot.send_message(uid,
+                f"✅ <b>Manual Service បានបន្ថែម!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"📝 ឈ្មោះ: <b>{label}</b>\n"
+                f"📂 Category: <b>{cat}</b>\n"
+                f"🌐 Platform: <b>{plabel}</b>\n"
+                f"💰 តម្លៃ: <b>${price:.2f}/1K</b>\n"
+                f"🔢 Min: <b>{mn:,}</b> · Max: <b>{mx:,}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"✍️ <i>Service នេះ Admin ត្រូវ process ដោយដៃ</i>",
+                parse_mode="HTML", reply_markup=admin_kb()); return
+
+        # ── Admin: Update manual order status ──
+        if isinstance(step, dict) and step.get("step") == "manual_order_done" and uid == ADMIN_ID:
+            _finish_manual_order(uid, _bot_by_tag(step.get("via_bot", "main")), step, text)
+            return
+        if isinstance(step, dict) and step.get("step") == "manual_order_reject" and uid == ADMIN_ID:
+            _finish_manual_reject(uid, _bot_by_tag(step.get("via_bot", "main")), step, text)
+            return
+            return
+
+        if text == "✍️ Manual SMM":
+            waiting[uid] = {"step": "manual_svc_label"}
+            bot.send_message(uid,
+                "✍️ <b>បន្ថែម Manual Service</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "<i>Service ប្រភេទនេះ Admin process ដោយដៃ\n"
+                "ប្រើសម្រាប់: TikTok Khmer, Reseller, ល.ល</i>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "📝 <b>វាយ ឈ្មោះ Service:</b>\n"
+                "ឧ: <code>TikTok Likes Khmer</code>",
+                parse_mode="HTML", reply_markup=cancel_kb()); return
+
+        # ── Package (flat-price bundle): step 1 label ──
+        if text == "📦 បន្ថែម Package":
+            waiting[uid] = {"step": "pkg_label"}
+            bot.send_message(uid,
+                "📦 <b>បន្ថែម Package ថ្មី (កញ្ចប់តម្លៃថេរ)</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "<i>ប្រើសម្រាប់កញ្ចប់ Like+View+Follow ដូច TikTok Khmer\n"
+                "(តម្លៃថេរក្នុងមួយ Order — មិនគិតតាម 1K ទេ)</i>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "📝 <b>វាយ ឈ្មោះ Package:</b>\n"
+                "ឧ: <code>1K-2K Like + 3.5K View</code>",
+                parse_mode="HTML", reply_markup=cancel_kb()); return
+
+        if isinstance(step, dict) and step.get("step") == "pkg_label":
+            label = text.strip()
+            if not label:
+                bot.send_message(uid, "❌ ឈ្មោះទទេ! វាយម្តងទៀត:", reply_markup=cancel_kb()); return
+            waiting[uid] = {"step": "pkg_cat", "label": label}
+            cats_kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🇰🇭 TikTok Khmer", callback_data="pkgcat:🇰🇭 TikTok Khmer", color="active")],
+                [InlineKeyboardButton("🎵 TikTok",    callback_data="pkgcat:TikTok", color="active"),
+                 InlineKeyboardButton("📘 Facebook",  callback_data="pkgcat:Facebook", color="active")],
+                [InlineKeyboardButton("📸 Instagram", callback_data="pkgcat:Instagram", color="active"),
+                 InlineKeyboardButton("▶️ YouTube",   callback_data="pkgcat:YouTube", color="active")],
+                [InlineKeyboardButton("✏️ ផ្សេង (Custom)", callback_data="pkgcat:__custom__", color="progress")],
+            ])
+            bot.send_message(uid,
+                f"📂 <b>ជ្រើស Category</b>\n📝 ឈ្មោះ: <b>{label}</b>",
+                parse_mode="HTML", reply_markup=cats_kb); return
+
+        if isinstance(step, dict) and step.get("step") == "pkg_cat_custom":
+            cat = text.strip()
+            if not cat:
+                bot.send_message(uid, "❌ Category ទទេ!", reply_markup=cancel_kb()); return
+            waiting[uid] = {"step": "pkg_platform", "label": step["label"], "cat": cat}
+            bot.send_message(uid,
+                f"🌐 <b>ជ្រើស Platform</b> (សម្រាប់ផ្គូផ្គង Link)\n"
+                f"📂 Category: <b>{cat}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"ជ្រើស Platform ត្រឹមត្រូវ ដើម្បីឲ្យ Bot ច្រានចោល Link ខុស Platform\n"
+                f"(ចុច 🔓 ផ្សេង បើ Package នេះទទួល Link ណាក៏បាន)",
+                parse_mode="HTML", reply_markup=_platform_pick_kb("pkgplat")); return
+
+        if isinstance(step, dict) and step.get("step") == "pkg_desc":
+            desc = text.strip()
+            waiting[uid] = {**step, "step": "pkg_price", "desc": ("" if desc == "-" else desc)}
+            bot.send_message(uid,
+                "💰 <b>ដាក់តម្លៃ Package (USD / កញ្ចប់)</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "ឧ: <code>0.99</code> = $0.99 ក្នុងមួយកញ្ចប់",
+                parse_mode="HTML", reply_markup=cancel_kb()); return
+
+        if isinstance(step, dict) and step.get("step") == "pkg_price":
+            try:
+                price = float(text.replace("$","").strip())
+                if price <= 0: raise ValueError
+            except:
+                bot.send_message(uid, "❌ តម្លៃខុស! ឧ: <code>0.99</code>",
+                                 parse_mode="HTML", reply_markup=cancel_kb()); return
+            label = step["label"]; cat = step["cat"]; desc = step.get("desc", "")
+            platform = step.get("platform") or _CAT_TO_PLATFORM_KEY.get(cat)
+            slug = f"manual_pkg_{cat.lower().replace(' ','_')}_{int(time.time())}"
+            smm_services[slug] = {
+                "api_id":      None,
+                "manual":      True,
+                "cost_rate":   0,
+                "min":         1,
+                "max":         1,
+                "label":       label,
+                "category":    cat,
+                "platform":    platform,
+                "flat_price":  price,
+                "preset_qtys": [1],
+                "description": desc,
+            }
+            _save(SMM_SVC_FILE, smm_services)
+            waiting.pop(uid, None)
+            bot.send_message(uid,
+                f"✅ <b>Package បានបន្ថែម!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"📝 ឈ្មោះ: <b>{label}</b>\n"
+                f"📂 Category: <b>{cat}</b>\n"
+                f"💰 តម្លៃ: <b>${price:.2f}/order</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"✍️ <i>Package នេះ Admin ត្រូវ process ដោយដៃ</i>",
+                parse_mode="HTML", reply_markup=admin_kb()); return
+
+        # ── Edit price of an existing service/package ──
+        if text == "💰 កែតម្លៃ":
+            if not smm_services:
+                bot.send_message(uid, "❌ គ្មាន SMM Service ទេ", reply_markup=admin_kb()); return
+            cats = {}
+            for slug, s in smm_services.items():
+                cat = s.get("category", "Other")
+                cats.setdefault(cat, []).append((slug, s))
+            for cat, svcs in cats.items():
+                btns = []
+                for slug, s in svcs:
+                    label = s.get("label", slug)[:28]
+                    if s.get("flat_price"):
+                        price_txt = f"${float(s['flat_price']):.2f}"
+                    else:
+                        price_txt = f"${float(s.get('cost_rate',0)):.2f}/1K"
+                    btns.append([InlineKeyboardButton(
+                        f"💰 {label} ({price_txt})", callback_data=f"editprice:{slug}", color="progress")])
+                bot.send_message(uid,
+                    f"💰 <b>កែតម្លៃ — {cat}</b>\n━━━━━━━━━━━━━━━━━━\nចុចដើម្បីកែតម្លៃ:",
+                    parse_mode="HTML", reply_markup=InlineKeyboardMarkup(btns))
+            return
+
+        if isinstance(step, dict) and step.get("step") == "edit_svc_price":
+            slug = step.get("slug")
+            s    = smm_services.get(slug)
+            if not s:
+                bot.send_message(uid, "❌ Service រកមិនឃើញ", reply_markup=admin_kb())
+                waiting.pop(uid, None); return
+            try:
+                new_price = float(text.replace("$","").strip())
+                if new_price <= 0: raise ValueError
+            except:
+                bot.send_message(uid, "❌ តម្លៃខុស! ឧ: <code>1.99</code>",
+                                 parse_mode="HTML", reply_markup=cancel_kb()); return
+            is_flat = bool(s.get("flat_price"))
+            if is_flat:
+                old_price = float(s.get("flat_price", 0))
+                smm_services[slug]["flat_price"] = new_price
+                unit = "/order"
+            else:
+                old_price = float(s.get("cost_rate", 0))
+                smm_services[slug]["cost_rate"] = new_price
+                unit = "/1K"
+            _save(SMM_SVC_FILE, smm_services)
+            waiting.pop(uid, None)
+            bot.send_message(uid,
+                f"✅ <b>តម្លៃបានផ្លាស់ប្តូរ!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"📝 {s.get('label', slug)}\n"
+                f"💰 ចាស់: <s>${old_price:.2f}{unit}</s>\n"
+                f"✨ ថ្មី: <b>${new_price:.2f}{unit}</b>",
+                parse_mode="HTML", reply_markup=admin_kb())
+            return
+
+
+        if text in ("🔍 រក Order ID", "🔍 Check Order", "រក Order ID"):
+            waiting[uid] = "admin_lookup_order"
+            bot.send_message(
+                uid,
+                "🔍 <b>រក Order តាម ID</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "វាយ <b>Order ID</b> (ឧ: <code>648</code> ឬ <code>645</code>)\n\n"
+                "Admin រកបានគ្រប់ order (មិនចាំ uid user)",
+                parse_mode="HTML",
+                reply_markup=cancel_kb(),
+            )
+            return
+
+        if text in ("👤 រក User ID", "👤 Check User", "រក User ID"):
+            waiting[uid] = "admin_lookup_user"
+            bot.send_message(
+                uid,
+                "👤 <b>រក User តាម Telegram ID</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "វាយ <b>User ID</b> (លេខ) ឧ: <code>8160094437</code>\n\n"
+                "នឹងបង្ហាញ name · username · balance · order ចុង",
+                parse_mode="HTML",
+                reply_markup=cancel_kb(),
+            )
+            return
+
+        if step == "admin_lookup_order":
+            oid = (text or "").strip()
+            waiting.pop(uid, None)
+            if not oid or oid in ("❌ បោះបង់", "Cancel", "cancel"):
+                bot.send_message(uid, "បោះបង់", reply_markup=admin_kb())
+                return
+            o = smm_orders.get(oid) or smm_orders.get(oid.upper())
+            if not o:
+                # try numeric without spaces
+                o = smm_orders.get(oid.replace(" ", ""))
+            if not o:
+                bot.send_message(
+                    uid,
+                    f"❌ រកមិនឃើញ Order <code>{oid}</code>\n"
+                    f"សរុប orders ក្នុង data: <b>{len(smm_orders)}</b>",
+                    parse_mode="HTML",
+                    reply_markup=admin_kb(),
+                )
+                return
+            # resolve actual key
+            if oid not in smm_orders and oid.upper() in smm_orders:
+                oid = oid.upper()
+            msg = _admin_format_order(oid, o)
+            kb = InlineKeyboardMarkup()
+            st = (o.get("status") or "").lower()
+            if st in ("rejected", "canceled", "cancelled"):
+                kb.add(InlineKeyboardButton("🔄 Reopen → pending", callback_data=f"admreopen:{oid}", color="progress"))
+            if st in ("pending",) and not o.get("api_order_id"):
+                kb.add(InlineKeyboardButton("✅ Mark Done", callback_data=f"manord:done:{oid}", color="active"))
+                kb.add(InlineKeyboardButton("❌ Reject", callback_data=f"manord:reject:{oid}", color="inactive"))
+            bot.send_message(uid, msg, parse_mode="HTML", reply_markup=kb)
+            bot.send_message(uid, "Admin menu:", reply_markup=admin_kb())
+            return
+
+        if step == "admin_lookup_user":
+            raw = (text or "").strip().replace(" ", "")
+            waiting.pop(uid, None)
+            if not raw or raw in ("❌បោះបង់", "Cancel", "cancel", "❌ បោះបង់"):
+                bot.send_message(uid, "បោះបង់", reply_markup=admin_kb())
+                return
+            if not raw.isdigit():
+                bot.send_message(uid, "❌ User ID ត្រូវជាលេខ", reply_markup=admin_kb())
+                return
+            msg = _admin_format_user(raw)
+            bot.send_message(uid, msg, parse_mode="HTML", reply_markup=admin_kb())
+            return
+
+        if text == "📊 ការបញ្ជា SMM":
+            if not smm_orders:
+                bot.send_message(uid, "❌ គ្មានការបញ្ជា SMM", reply_markup=admin_kb()); return
+            lines = ["<b>📊 ការបញ្ជា SMM (20 ចុងក្រោយ)</b>\n━━━━━━━━━━━━━━━━━━"]
+            for oid, o in list(smm_orders.items())[-20:]:
+                lines.append(f"🆔 <code>{oid}</code> | 👤 <code>{o['uid']}</code>\n  {o.get('label','?')} | Qty:{o.get('qty','?')} | ${o.get('price',0):.4f} | {o.get('status','?')}")
+            bot.send_message(uid, "\n".join(lines)[:4000], parse_mode="HTML", reply_markup=admin_kb()); return
+
+        if text == "⚙️ កំណត់ SMM API":
+            cur_url = smm_api.get("url","❌ មិនទាន់ set")
+            cur_key = smm_api.get("key","❌ មិនទាន់ set")
+            masked = cur_key[:6] + "****" + cur_key[-4:] if len(cur_key) > 10 else cur_key
+            kb_api = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✏️ កំណត់ URL + Key", callback_data="smmapi:setup", color="progress")],
+                [InlineKeyboardButton("🔌 សាកល្បងភ្ជាប់",  callback_data="smmapi:test", color="active")],
+                [InlineKeyboardButton("🗑️ លុប API",         callback_data="smmapi:clear", color="inactive")],
+            ])
+            bot.send_message(uid,
+                f"⚙️ <b>SMM API Config</b>\n━━━━━━━━━━━━━━━━━━\n"
+                f"🌐 URL: <code>{cur_url}</code>\n"
+                f"🔑 Key: <code>{masked}</code>",
+                parse_mode="HTML", reply_markup=kb_api); return
+
+        if text == "➕ បន្ថែម SMM":
+            cats_kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🎵 TikTok",    callback_data="smmaddcat:TikTok", color="active"),
+                 InlineKeyboardButton("📘 Facebook",  callback_data="smmaddcat:Facebook", color="active")],
+                [InlineKeyboardButton("📸 Instagram", callback_data="smmaddcat:Instagram", color="active"),
+                 InlineKeyboardButton("▶️ YouTube",   callback_data="smmaddcat:YouTube", color="active")],
+                [InlineKeyboardButton("📱 Telegram",  callback_data="smmaddcat:Telegram", color="active"),
+                 InlineKeyboardButton("🐦 Twitter",   callback_data="smmaddcat:Twitter", color="active")],
+                [InlineKeyboardButton("✏️ Custom Category", callback_data="smmaddcat:custom", color="progress")],
+            ])
+            bot.send_message(uid,
+                "➕ <b>បន្ថែម SMM Service</b>\n━━━━━━━━━━━━━━━━━━\nជ្រើស Category:",
+                parse_mode="HTML", reply_markup=cats_kb); return
+
+        if text == "🗑️ លុប SMM":
+            if not smm_services:
+                bot.send_message(uid, "❌ គ្មាន SMM Service ទេ", reply_markup=admin_kb()); return
+            cats = {}
+            for slug, s in smm_services.items():
+                cat = s.get("category", "Other")
+                cats.setdefault(cat, []).append((slug, s))
+            for cat, svcs in cats.items():
+                btns = []
+                for slug, s in svcs:
+                    label = s.get("label", slug)[:30]
+                    api_id = s.get("api_id", "?")
+                    btns.append([InlineKeyboardButton(
+                        f"🗑️ [{api_id}] {label}", callback_data=f"delsvc:{slug}", color="inactive")])
+                btns.append([InlineKeyboardButton(
+                    f"🗑️ លុបទាំងអស់ {cat}", callback_data=f"delsvc:cat:{cat}", color="inactive")])
+                bot.send_message(uid,
+                    f"📂 <b>{cat}</b> — {len(svcs)} services\n━━━━━━━━━━━━━━━━━━",
+                    parse_mode="HTML", reply_markup=InlineKeyboardMarkup(btns))
+            return
+
+        if text == "✏️ កែ SMM":
+            if not smm_services:
+                bot.send_message(uid, "❌ គ្មាន SMM Service ទេ", reply_markup=admin_kb()); return
+            cats = {}
+            for slug, s in smm_services.items():
+                cat = s.get("category", "Other")
+                cats.setdefault(cat, []).append((slug, s))
+            for cat, svcs in cats.items():
+                btns = []
+                for slug, s in svcs:
+                    label  = s.get("label", slug)[:35]
+                    api_id = s.get("api_id", "?")
+                    btns.append([InlineKeyboardButton(
+                        f"✏️ [{api_id}] {label}", callback_data=f"editsvc:{slug}", color="progress")])
+                bot.send_message(uid,
+                    f"✏️ <b>កែឈ្មោះ — {cat}</b>\n━━━━━━━━━━━━━━━━━━\nចុចដើម្បីកែ:",
+                    parse_mode="HTML", reply_markup=InlineKeyboardMarkup(btns))
+            return
+
+        if text == "📋 SMM Services":
+            bot.send_message(uid, _smm_service_list_text(), parse_mode="HTML", reply_markup=admin_kb()); return
+
+        if text == "💹 ប្រាក់ចំណេញ SMM":
+            waiting[uid] = {"step": "smm_set_profit"}
+            bot.send_message(uid,
+                f"💹 <b>ប្រាក់ចំណេញ SMM: {_smm_profit_pct():.0f}%</b>\nផ្ញើ % ថ្មី:",
+                parse_mode="HTML", reply_markup=cancel_kb()); return
+
+        if text == "📈 របាយការណ៍ចំណេញ":
+            bot.send_message(uid, _profit_report_text(), parse_mode="HTML", reply_markup=admin_kb()); return
+
+        if text == "🏆 Top Services/Clients":
+            bot.send_message(uid, _top_report_text(), parse_mode="HTML", reply_markup=admin_kb()); return
+
+        if text == "⏰ Daily Report Auto":
+            bot.send_message(uid,
+                f"⏰ <b>Daily Report Auto</b>\nស្ថានភាព: {'🟢 បើក' if daily_report_cfg.get('enabled', True) else '🔴 បិទ'}\n"
+                f"ម៉ោងផ្ញើ: {daily_report_cfg.get('hour', 8):02d}:00 (ម៉ោងកម្ពុជា)\n\n"
+                f"Bot នឹងផ្ញើ 📈 ចំណេញ + 🏆 Top Services/Clients មកអ្នកដោយស្វ័យប្រវត្តិរាល់ថ្ងៃ។",
+                parse_mode="HTML", reply_markup=daily_report_kb())
+            return
+
+        if text == "💾 Backup Data":
+            cmd_backup(message); return
+
+        if text == "🧾 QR ដាក់លុយដោយដៃ":
+            bot.send_message(uid, _manual_qr_status_text(), parse_mode="HTML", reply_markup=manual_qr_admin_kb())
+            return
+
+        if text == "🎁 Bonus ដាក់លុយ":
+            btns = InlineKeyboardMarkup()
+            toggle_label = "🔴 បិទ Auto Bonus" if dep_bonus_cfg.get("enabled", True) else "🟢 បើក Auto Bonus"
+            btns.add(InlineKeyboardButton(toggle_label, callback_data="depbonus:toggle",
+                                          color=("danger" if dep_bonus_cfg.get("enabled", True) else "active")))
+            btns.add(InlineKeyboardButton("✏️ កែ % / ចំនួនអប្បបរមា", callback_data="depbonus:edit", color="progress"))
+            bot.send_message(uid,
+                f"{_dep_bonus_status_text()}\n━━━━━━━━━━━━━━━━━━\n"
+                f"👉 អ្នកប្រើដាក់លុយចាប់ពី <b>${float(dep_bonus_cfg.get('min_amount',1.0)):.2f}</b> ឡើងទៅ "
+                f"នឹងទទួល Bonus <b>{float(dep_bonus_cfg.get('pct',5.0)):.0f}%</b> បញ្ចូល Balance ដោយស្វ័យប្រវត្តិ "
+                f"(បូកបន្ថែមលើ Promo Code ប្រសិនបើមាន)។",
+                parse_mode="HTML", reply_markup=btns); return
+
+        if text == "🏷️ បញ្ចុះតម្លៃ User":
+            bot.send_message(uid, _user_discount_admin_text(), parse_mode="HTML",
+                             reply_markup=_user_discount_admin_kb()); return
+
+        if text == "📢 Force Subscribe":
+            if uid != ADMIN_ID:
+                bot.send_message(uid, "🚫 Master Admin only!", reply_markup=sub_admin_kb()); return
+            bot.send_message(uid, _force_sub_status_text(), parse_mode="HTML",
+                             reply_markup=_force_sub_admin_kb()); return
+
+        if text == "⏳ QR Cooldown":
+            btns = InlineKeyboardMarkup()
+            btns.add(InlineKeyboardButton("✏️ កែ Cooldown (វិនាទី)", callback_data="qrcd:edit", color="progress"))
+            btns.add(InlineKeyboardButton("🔴 បិទ Cooldown", callback_data="qrcd:off", color="danger"))
+            bot.send_message(uid,
+                f"{_dep_qr_cooldown_status_text()}",
+                parse_mode="HTML", reply_markup=btns); return
+
+        if text == "💰 ឆែកលុយ API":
+            url = smm_api.get("url",""); key = smm_api.get("key","")
+            if not url or not key:
+                bot.send_message(uid, "❌ SMM API មិនទាន់ set!", reply_markup=admin_kb()); return
+            try:
+                r = http.post(url, data={"key": key, "action": "balance"}, timeout=10)
+                d = r.json()
+                balance  = d.get("balance", d.get("Balance", "?"))
+                currency = d.get("currency", d.get("Currency", "USD"))
+                bot.send_message(uid,
+                    f"💰 <b>SMM API Balance</b>\n━━━━━━━━━━━━━━━━━━\n"
+                    f"💵 Balance: <b>{balance} {currency}</b>\n"
+                    f"🌐 API: <code>{url}</code>",
+                    parse_mode="HTML", reply_markup=admin_kb())
+            except Exception as e:
+                bot.send_message(uid, f"❌ API Error: {e}", reply_markup=admin_kb())
+            return
+
+        if text == "💰 កាបូបលុយ":
+            lines = ["<b>💰 កាបូបលុយអ្នកប្រើ</b>\n━━━━━━━━━━━━━━━━━━"]
+            for u_id, u_info in sorted(users_db.items(), key=lambda x: x[1].get("last",0), reverse=True)[:30]:
+                b = wallets.get(u_id, 0)
+                name = u_info.get("name","?")
+                lines.append(f"👤 <b>{name}</b> <code>{u_id}</code> — <b>${float(b):.2f}</b>")
+            bot.send_message(uid, "\n".join(lines)[:4000], parse_mode="HTML", reply_markup=admin_kb()); return
+
+        if text == "💳 ប្រាក់បញ្ញើ":
+            pend = [(k, v) for k, v in smm_deps.items() if v.get("status")=="pending"]
+            if not pend:
+                bot.send_message(uid, "✅ គ្មាន pending deposit", reply_markup=admin_kb()); return
+            lines = ["<b>💳 ប្រាក់បញ្ញើ រង់ចាំ</b>\n━━━━━━━━━━━━━━━━━━"]
+            for k, v in pend:
+                lines.append(f"👤 <code>{v.get('uid','?')}</code> | ${v.get('amount',0):.2f}")
+            bot.send_message(uid, "\n".join(lines)[:4000], parse_mode="HTML", reply_markup=admin_kb()); return
+
+        if text == "💸 បន្ថែមប្រាក់":
+            users_sorted = sorted(users_db.items(), key=lambda x: x[1].get("last",0), reverse=True)[:15]
+            btns = []
+            for u_id, u_info in users_sorted:
+                b    = float(wallets.get(u_id, 0))
+                name = (u_info.get("name") or "?")[:18]
+                btns.append([InlineKeyboardButton(
+                    f"👤 {name}  ${b:.2f}", callback_data=f"useraction:addbal:{u_id}", color="active")])
+            bot.send_message(uid,
+                "💸 <b>បន្ថែមប្រាក់</b>\n━━━━━━━━━━━━━━━━━━\nជ្រើសអ្នកប្រើ:",
+                parse_mode="HTML", reply_markup=InlineKeyboardMarkup(btns)); return
+
+        if text == "💔 កាត់ប្រាក់":
+            users_sorted = sorted(users_db.items(), key=lambda x: x[1].get("last",0), reverse=True)[:15]
+            btns = []
+            for u_id, u_info in users_sorted:
+                b    = float(wallets.get(u_id, 0))
+                name = (u_info.get("name") or "?")[:18]
+                btns.append([InlineKeyboardButton(
+                    f"👤 {name}  ${b:.2f}", callback_data=f"useraction:dedbal:{u_id}", color="progress")])
+            bot.send_message(uid,
+                "💔 <b>កាត់ប្រាក់</b>\n━━━━━━━━━━━━━━━━━━\nជ្រើសអ្នកប្រើ:",
+                parse_mode="HTML", reply_markup=InlineKeyboardMarkup(btns)); return
+
+        if text == "👥 អ្នកប្រើប្រាស់":
+            users_sorted = sorted(users_db.items(), key=lambda x: x[1].get("last",0), reverse=True)
+            if not users_sorted:
+                bot.send_message(uid, "❌ គ្មានអ្នកប្រើ", reply_markup=admin_kb()); return
+            total = len(users_sorted)
+            # Build table 20 per page to keep msgs short & avoid HTML issues
+            CHUNK = 20
+            chunks = [users_sorted[i:i+CHUNK] for i in range(0, total, CHUNK)]
+            for page, chunk in enumerate(chunks):
+                lines = []
+                for i, (u_id, u_info) in enumerate(chunk, start=page*CHUNK+1):
+                    b      = float(wallets.get(u_id, 0))
+                    name   = (u_info.get("name") or "NoName")[:10]
+                    uname  = f"@{u_info['username']}" if u_info.get("username") else "—"
+                    banned = "🚫" if u_info.get("banned") else "✅"
+                    lines.append(
+                        f"{i:>3}. {banned} {u_id}\n"
+                        f"     👤 {name}  {uname}  💳${b:.2f}"
+                    )
+                header = (
+                    f"👥 <b>អ្នកប្រើ ({page*CHUNK+1}–{page*CHUNK+len(chunk)}/{total})</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"#    ស្ថានភាព  ID\n"
+                    f"     ឈ្មោះ  Username  Balance\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                )
+                # Build inline buttons for each page
+                ikb_rows = []
+                for u_id, _ in chunk:
+                    ikb_rows.append([
+                        InlineKeyboardButton(f"💸 {u_id}", callback_data=f"useraction:addbal:{u_id}", color="active"),
+                        InlineKeyboardButton("💔 កាត់", callback_data=f"useraction:dedbal:{u_id}", color="progress"),
+                        InlineKeyboardButton("🚫 Ban", callback_data=f"useraction:ban:{u_id}", color="inactive"),
+                    ])
+                ikb = InlineKeyboardMarkup(ikb_rows)
+                bot.send_message(uid, header + "\n".join(lines),
+                    parse_mode="HTML", reply_markup=ikb)
+            bot.send_message(uid, f"✅ បង្ហាញ User ទាំង {total} នាក់រួចហើយ!", reply_markup=admin_kb())
+            return
+
+        if text == "📊 ស្ថិតិ":
+            total_orders = len(smm_orders)
+            total_users  = len(users_db)
+            total_rev    = sum(float(o.get("price") or 0) for o in smm_orders.values())
+            now_ts = int(time.time())
+            def _count_new(days):
+                cutoff = now_ts - days * 86400
+                return sum(1 for u in users_db.values()
+                           if u.get("joined") and int(u["joined"]) >= cutoff)
+            new_today = _count_new(1)
+            new_7d    = _count_new(7)
+            new_30d   = _count_new(30)
+            banned_n  = sum(1 for u in users_db.values() if u.get("banned"))
+            blocked_n = sum(1 for u in users_db.values() if u.get("blocked"))
+            _kb_stats = InlineKeyboardMarkup()
+            _kb_stats.row(
+                InlineKeyboardButton("🆕 បញ្ជី User ថ្មី (1 ខែ)", callback_data="stats:newusers30", color="active"),
+                InlineKeyboardButton("🆕 7 ថ្ងៃ", callback_data="stats:newusers7", color="progress"),
+            )
+            _kb_stats.row(
+                InlineKeyboardButton("🚫 ប្រវត្តិ Ban", callback_data="stats:banlog", color="danger"),
+            )
+            _kb_stats.row(
+                InlineKeyboardButton("🔇 កំពុង Block", callback_data="stats:blockednow", color="danger"),
+                InlineKeyboardButton("📜 ប្រវត្តិ Block", callback_data="stats:blocklog", color="progress"),
+            )
+            bot.send_message(uid,
+                f"📊 <b>ស្ថិតិ</b>\n━━━━━━━━━━━━━━━━━━\n"
+                f"👥 អ្នកប្រើសរុប: <b>{total_users}</b>\n"
+                f"🚫 Banned: <b>{banned_n}</b>\n"
+                f"🔇 Blocked Bot: <b>{blocked_n}</b>\n"
+                f"🆕 User ថ្មី (ថ្ងៃនេះ): <b>{new_today}</b>\n"
+                f"🆕 User ថ្មី (7 ថ្ងៃ): <b>{new_7d}</b>\n"
+                f"🆕 User ថ្មី (1 ខែ): <b>{new_30d}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"📊 SMM Orders: <b>{total_orders}</b>\n"
+                f"💰 ចំណូលសរុប: <b>${total_rev:.2f}</b>\n"
+                f"📋 Services: <b>{len(smm_services)}</b>\n"
+                f"🎟️ Promos: <b>{len(promos)}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"<i>💡 ចុចប៊ូតុងខាងក្រោមដើម្បីមើលបញ្ជី User ថ្មី / ប្រវត្តិ Ban</i>",
+                parse_mode="HTML", reply_markup=_kb_stats)
+            return
+
+
+        if text == "📢 ផ្សព្វផ្សាយ":
+            waiting[uid] = "broadcast_msg"
+            bot.send_message(uid, "📢 <b>ផ្សព្វផ្សាយ</b>\nផ្ញើ Message (text/photo/video/voice):",
+                             parse_mode="HTML", reply_markup=cancel_kb()); return
+
+        if text == "⏱ ល្បឿន Poll":
+            cur = smm_poll.get("interval", 5)
+            bot.send_message(uid, f"⏱ ល្បឿន Poll (បច្ចុប្បន្ន: {cur}s)",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⚡ 3s",  callback_data="poll:3", color="active"),
+                     InlineKeyboardButton("🟢 5s",  callback_data="poll:5", color="active"),
+                     InlineKeyboardButton("🔵 10s", callback_data="poll:10", color="progress")],
+                    [InlineKeyboardButton("🟡 15s", callback_data="poll:15", color="progress"),
+                     InlineKeyboardButton("🔴 30s", callback_data="poll:30", color="inactive")],
+                ])); return
+
+        if text == "🖼️ Welcome Photo":
+            cur = "✅ មានរូបហើយ" if welcome_cfg.get("photo_id") else "❌ មិនទាន់មានរូប"
+            waiting[uid] = "set_welcome_photo"
+            bot.send_message(uid,
+                f"🖼️ <b>Welcome Photo</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"ស្ថានភាព: <b>{cur}</b>\n\n"
+                f"📤 ផ្ញើ រូបភាព ដែលចង់ប្រើ\n"
+                f"<i>(រូបនេះនឹងបង្ហាញពេល User ចុច /start)</i>",
+                parse_mode="HTML", reply_markup=cancel_kb())
+            return
+
+        if text == "🎬 វីដេអូបង្រៀន":
+            cur = "✅ មានវីដេអូហើយ" if tutorial_cfg.get("file_id") else "❌ មិនទាន់មានវីដេអូ"
+            waiting[uid] = "set_tutorial_video"
+            bot.send_message(uid,
+                f"🎬 <b>វីដេអូបង្រៀន (Tutorial Video)</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"ស្ថានភាព: <b>{cur}</b>\n\n"
+                f"📤 ផ្ញើ វីដេអូ ដែលចង់ប្រើសម្រាប់បង្រៀន User\n"
+                f"<i>(វីដេអូនេះនឹងបង្ហាញពេល User ចុច 💡 របៀបប្រើប្រាស់)</i>",
+                parse_mode="HTML", reply_markup=cancel_kb())
+            return
+
+        if text == "🎵 វីដេអូ TikTok ជោគជ័យ":
+            cur = "✅ មានវីដេអូហើយ" if tiktok_success_video_cfg.get("file_id") else "❌ មិនទាន់មានវីដេអូ"
+            waiting[uid] = "set_tiktok_success_video"
+            bot.send_message(uid,
+                f"🎵 <b>វីដេអូ TikTok Khmer ជោគជ័យ</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"ស្ថានភាព: <b>{cur}</b>\n\n"
+                f"📤 ផ្ញើ វីដេអូ ដែលបង្ហាញរបៀប Accept Promote Assistant\n"
+                f"<i>(វីដេអូនេះនឹងផ្ញើទៅ User ភ្លាមៗ ក្រោយពេលទិញ Package "
+                f"🇰🇭 TikTok Khmer ជោគជ័យ)</i>",
+                parse_mode="HTML", reply_markup=cancel_kb())
+            return
+
+        if step == "set_notify_channel":
+            waiting.pop(uid, None)
+            val = text.strip()
+            if val.lower() == "off":
+                notify_cfg["enabled"] = False
+                _save(NOTIFY_FILE, notify_cfg)
+                bot.send_message(uid, "🔕 <b>Notify Channel បានបិទ!</b>",
+                    parse_mode="HTML", reply_markup=admin_kb())
+            else:
+                notify_cfg["channel_id"] = val
+                notify_cfg["enabled"] = True
+                _save(NOTIFY_FILE, notify_cfg)
+                bot.send_message(uid,
+                    f"✅ <b>Notify Channel បានកំណត់!</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"📢 Channel/Group: <code>{val}</code>\n"
+                    f"ស្ថានភាព: ✅ បើក\n\n"
+                    f"⚠️ <b>នៅ Render ត្រូវបន្ថែម Environment Variable:</b>\n"
+                    f"<code>NOTIFY_CHANNEL_ID = {val}</code>\n\n"
+                    f"<i>💡 ត្រូវប្រាកដថា Bot ជា Admin នៅ Channel/Group នោះ!</i>",
+                    parse_mode="HTML", reply_markup=admin_kb())
+            return
+
+        if text == "🔔 Notify Channel":
+            cid  = notify_cfg.get("channel_id", "") or "មិនទាន់កំណត់"
+            ison = "✅ បើក" if notify_cfg.get("enabled") else "❌ បិទ"
+            waiting[uid] = "set_notify_channel"
+            bot.send_message(uid,
+                f"🔔 <b>Notify Channel</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"Channel/Group ID: <code>{cid}</code>\n"
+                f"ស្ថានភាព: <b>{ison}</b>\n\n"
+                f"📝 ផ្ញើ Channel/Group ID ថ្មី\n"
+                f"<i>ឧ: <code>-1001234567890</code> ឬ <code>@mychannel</code></i>\n\n"
+                f"💡 ដើម្បី <b>បិទ</b> វាយ: <code>off</code>",
+                parse_mode="HTML", reply_markup=cancel_kb())
+            return
+
+        if text == "🧪 តេស្ត Notify":
+            cfg = _get_notify_cfg()
+            cid = cfg.get("channel_id", "")
+            if not cid or not cfg.get("enabled", False):
+                bot.send_message(uid, "❌ Notify Channel មិនទាន់កំណត់! ចុច 🔔 Notify Channel ដើម្បី setup ជាមុន", parse_mode="HTML", reply_markup=admin_kb())
+                return
+            try:
+                test_msg = "🧪 តេស្ត Notify!\n━━━━━━━━━━━━━━━━━━\n✅ Bot ដំណើរការ\n📢 Channel/Group: <code>" + cid + "</code>\n━━━━━━━━━━━━━━━━━━"
+                bot.send_message(cid, test_msg, parse_mode="HTML")
+                bot.send_message(uid, "✅ តេស្តបានជោគជ័យ! សារបានចូល Channel/Group ✅", parse_mode="HTML", reply_markup=admin_kb())
+            except Exception as e:
+                bot.send_message(uid, "❌ តេស្តបរាជ័យ!\nError: <code>" + str(e) + "</code>\n\n💡 ត្រូវប្រាកដថា Bot ជា Admin នៅ Channel/Group!", parse_mode="HTML", reply_markup=admin_kb())
+            return
+        if text == "🔄 ធ្វើឱ្យទាន់សម័យ":
+            bot.send_message(uid, "✅ បានធ្វើឱ្យទាន់សម័យ!", reply_markup=admin_kb()); return
+
+        # ══ NEW: Settings buttons (Master Admin only) ══
+        if text == "✏️ កែ Support":
+            if uid != ADMIN_ID:
+                bot.send_message(uid, "🚫 Master Admin only!", reply_markup=sub_admin_kb()); return
+            cur_kh = support_cfg.get("kh","")
+            cur_en = support_cfg.get("en","")
+            kb2 = InlineKeyboardMarkup()
+            kb2.add(InlineKeyboardButton("✏️ កែ (ខ្មែរ)", callback_data="set_support:kh", color="progress"))
+            kb2.add(InlineKeyboardButton("✏️ Edit (English)", callback_data="set_support:en", color="progress"))
+            bot.send_message(uid,
+                f"💬 <b>Support Message Settings</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🇰🇭 KH:\n<code>{cur_kh or '(default)'}</code>\n\n"
+                f"🇺🇸 EN:\n<code>{cur_en or '(default)'}</code>",
+                parse_mode="HTML", reply_markup=kb2); return
+
+        if text == "👥 Sub Admins":
+            if uid != ADMIN_ID:
+                bot.send_message(uid, "🚫 Master Admin only!", reply_markup=sub_admin_kb()); return
+            kb2 = InlineKeyboardMarkup()
+            kb2.add(InlineKeyboardButton("➕ បន្ថែម Sub Admin", callback_data="subadmin:add", color="active"))
+            kb2.add(InlineKeyboardButton("🗑️ លុប Sub Admin", callback_data="subadmin:list_del", color="inactive"))
+            lines = [f"👥 <b>Sub Admins ({len(sub_admins)})</b>\n━━━━━━━━━━━━━━━━━━"]
+            if sub_admins:
+                for sa in sub_admins:
+                    lines.append(f"• <code>{sa}</code>")
+            else:
+                lines.append("(គ្មាន Sub Admin ទេ)")
+            bot.send_message(uid, "\n".join(lines), parse_mode="HTML", reply_markup=kb2); return
+
+        if text == "🔑 CamRapidPay Key":  # removed — keep for old keyboards
+            bot.send_message(uid, "⚠️ <b>CamRapidPay ត្រូវបានលុបចេញពី bot ហើយ។</b>\nប្រើ <b>ABA PayWay</b> / <b>KHPAY</b> / <b>QR ដាក់ដោយដៃ</b> ជំនួស។", parse_mode="HTML", reply_markup=admin_kb()); return
+        if False and text == "🔑 CamRapidPay Key__disabled":
+            if uid != ADMIN_ID:
+                bot.send_message(uid, "🚫 Master Admin only!", reply_markup=sub_admin_kb()); return
+            cur = _effective_camrapid_key()
+            masked = cur[:8] + "..." + cur[-4:] if len(cur) > 12 else ("*" * len(cur) if cur else cur)
+            wh_cur = _effective_webhook_url()
+            wh_src = ("📁 Set ក្នុង Bot" if webhook_cfg.get("url")
+                      else "⚙️ env WEBHOOK_URL" if WEBHOOK_URL
+                      else "🤖 Auto (Render)" if os.getenv("RENDER_EXTERNAL_URL")
+                      else "🔧 Placeholder ក្លែងក្លាយ")
+            kb2 = InlineKeyboardMarkup()
+            kb2.add(InlineKeyboardButton("✏️ ប្តូរ Key ថ្មី", callback_data="set_camrapid:edit", color="progress"))
+            kb2.add(InlineKeyboardButton("🌐 ប្តូរ Webhook URL", callback_data="set_camrapid:webhook", color="progress"))
+            kb2.add(InlineKeyboardButton("🧪 Test Key (Check Endpoint)", callback_data="set_camrapid:test", color="active"))
+            kb2.add(InlineKeyboardButton("🧾 Test Generate QR (Create Endpoint)", callback_data="set_camrapid:testcreate", color="active"))
+            bot.send_message(uid,
+                f"🔑 <b>CamRapidPay API Key</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"Key: <code>{masked}</code>\n"
+                f"Source: {'📁 runtime' if camrapid_cfg.get('key') else '⚙️ env/default'}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🌐 Webhook URL: <code>{wh_cur}</code>\n"
+                f"Source: {wh_src}",
+                parse_mode="HTML", reply_markup=kb2); return
+
+        if text == "💳 ABA PayWay Key":
+            if uid != ADMIN_ID:
+                bot.send_message(uid, "🚫 Master Admin only!", reply_markup=sub_admin_kb()); return
+            cur_key = _effective_aba_key()
+            cur_mid = _effective_aba_merchant()
+            masked_key = cur_key[:6] + "..." + cur_key[-4:] if len(cur_key) > 10 else (("*" * len(cur_key)) if cur_key else "(មិនទាន់កំណត់)")
+            kb2 = InlineKeyboardMarkup()
+            kb2.add(InlineKeyboardButton("✏️ ប្តូរ API Key ថ្មី", callback_data="set_aba:edit_key", color="progress"))
+            kb2.add(InlineKeyboardButton("✏️ ប្តូរ Merchant ID ថ្មី", callback_data="set_aba:edit_merchant", color="progress"))
+            kb2.add(InlineKeyboardButton("🧪 Test Generate QR ($0.10)", callback_data="set_aba:testcreate", color="active"))
+            bot.send_message(uid,
+                f"💳 <b>ABA PayWay Key (KHMER SYSTEM)</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🔑 Profile Key: <code>{masked_key}</code>\n"
+                f"🏪 Merchant ID: <code>{cur_mid or '(មិនទាន់កំណត់)'}</code>\n"
+                f"Source: {'📁 runtime' if (aba_cfg.get('key') or aba_cfg.get('merchant_id')) else '⚙️ env/default'}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"📌 ត្រូវការទាំង ២ (Key + Merchant ID) ដើម្បីបើក ABA PayWay ជាវិធីទូទាត់ស្វ័យប្រវត្តិ។\n"
+                f"យកពី: khmer-system.com/operator/profile\n"
+                f"💡 អាចប្រើ ABA + KHPAY ព្រមគ្នា — User ជ្រើសរើសពេលដាក់លុយ។",
+                parse_mode="HTML", reply_markup=kb2); return
+
+        if text == "💠 KHPAY Key":
+            if uid != ADMIN_ID:
+                bot.send_message(uid, "🚫 Admin only!", reply_markup=sub_admin_kb()); return
+            cur = _effective_khpay_key()
+            mid = _effective_khpay_merchant()
+            masked = cur[:8] + "..." + cur[-4:] if len(cur) > 12 else (("*" * len(cur)) if cur else "(មិនទាន់កំណត់)")
+            kb2 = InlineKeyboardMarkup()
+            kb2.add(InlineKeyboardButton("✏️ ប្តូរ API Key", callback_data="set_khpay:edit", color="progress"))
+            kb2.add(InlineKeyboardButton("✏️ ប្តូរ Merchant ID", callback_data="set_khpay:edit_merchant", color="progress"))
+            kb2.add(InlineKeyboardButton("🧪 Test Generate QR ($0.10)", callback_data="set_khpay:testcreate", color="active"))
+            msg = (
+                "💠 <b>KHPAY (khpay.site)</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "🔑 Key: <code>%s</code>\n"
+                "🏪 Merchant: <code>%s</code>\n"
+                "Source: %s\n"
+                "🌐 API: <code>%s</code>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "📌 Key: Dashboard → Settings\n"
+                "📌 Merchant ID (optional): <code>mch_...</code> — បើទុកចោល ប្រើ default\n"
+                "💡 Sub-bot ក៏កែបាន — config រក្សាក្នុង DATA_DIR របស់ bot នេះ"
+            ) % (
+                masked,
+                mid or "(default)",
+                ("📁 runtime" if (khpay_cfg.get("key") or khpay_cfg.get("merchant_id")) else "⚙️ env/default"),
+                KHPAY_BASE_URL,
+            )
+            bot.send_message(uid, msg, parse_mode="HTML", reply_markup=kb2); return
+
+        if text == "🔀 វិធីទូទាត់":
+            if uid != ADMIN_ID:
+                bot.send_message(uid, "🚫 Master Admin only!", reply_markup=sub_admin_kb()); return
+            bot.send_message(uid,
+                f"🔀 <b>បិទ/បើក វិធីទូទាត់</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"{_paytoggle_status_lines()}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"👉 ចុចប៊ូតុងខាងក្រោមដើម្បីបិទ/បើក។ បើមានទាំង ២ (Key កំណត់រួច + Toggle ON) ព្រមគ្នា "
+                f"User នឹងឃើញ picker ជ្រើសរើសពេលដាក់លុយ។ បើមានតែមួយ Bot ប្រើវិធីនោះដោយស្វ័យប្រវត្តិ។",
+                parse_mode="HTML", reply_markup=_paytoggle_kb()); return
+
+        if text == "📝 Welcome Msg":
+            if uid != ADMIN_ID:
+                bot.send_message(uid, "🚫 Master Admin only!", reply_markup=sub_admin_kb()); return
+            cur = BOT_WELCOME_MSG or welcome_cfg.get("custom_msg","")
+            kb2 = InlineKeyboardMarkup()
+            kb2.add(InlineKeyboardButton("✏️ កែ Welcome Text", callback_data="set_welcome:text", color="progress"))
+            kb2.add(InlineKeyboardButton("🗑️ Reset (default)", callback_data="set_welcome:reset", color="inactive"))
+            bot.send_message(uid,
+                f"📝 <b>Welcome Message</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"<code>{cur[:300] if cur else '(default)'}</code>\n\n"
+                f"💡 ប្រើ <code>{{}}</code> ដើម្បីដាក់ balance",
+                parse_mode="HTML", reply_markup=kb2); return
+
+        if text == "😊 កំណត់ Emoji":
+            if uid != ADMIN_ID:
+                bot.send_message(uid, "🚫 Master Admin only!", reply_markup=sub_admin_kb()); return
+            done_n = sum(1 for v in EMOJI_MAP.values() if v)
+            bot.send_message(uid,
+                f"😊 <b>Premium Emoji Settings</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"កំណត់រួច: <b>{done_n}/{len(EMOJI_MAP)}</b>\n\n"
+                f"ជ្រើសសកម្មភាព:",
+                parse_mode="HTML", reply_markup=emoji_menu_kb()); return
+
+        if text.startswith("━━━"):
+            bot.send_message(uid, "👇 ជ្រើស menu ខាងក្រោម:", reply_markup=admin_kb()); return
+
+        # ── Settings waiting steps (master admin) ──
+        if step == "set_support_text" or (isinstance(step, dict) and step.get("step") == "set_support_text"):
+            lang_key = step["lang"] if isinstance(step, dict) else "kh"
+            waiting.pop(uid, None)
+            if text.strip() == "-":
+                support_cfg[lang_key] = ""
+                _save(SUPPORT_CFG_FILE, support_cfg)
+                bot.send_message(uid, f"✅ Support Message {'(ខ្មែរ)' if lang_key=='kh' else '(English)'} reset ទៅ default!",
+                                 reply_markup=admin_kb())
+            else:
+                support_cfg[lang_key] = text.strip()
+                _save(SUPPORT_CFG_FILE, support_cfg)
+                bot.send_message(uid, f"✅ Support Message {'(ខ្មែរ)' if lang_key=='kh' else '(English)'} បានរក្សា!",
+                                 reply_markup=admin_kb())
+            return
+
+        if step == "subadmin_add_id":
+            waiting.pop(uid, None)
+            if not text.strip().lstrip("-").isdigit():
+                bot.send_message(uid, "❌ ត្រូវជាលេខ Telegram ID!", reply_markup=admin_kb()); return
+            new_id = int(text.strip())
+            if new_id == ADMIN_ID:
+                bot.send_message(uid, "⚠️ Master Admin ID មិនចាំបាច់បន្ថែម!", reply_markup=admin_kb()); return
+            if new_id not in sub_admins:
+                sub_admins.append(new_id)
+                _save(SUB_ADMIN_FILE, sub_admins)
+            bot.send_message(uid,
+                f"✅ <b>Sub Admin បន្ថែម!</b>\n🆔 <code>{new_id}</code>\n"
+                f"👥 ចំនួនសរុប: <b>{len(sub_admins)}</b>",
+                parse_mode="HTML", reply_markup=admin_kb()); return
+
+        if step == "set_camrapid_key":
+            waiting.pop(uid, None)
+            if text.strip() == "-":
+                camrapid_cfg["key"] = ""
+                _save(CAMRAPID_CFG_FILE, camrapid_cfg)
+                bot.send_message(uid, "✅ CamRapidPay Key reset ទៅ env/default!",
+                                 reply_markup=admin_kb())
+            else:
+                k = text.strip()
+                if len(k) < 10:
+                    bot.send_message(uid, "❌ Key ខ្លីពេក!", reply_markup=admin_kb()); return
+                camrapid_cfg["key"] = k
+                _save(CAMRAPID_CFG_FILE, camrapid_cfg)
+                masked = k[:8] + "..." + k[-4:] if len(k) > 12 else "*" * len(k)
+                bot.send_message(uid, f"✅ CamRapidPay Key ថ្មីបានរក្សា!\n🔑 <code>{masked}</code>",
+                                 parse_mode="HTML", reply_markup=admin_kb())
+            return
+
+        if step == "set_aba_key":
+            waiting.pop(uid, None)
+            if text.strip() == "-":
+                aba_cfg["key"] = ""
+                _save(ABA_CFG_FILE, aba_cfg)
+                bot.send_message(uid, "✅ ABA PayWay Key reset ទៅ env/default!", reply_markup=admin_kb())
+            else:
+                k = text.strip()
+                if len(k) < 6:
+                    bot.send_message(uid, "❌ Key ខ្លីពេក!", reply_markup=admin_kb()); return
+                aba_cfg["key"] = k
+                _save(ABA_CFG_FILE, aba_cfg)
+                masked = k[:6] + "..." + k[-4:] if len(k) > 10 else "*" * len(k)
+                bot.send_message(uid, f"✅ ABA PayWay Key ថ្មីបានរក្សា!\n🔑 <code>{masked}</code>",
+                                 parse_mode="HTML", reply_markup=admin_kb())
+            return
+
+
+        if step == "set_khpay_key":
+            waiting.pop(uid, None)
+            if text.strip() == "-":
+                khpay_cfg["key"] = ""
+                _save(KHPAY_CFG_FILE, khpay_cfg)
+                bot.send_message(uid, "✅ KHPAY Key reset ទៅ env/default!", reply_markup=admin_kb())
+            else:
+                k = text.strip()
+                if len(k) < 8:
+                    bot.send_message(uid, "❌ Key ខ្លីពេក!", reply_markup=admin_kb()); return
+                khpay_cfg["key"] = k
+                _save(KHPAY_CFG_FILE, khpay_cfg)
+                masked = k[:8] + "..." + k[-4:] if len(k) > 12 else "*" * len(k)
+                bot.send_message(uid,
+                    "✅ KHPAY Key ថ្មីបានរក្សា!\n🔑 <code>%s</code>" % masked,
+                    parse_mode="HTML", reply_markup=admin_kb())
+            return
+
+        if step == "set_khpay_merchant":
+            waiting.pop(uid, None)
+            if text.strip() == "-":
+                khpay_cfg["merchant_id"] = ""
+                _save(KHPAY_CFG_FILE, khpay_cfg)
+                bot.send_message(uid, "✅ KHPAY Merchant ID លុបហើយ (ប្រើ default)!", reply_markup=admin_kb())
+            else:
+                mid = text.strip()
+                if not mid.startswith("mch_") and len(mid) < 6:
+                    bot.send_message(uid, "❌ Merchant ID មិនត្រឹមត្រូវ (ឧ. mch_ea4352a8ebc20c43)", reply_markup=admin_kb()); return
+                khpay_cfg["merchant_id"] = mid
+                _save(KHPAY_CFG_FILE, khpay_cfg)
+                bot.send_message(uid,
+                    "✅ KHPAY Merchant ID រក្សាហើយ!\n🏪 <code>%s</code>" % mid,
+                    parse_mode="HTML", reply_markup=admin_kb())
+            return
+
+        if step == "set_aba_merchant":
+            waiting.pop(uid, None)
+            if text.strip() == "-":
+                aba_cfg["merchant_id"] = ""
+                _save(ABA_CFG_FILE, aba_cfg)
+                bot.send_message(uid, "✅ ABA PayWay Merchant ID reset ទៅ env/default!", reply_markup=admin_kb())
+            else:
+                aba_cfg["merchant_id"] = text.strip()
+                _save(ABA_CFG_FILE, aba_cfg)
+                bot.send_message(uid, f"✅ ABA PayWay Merchant ID ថ្មីបានរក្សា!\n🏪 <code>{text.strip()}</code>",
+                                 parse_mode="HTML", reply_markup=admin_kb())
+            return
+
+        if step == "await_fsub_channel_id":
+            waiting.pop(uid, None)
+            val = text.strip()
+            if not val:
+                bot.send_message(uid, "❌ Channel ID ទទេ!", reply_markup=admin_kb()); return
+            force_sub_cfg["channel_id"] = val
+            _save(FORCE_SUB_FILE, force_sub_cfg)
+            bot.send_message(uid,
+                f"✅ Channel ID បានរក្សា: <code>{val}</code>",
+                parse_mode="HTML", reply_markup=admin_kb())
+            return
+
+        if step == "await_fsub_channel_link":
+            waiting.pop(uid, None)
+            val = text.strip()
+            if not (val.startswith("http://") or val.startswith("https://") or val.startswith("t.me/")):
+                bot.send_message(uid, "❌ Link មិនត្រឹមត្រូវ! ឧ: https://t.me/yourchannel",
+                                 reply_markup=admin_kb()); return
+            if val.startswith("t.me/"):
+                val = "https://" + val
+            force_sub_cfg["channel_link"] = val
+            _save(FORCE_SUB_FILE, force_sub_cfg)
+            bot.send_message(uid,
+                f"✅ Channel Link បានរក្សា: <code>{val}</code>",
+                parse_mode="HTML", reply_markup=admin_kb())
+            return
+
+        if step == "set_webhook_url":
+            waiting.pop(uid, None)
+            if text.strip() == "-":
+                webhook_cfg["url"] = ""
+                _save(WEBHOOK_CFG_FILE, webhook_cfg)
+                bot.send_message(uid,
+                    f"✅ Webhook URL reset ទៅ Auto-detect!\n🌐 <code>{_effective_webhook_url()}</code>",
+                    parse_mode="HTML", reply_markup=admin_kb())
+            else:
+                u = text.strip()
+                if not (u.startswith("http://") or u.startswith("https://")):
+                    bot.send_message(uid,
+                        "❌ URL ត្រូវចាប់ផ្ដើមដោយ <code>http://</code> ឬ <code>https://</code>!",
+                        parse_mode="HTML", reply_markup=admin_kb()); return
+                webhook_cfg["url"] = u
+                _save(WEBHOOK_CFG_FILE, webhook_cfg)
+                bot.send_message(uid, f"✅ Webhook URL ថ្មីបានរក្សា!\n🌐 <code>{u}</code>",
+                                 parse_mode="HTML", reply_markup=admin_kb())
+            return
+
+
+        if step == "set_welcome_msg_text":
+            waiting.pop(uid, None)
+            if text.strip() == "-":
+                welcome_cfg.pop("custom_msg", None)
+                _save(WELCOME_SETTINGS_FILE, welcome_cfg)
+                bot.send_message(uid, "✅ Welcome Message reset ទៅ default!", reply_markup=admin_kb())
+            else:
+                welcome_cfg["custom_msg"] = text.strip()
+                _save(WELCOME_SETTINGS_FILE, welcome_cfg)
+                bot.send_message(uid, "✅ Welcome Message ថ្មីបានរក្សា!", reply_markup=admin_kb())
+            return
+
+
+        # ── Admin hub categories (must be BEFORE admin unknown-button catch-all) ──
+        _hub = (text or "").strip()
+        def _btn_core(s):
+            s = (s or "").strip()
+            for ch in _EMOJI_CHARS_SORTED:
+                if ch and s.startswith(ch):
+                    return s[len(ch):].lstrip()
+            return s
+        _hc = _btn_core(_hub)
+
+        if _hc in ("មុខងារ SMM", "SMM Tools") or _hub in ("📦 មុខងារ SMM", "📦 SMM Tools"):
+            bot.send_message(uid, "📦 <b>មុខងារ SMM</b>\nជ្រើសខាងក្រោម", parse_mode="HTML", reply_markup=admin_smm_kb())
+            return
+        if _hc in ("ហិរញ្ញវត្ថុ", "Finance") or _hub in ("💰 ហិរញ្ញវត្ថុ", "💰 Finance"):
+            bot.send_message(uid, "💰 <b>ហិរញ្ញវត្ថុ</b>\nកាបូប · ដាក់លុយ · Bonus", parse_mode="HTML", reply_markup=admin_finance_kb())
+            return
+        if (_hc in ("អ្នកប្រើ", "Users") or _hub in ("👥 អ្នកប្រើ", "👥 Users")) and "ប្រាស់" not in _hc:
+            bot.send_message(uid, "👥 <b>អ្នកប្រើ</b>", parse_mode="HTML", reply_markup=admin_users_kb())
+            return
+        if _hc in ("Media", "មេឌា") or _hub in ("🎨 Media", "🎨 មេឌា"):
+            bot.send_message(uid, "🎨 <b>Media & Brand</b>", parse_mode="HTML", reply_markup=admin_media_kb())
+            return
+        if (_hc in ("កំណត់", "Settings") or _hub in ("⚙️ កំណត់", "⚙️ Settings")) and "SMM" not in _hub and "Emoji" not in _hub and "API" not in _hub:
+            bot.send_message(uid, "⚙️ <b>កំណត់</b>\nPayment · Bot · Channel", parse_mode="HTML", reply_markup=admin_settings_kb())
+            return
+        if _hc in ("Notify",) or _hub in ("🔔 Notify",):
+            bot.send_message(uid, "🔔 <b>Notify</b>", parse_mode="HTML", reply_markup=admin_notify_kb())
+            return
+        if _hc in ("Admin Menu", "ត្រឡប់ Admin") or _hub in ("🏠 Admin Menu", "🏠 ត្រឡប់ Admin"):
+            bot.send_message(uid, "🤖 <b>Admin Menu</b>", parse_mode="HTML", reply_markup=admin_kb())
+            return
+
+        _kb_reply = admin_kb() if _is_master_admin else sub_admin_kb()
+        bot.send_message(uid, "❓ ប្រើប៊ូតុង Menu ខាងក្រោម។", reply_markup=_kb_reply); return
+
+    # ════════════════════════════════════════
+    #  USER SECTION
+    # ════════════════════════════════════════
+
+    # ── Custom amount step ──
+    if isinstance(step, dict) and step.get("step") == "dep_custom_amt":
+        try:
+            amount = float(text.replace("$","").replace(",","").strip())
+            if amount <= 0: raise ValueError
+        except:
+            bot.send_message(uid, "❌ ចំនួនខុស! ឧ: <code>3</code> ឬ <code>7.50</code>",
+                             parse_mode="HTML", reply_markup=cancel_kb()); return
+        waiting.pop(uid, None)
+        _process_deposit(uid, uid_str, amount, None)
+        return
+
+    # Admin confirm deposit — enter amount
+    if isinstance(step, dict) and step.get("step") == "adm_confirm_dep" and uid == ADMIN_ID:
+        dep_id = step.get("dep_id")
+        dep    = smm_deps.get(dep_id)
+        if not dep:
+            bot.send_message(uid, "❌ Deposit រកមិនឃើញ", reply_markup=admin_kb())
+            waiting.pop(uid, None); return
+        try:
+            paid = float(text.replace("$","").strip())
+            if paid <= 0: raise ValueError
+        except:
+            bot.send_message(uid, "❌ ចំនួនខុស! ឧ: <code>5.00</code>", parse_mode="HTML"); return
+        waiting.pop(uid, None)
+        user_uid = int(dep["uid"])
+        # Credit balance manually — recompute auto bonus against the actual paid amount
+        promo_bonus = float(dep.get("promo_bonus") or 0)
+        auto_bonus  = _auto_dep_bonus(paid)
+        bonus = round(promo_bonus + auto_bonus, 2)
+        total = round(paid + bonus, 2)
+        # ── Manual confirm: នៅតែតាម lock + anti re-use ref ──
+        with _pay_credit_lock:
+            cur = smm_deps.get(dep_id) or {}
+            if cur.get("status") == "confirmed":
+                bot.send_message(uid, "⚠️ Deposit នេះ confirmed រួចហើយ (anti double-credit)", reply_markup=admin_kb())
+                return
+            ref_m = str(cur.get("reference") or f"MANUAL_{dep_id}")
+            if _ref_already_used(ref_m, except_dep_id=dep_id):
+                bot.send_message(uid, "🚨 Reference នេះធ្លាប់ credit រួច — blocked", reply_markup=admin_kb())
+                _alert_pay_security(f"Admin manual blocked dup ref <code>{ref_m}</code>")
+                return
+            add_bal(user_uid, total)
+            smm_deps[dep_id]["status"]      = "confirmed"
+            smm_deps[dep_id]["amount"]      = paid
+            smm_deps[dep_id]["bonus"]       = bonus
+            smm_deps[dep_id]["auto_bonus"]  = auto_bonus
+            smm_deps[dep_id]["confirm_source"] = "admin_manual"
+            smm_deps[dep_id]["confirmed_ts"] = time.time()
+            _mark_ref_used(ref_m, dep_id, dep.get("uid"), paid)
+            _save(SMM_DEP_FILE, smm_deps)
+        try:
+            _ref_pay_commission(user_uid, paid, dep_id=dep_id)
+        except Exception as _re:
+            logger.warning(f"[referral] admin manual: {_re}")
+        if dep.get("promo") and promo_bonus > 0:
+            confirm_promo(dep["promo"], user_uid)
+        new_b = bal(user_uid)
+        msg = (f"✅ <b>ដាក់លុយបានជោគជ័យ!</b>\n"
+               f"━━━━━━━━━━━━━━━━━━\n"
+               f"💰 បញ្ញើ: <b>${paid:.2f}</b>")
+        if promo_bonus > 0:
+            msg += f"\n🎟️ Promo Bonus: <b>+${promo_bonus:.2f}</b>"
+        if auto_bonus > 0:
+            msg += f"\n🎁 Auto Bonus: <b>+${auto_bonus:.2f}</b>"
+        msg += f"\n💳 Balance: <b>${new_b:.2f}</b>"
+        try: bot.send_message(user_uid, msg, parse_mode="HTML", reply_markup=main_kb(user_uid))
+        except Exception as _e: logger.debug(f"[silent] {_e}")
+        bot.send_message(uid,
+            f"✅ <b>Confirmed!</b>\n👤 <code>{dep['uid']}</code>\n💰 <b>${paid:.2f}</b>",
+            parse_mode="HTML", reply_markup=admin_kb())
+        # Channel — LazR style
+        try:
+            _notify(_channel_deposit_msg(
+                dep["uid"], paid,
+                reference=dep.get("reference") or f"MANUAL_{dep_id}",
+                method_label="ដាក់ប្រាក់",
+                bonus=bonus,
+            ))
+        except Exception as e:
+            logger.warning(f"[manual_dep channel] failed: {e}")
+        return
+
+    # ── Manual Deposit: User វាយចំនួនលុយ ──────────────────────────
+    if step == "await_manual_dep_amount":
+        try:
+            amt = float(text.strip().replace("$", ""))
+            if amt <= 0:
+                raise ValueError
+        except ValueError:
+            bot.send_message(uid, "❌ សូមវាយចំនួនលុយជាលេខ (ឧ. 5 ឬ 5.50)", reply_markup=cancel_kb())
+            return
+        waiting[uid] = {"step": "await_manual_dep_proof", "amount": amt}
+        bot.send_message(uid,
+            f"💰 ចំនួន: <b>${amt:.2f}</b>\n\n"
+            f"📷 សូមផ្ញើ <b>Screenshot ភស្តុតាងផ្ទេរប្រាក់</b> (App ធនាគារ / KHQR):",
+            parse_mode="HTML", reply_markup=cancel_kb())
+        return
+
+    # SMM link step
+    if isinstance(step, dict) and step.get("step") == "smm_link":
+        slug  = step["slug"]
+        qty   = step["qty"]
+        # Re-apply discount at order time (safety — in case admin changed discount after qty select)
+        base_price = _smm_price_for_order(slug, qty)
+        price, disc_amt, disc_pct = _apply_user_discount(uid, slug, base_price)
+        link  = text.strip()
+        s = smm_services.get(slug)
+        if not s:
+            waiting.pop(uid, None)
+            bot.send_message(uid, t(uid, "fallback"), reply_markup=main_kb(uid)); return
+        ok, err = _validate_order_link(link, slug, s)
+        if not ok:
+            # មិន pop `waiting` ទេ — ឲ្យ user ព្យាយាមផ្ញើ Link ម្ដងទៀត
+            bot.send_message(uid, err, parse_mode="HTML", reply_markup=cancel_kb())
+            return
+        waiting.pop(uid, None)
+        if bal(uid) < price:
+            bot.send_message(uid,
+                f"❌ Balance មិនគ្រប់!\n💳 ${bal(uid):.2f} | Need: ${price:.2f}",
+                parse_mode="HTML", reply_markup=main_kb(uid))
+            # ជូនដំណឹង Admin ថា User ចង់ Order ប៉ុន្តែលុយមិនគ្រប់ — ជា lead ល្អ
+            # សម្រាប់ Admin ទាក់ទងទៅ User ដើម្បីលើកទឹកចិត្តឲ្យបញ្ចូលលុយ
+            try: onotify(
+                f"💸 <b>User ចង់ Order ប៉ុន្តែ Balance មិនគ្រប់!</b>\n"
+                f"👤 {_user_display(uid_str)}\n"
+                f"📦 {s.get('label',slug)}\n"
+                f"🔢 {qty:,} | 💰 ត្រូវការ: ${price:.4f}\n"
+                f"💳 Balance បច្ចុប្បន្ន: ${bal(uid):.2f}")
+            except Exception as _e: logger.debug(f"[silent] {_e}")
+            return
+        ded_bal(uid, price)
+        key = smm_api.get("key",""); api_url = smm_api.get("url","")
+        res = None
+        api_failed = False; api_err_msg = ""
+        if key and api_url and not s.get("manual"):
+            res = _smm_api_post({"key":key,"action":"add","service":s["api_id"],"link":link,"quantity":qty})
+            if not res or not isinstance(res, dict) or res.get("error") or not res.get("order"):
+                api_failed = True
+                api_err_msg = (str(res.get("error")) if isinstance(res, dict) and res.get("error")
+                               else "SMM API មិនឆ្លើយតប ឬបញ្ជាទិញមិនជោគជ័យ")
+        # ── API Order បរាជ័យ → សងលុយវិញភ្លាម កុំឲ្យ User ខាតលុយឥតបានការ ──
+        if api_failed:
+            add_bal(uid, price)
+            bot.send_message(uid,
+                f"❌ <b>Order មិនជោគជ័យ!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"📊 {s.get('label',slug)}\n"
+                f"⚠️ មូលហេតុ: <i>{api_err_msg}</i>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"💰 លុយត្រូវបានសងវិញ: <b>${price:.2f}</b>\n"
+                f"💳 Balance: <b>${bal(uid):.2f}</b>\n"
+                f"សូមព្យាយាមម្ដងទៀត ឬទាក់ទង Admin។",
+                parse_mode="HTML", reply_markup=main_kb(uid))
+            try: onotify(
+                f"⚠️ <b>SMM Order បរាជ័យ (Auto-Refunded)</b>\n"
+                f"👤 {_user_display(uid_str)}\n"
+                f"📊 {s.get('label',slug)} | {qty:,} | ${price:.4f}\n"
+                f"🔗 <code>{link}</code>\n"
+                f"⚠️ {api_err_msg}")
+            except Exception as _e: logger.debug(f"[silent] {_e}")
+            return
+        api_oid = str(res.get("order","")) if res else ""
+        oid = _make_order_id()
+        order_rec = {
+            "uid":uid_str,"slug":slug,"label":s.get("label",slug),
+            "qty":qty,"price":price,"link":link,"api_order_id":api_oid,
+            "status":"pending","ts":int(time.time())
+        }
+        if disc_pct > 0:
+            order_rec["base_price"] = base_price
+            order_rec["discount_pct"] = disc_pct
+            order_rec["discount_amt"] = disc_amt
+        smm_orders[oid] = order_rec
+        _save(SMM_ORD_FILE, smm_orders)
+
+        is_tiktok_promote = s.get("flat_price") and "tiktok" in slug.lower()
+        is_manual = s.get("manual", False)
+        disc_line = ""
+        if disc_pct > 0:
+            disc_line = f"\n🏷️ បញ្ចុះ {disc_pct:.0f}%: <s>${base_price:.2f}</s> → <b>${price:.2f}</b>"
+
+        if is_tiktok_promote:
+            bot.send_message(uid,
+                f"✅ <b>Order TikTok Promote បានជោគជ័យ!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🆔 <code>{oid}</code>\n"
+                f"🎵 {s.get('label',slug)}\n"
+                f"💰 <b>${price:.2f}</b>{disc_line}\n"
+                f"🔗 <code>{link}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"⏳ <b>ចាំ Admin ដំណើរការ 5-15 នាទី</b>\n\n"
+                f"📱 <b>រំឭក!</b> ចូល TikTok:\n"
+                f"Inbox → System notifications\n"
+                f"→ Promote Assistant → <b>Respond</b>\n"
+                f"→ Authorize → <b>Confirm</b> ✅\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"💳 Balance: <b>${bal(uid):.2f}</b>",
+                parse_mode="HTML", reply_markup=main_kb(uid))
+            # ── វីដេអូបង្ហាញរបៀប Accept Promote — ផ្ញើភ្លាមៗបន្ទាប់ពី Order ជោគជ័យ ──
+            tk_video_id = tiktok_success_video_cfg.get("file_id")
+            if tk_video_id:
+                try:
+                    _tk_cap = _tiktok_success_video_caption()
+                    bot.send_video(
+                        uid,
+                        tk_video_id,
+                        caption=_tk_cap,
+                        caption_entities=_entities_for_emoji_text(_tk_cap),
+                        parse_mode="HTML"
+                    )
+                except Exception as e:
+                    logger.warning(f"⚠️ send tiktok success video failed: {e}")
+        else:
+            bot.send_message(uid,
+                f"✅ <b>បញ្ជា SMM បានជោគជ័យ!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🆔 <code>{oid}</code>\n"
+                f"📊 {s.get('label',slug)}\n"
+                f"🔢 ចំនួន: <b>{qty:,}</b> | 💰 <b>${price:.4f}</b>{disc_line}\n"
+                f"🔗 <code>{link}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"💳 Balance: <b>${bal(uid):.2f}</b>",
+                parse_mode="HTML", reply_markup=main_kb(uid))
+
+        # ── Notify ──
+        # ទាំង Manual/TikTok Promote និង Auto API → ផ្ញើទាំង Channel invoice (log សាធារណៈ) និង Order Bot (log ជូន Admin)
+        udisp = _user_display(uid_str)
+        admin_disc = f"\n🏷️ Discount {disc_pct:.0f}% (−${disc_amt:.2f})" if disc_pct > 0 else ""
+        needs_admin_hand = bool(is_tiktok_promote or is_manual)
+
+        if needs_admin_hand:
+            kb_adm = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Done",   callback_data=f"manord:done:{oid}", color="active"),
+                InlineKeyboardButton("❌ Reject", callback_data=f"manord:reject:{oid}", color="inactive"),
+            ]])
+            # Link ពេញ 100% ទៅ Order Bot (មិន mask / មិនកាត់) — ចុចបាន + copy បាន
+            _link_full = (link or "").strip()
+            from html import escape as _html_esc
+            if _link_full.lower().startswith(("http://", "https://")):
+                _href = _html_esc(_link_full, quote=True)
+                _link_disp = (
+                    f"🔗 <b>Link ពេញ:</b>\n"
+                    f"<a href=\"{_href}\">{_html_esc(_link_full)}</a>\n"
+                    f"<code>{_html_esc(_link_full)}</code>"
+                )
+            else:
+                _link_disp = f"🔗 <b>Link ពេញ:</b>\n<code>{_html_esc(_link_full)}</code>"
+
+            if is_tiktok_promote:
+                admin_msg = (
+                    f"🎵 <b>Order — TikTok Khmer</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"🆔 <code>{oid}</code>\n"
+                    f"👤 {udisp}\n"
+                    f"💰 <b>${price:.2f}</b>{admin_disc}\n"
+                    f"{_link_disp}\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"📋 <b>ធ្វើ:</b>\n"
+                    f"1️⃣ TikTok → Promote\n"
+                    f"2️⃣ Budget → Invite\n"
+                    f"3️⃣ User Accept → ✅ Done"
+                )
+            else:
+                admin_msg = (
+                    f"✍️ <b>ប្រតិបត្តិការ — Manual Order</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"🆔 Order: <code>{oid}</code>\n"
+                    f"👤 {udisp}\n"
+                    f"📦 {_html_esc(str(s.get('label', slug)))}\n"
+                    f"🔢 {qty:,} | 💰 ${price:.4f}{admin_disc}\n"
+                    f"{_link_disp}\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"⏳ ត្រូវ Admin ដាក់ដោយដៃ — ចុច ✅ Done / ❌ Reject"
+                )
+            try:
+                onotify(admin_msg, reply_markup=kb_adm)
+            except Exception as _e:
+                logger.debug(f"[silent] {_e}")
+
+            try:
+                _notify(_channel_order_msg(
+                    uid_str,
+                    label=s.get("label", slug),
+                    price=price,
+                    link=link,
+                    oid=oid,
+                    qty=qty,
+                    status_label="កំពុងដំណើរការ ⏳",
+                ))
+            except Exception as e:
+                logger.warning(f"[order channel] failed: {e}")
+        else:
+            # Auto API — ផ្ញើទាំង Channel (invoice សាធារណៈ) និង Order Bot (log សម្រាប់ Admin)
+            api_oid = order_rec.get("api_order_id") or (res.get("order") if isinstance(res, dict) else None)
+            try:
+                _notify(_channel_order_msg(
+                    uid_str,
+                    label=s.get("label", slug),
+                    price=price,
+                    link=link,
+                    oid=oid,
+                    api_order_id=api_oid,
+                    qty=qty,
+                ))
+            except Exception as e:
+                logger.warning(f"[order channel] failed: {e}")
+
+            try:
+                auto_admin_msg = (
+                    f"⚡ <b>ប្រតិបត្តិការ — Auto Order</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"🆔 Order: <code>{oid}</code>\n"
+                    f"👤 {udisp}\n"
+                    f"📦 {s.get('label', slug)}\n"
+                    f"🔢 {qty:,} | 💰 ${price:.4f}{admin_disc}\n"
+                    + (f"🆔 API Order: <code>{api_oid}</code>\n" if api_oid else "")
+                    + f"━━━━━━━━━━━━━━━━━━\n"
+                    f"✅ បានបញ្ជូនទៅ Supplier ស្វ័យប្រវត្តិ"
+                )
+                onotify(auto_admin_msg)
+            except Exception as e:
+                logger.warning(f"[order bot] failed: {e}")
+        return
+
+    # Track order
+    if step == "track_order":
+        oid = text.strip()
+        # support both numeric sequential IDs and legacy KZxxxxx
+        o = smm_orders.get(oid) or smm_orders.get(oid.upper())
+        if o and oid.upper() in smm_orders and oid not in smm_orders:
+            oid = oid.upper()
+        waiting.pop(uid, None)
+        if not o or o.get("uid") != uid_str:
+            bot.send_message(uid, "❌ Order រកមិនឃើញ!", reply_markup=main_kb(uid)); return
+        # Sync ស្ថានភាព Live ពី Supplier API ភ្លាមៗ (មិនចាំបាច់រង់ចាំ Poll Cycle បន្ទាប់ទេ) —
+        # បើ Order ត្រូវ Cancel/Partial នៅខាង Supplier រួច Refund នឹងកើតឡើងស្វ័យប្រវត្តិទីនេះតែម្តង
+        if o.get("status") == "pending" and o.get("api_order_id"):
+            _smm_sync_order(oid)
+            o = smm_orders.get(oid, o)
+        elif o.get("status") == "refilling" and o.get("refill_id"):
+            _smm_sync_refill(oid)
+            o = smm_orders.get(oid, o)
+        bot.send_message(
+            uid,
+            _format_user_order_detail(oid, o),
+            parse_mode="HTML",
+            reply_markup=main_kb(uid),
+        )
+        return
+
+
+    # ── Main menu buttons ──
+    if text in ("📊 SMM Services", "🛒 បញ្ជាទិញសេវា", "បញ្ជាទិញសេវា", "🛒 បញ្ជាទិញ", "បញ្ជាទិញ", "🛒 Order Service", "Order Service", "🛒 Order", "Order"):
+        if not smm_services:
+            bot.send_message(uid,
+                "❌ គ្មាន SMM Service ទេ\n(Admin ចូល ⚙️ កំណត់ SMM API ដើម្បី import)",
+                reply_markup=main_kb(uid)); return
+        bot.send_message(uid,
+            "📊 <b>SMM Services</b>\n━━━━━━━━━━━━━━━━━━\nជ្រើស Platform:",
+            parse_mode="HTML", reply_markup=smm_cat_kb()); return
+
+    if text in ("💰 ដាក់ប្រាក់", "ដាក់ប្រាក់", "💰 Top Up", "Top Up", "💸 បញ្ចូលលុយ", "បញ្ចូលលុយ", "💸 Top Up"):
+        b = bal(uid)
+        waiting.pop(uid, None)
+        bonus_line = ""
+        if dep_bonus_cfg.get("enabled", True) and float(dep_bonus_cfg.get("pct", 0)) > 0:
+            min_amt = float(dep_bonus_cfg.get("min_amount", 1.0))
+            pct     = float(dep_bonus_cfg.get("pct", 5.0))
+            bonus_line = (
+                f"\n🎁 <i>ដាក់ចាប់ពី ${min_amt:.2f} ឡើងទៅ ទទួល Bonus {pct:.0f}% ភ្លាមៗ!</i>\n"
+                if lang == "kh" else
+                f"\n🎁 <i>Deposit ${min_amt:.2f}+ and get {pct:.0f}% bonus instantly!</i>\n"
+            )
+        bot.send_message(uid,
+            f"💸 <b>{'ដាក់លុយ' if lang=='kh' else 'Top Up'}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"💳 Balance: <b>${b:.2f}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━{bonus_line}\n"
+            f"{'ជ្រើស ចំនួន:' if lang=='kh' else 'Choose Amount:'}",
+            parse_mode="HTML", reply_markup=deposit_amt_kb(uid)); return
+
+    if text in ("📦 ការបញ្ជា", "ការបញ្ជា", "📦 Orders", "Orders", "📋 ប្រវត្តិការបញ្ជាទិញ", "ប្រវត្តិការបញ្ជាទិញ", "📋 ប្រវត្តិ", "ប្រវត្តិ", "📋 Order History", "Order History", "📋 History", "History"):
+        my_orders = {oid: o for oid, o in smm_orders.items() if o.get("uid") == uid_str}
+        if not my_orders:
+            bot.send_message(uid,
+                "📦 <b>ការបញ្ជា</b>\n\n❌ គ្មាន Order ទេ!",
+                parse_mode="HTML", reply_markup=main_kb(uid)); return
+        lines = ["📦 <b>ការបញ្ជា SMM</b>\n━━━━━━━━━━━━━━━━━━"]
+        for oid, o in sorted(my_orders.items(), key=lambda x: x[1].get("ts",0), reverse=True)[:10]:
+            st = str(o.get("status") or "")
+            line = f"📊 <code>{oid}</code> — {o.get('label','?')} x{o.get('qty','?')} | ${float(o.get('price') or 0):.4f} | {_ord_status_label(st)}"
+            if st.lower() in ("rejected", "canceled", "cancelled"):
+                rsn = (o.get("reject_reason") or o.get("note") or "").strip()
+                if rsn:
+                    line += "\n   📝 " + rsn[:80]
+            lines.append(line)
+        bot.send_message(
+            uid,
+            "\n".join(lines),
+            parse_mode="HTML",
+            reply_markup=_user_orders_inline_kb(uid_str),
+        )
+        return
+
+    if text in ("📋 ប្រវត្តិ", "📋 History"):
+        my_orders = {oid: o for oid, o in smm_orders.items() if o.get("uid") == uid_str}
+        if not my_orders:
+            bot.send_message(uid,
+                "📋 <b>ប្រវត្តិ</b>\n\n❌ គ្មាន Order ទេ!",
+                parse_mode="HTML", reply_markup=main_kb(uid)); return
+        lines = ["📋 <b>ប្រវត្តិ</b>\n━━━━━━━━━━━━━━━━━━"]
+        for oid, o in sorted(my_orders.items(), key=lambda x: x[1].get("ts",0), reverse=True)[:15]:
+            try:
+                dt = datetime.datetime.fromtimestamp(int(o.get("ts") or 0)).strftime("%d/%m %H:%M")
+            except Exception:
+                dt = "—"
+            st = str(o.get("status") or "")
+            line = f"📊 <code>{oid}</code> | {o.get('label','?')} x{o.get('qty','?')} | ${float(o.get('price') or 0):.4f} | {_ord_status_label(st)} | {dt}"
+            if st.lower() in ("rejected", "canceled", "cancelled"):
+                rsn = (o.get("reject_reason") or o.get("note") or "").strip()
+                if rsn:
+                    line += "\n   📝 " + rsn[:80]
+            lines.append(line)
+        bot.send_message(
+            uid,
+            "\n".join(lines)[:4000],
+            parse_mode="HTML",
+            reply_markup=_user_orders_inline_kb(uid_str),
+        )
+        return
+
+    if text in ("👜 កាបូបលុយ", "កាបូបលុយ", "👜 Wallet", "Wallet", "👤 តំណាំការគណនី", "តំណាំការគណនី", "👤 គណនី", "គណនី", "👤 My Account", "My Account", "👤 Account", "Account"):
+        waiting.pop(uid, None)
+        b = bal(uid)
+        my_deps = [(k, v) for k, v in smm_deps.items() if v.get("uid") == uid_str]
+        confirmed = sum(float(v.get("amount") or 0) for _, v in my_deps if v.get("status") == "confirmed")
+        pending   = sum(float(v.get("amount") or 0) for _, v in my_deps if v.get("status") == "pending")
+        total_orders = sum(1 for o in smm_orders.values() if o.get("uid") == uid_str)
+        u = users_db.get(uid_str, {})
+        name = u.get("name", "") or ""
+        uname = f"@{u['username']}" if u.get("username") else ""
+        if lang == "kh":
+            msg = (
+                f"👤 <b>គណនីរបស់ខ្ញុំ</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🙍 ឈ្មោះ: <b>{name}</b>  {uname}\n"
+                f"🆔 ID: <code>{uid_str}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"💳 Balance: <b>${b:.2f}</b>\n"
+                f"✅ សរុបដាក់: <b>${confirmed:.2f}</b>\n"
+                f"⏳ រង់ចាំ: <b>${pending:.2f}</b>\n"
+                f"📦 Orders: <b>{total_orders}</b>"
+            )
+        else:
+            msg = (
+                f"👤 <b>My Account</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🙍 Name: <b>{name}</b>  {uname}\n"
+                f"🆔 ID: <code>{uid_str}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"💳 Balance: <b>${b:.2f}</b>\n"
+                f"✅ Total deposited: <b>${confirmed:.2f}</b>\n"
+                f"⏳ Pending: <b>${pending:.2f}</b>\n"
+                f"📦 Orders: <b>{total_orders}</b>"
+            )
+        bot.send_message(uid, msg, parse_mode="HTML", reply_markup=main_kb(uid)); return
+
+    if text in ("Track 🔍", "🔍 Track Order", "Track Order", "🔍 Track", "Track", "🔍 តាមដានការបញ្ជាទិញ", "តាមដានការបញ្ជាទិញ", "🔍 តាមដាន", "តាមដាន"):
+        my_n = sum(1 for o in smm_orders.values() if str(o.get("uid")) == uid_str)
+        if my_n:
+            bot.send_message(
+                uid,
+                "🔍 <b>តាមដាន Order</b>\nចុច Order ខាងក្រោម ឬវាយ <b>Order ID</b>:",
+                parse_mode="HTML",
+                reply_markup=_user_orders_inline_kb(uid_str),
+            )
+        else:
+            bot.send_message(
+                uid,
+                "🔍 <b>តាមដាន Order</b>\nអ្នកមិនទាន់មាន Order ទេ។",
+                parse_mode="HTML",
+                reply_markup=main_kb(uid),
+            )
+            return
+        waiting[uid] = "track_order"
+        return
+        waiting[uid] = "track_order"
+        return
+
+    if text in ("💬 Support", "Support", "💬 ជំនួយ", "ជំនួយ"):
+        lang = get_lang(uid)
+        custom = support_cfg.get(lang) or support_cfg.get("kh") or ""
+        msg = custom if custom else t(uid, "support_msg")
+        bot.send_message(uid, msg, parse_mode="HTML", reply_markup=main_kb(uid)); return
+
+    
+    if text in ("🌐 ភាសា", "ភាសា", "🌐 Language", "Language", "🌐 ជ្រើសភាសា", "ជ្រើសភាសា"):
+        bot.send_message(
+            uid,
+            t(uid, "select_lang"),
+            parse_mode="HTML",
+            reply_markup=lang_select_kb(),
+        )
+        return
+
+    if text in ("💡 របៀបប្រើប្រាស់", "របៀបប្រើប្រាស់", "💡 របៀបប្រើ", "របៀបប្រើ", "💡 How to Use", "How to Use", "💡 Guide", "Guide"):
+        video_id = tutorial_cfg.get("file_id")
+        if video_id:
+            try:
+                bot.send_video(uid, video_id, caption=_tutorial_caption(),
+                                caption_entities=_entities_for_emoji_text(_tutorial_caption()),
+                                reply_markup=main_kb(uid))
+            except Exception as e:
+                logger.warning(f"⚠️ send tutorial video failed: {e}")
+                bot.send_message(uid, t(uid, "how_to_use"), parse_mode="HTML", reply_markup=main_kb(uid))
+        else:
+            bot.send_message(uid, t(uid, "how_to_use"), parse_mode="HTML", reply_markup=main_kb(uid))
+        return
+
+    bot.send_message(uid, t(uid, "fallback"), reply_markup=main_kb(uid))
+
+# ═══════════════════════════════════════════════════════════
+#  FLASK CONTROL SERVER
+# ═══════════════════════════════════════════════════════════
+flask_app = Flask(__name__)
+
+def _check_key():
+    key = flask_request.args.get("key") or (flask_request.get_json(silent=True) or {}).get("key")
+    return key == CONTROL_KEY
+
+@flask_app.route("/health")
+def health():
+    return jsonify({"status": "running", "bot": _bot_brand()})
+
+@flask_app.route("/open-aba")
+def open_aba_app():
+    """HTTPS landing → បើក ABA Mobile ចូលអេក្រង់ Pay (type=payway + qrcode) តែម្តង។
+    Android: intent:// + package com.paygo24.ibank
+    iOS: abamobilebank://ababank.com?type=payway&qrcode=…"""
+    from flask import Response
+    from urllib.parse import quote
+    import json as _json
+    tok = (flask_request.args.get("d") or "").strip()
+    deeplink = ""
+    if tok:
+        try:
+            pad = "=" * (-len(tok) % 4)
+            deeplink = base64.urlsafe_b64decode(tok + pad).decode("utf-8", errors="ignore")
+        except Exception as e:
+            logger.warning(f"[open-aba] decode failed: {e}")
+    if not deeplink or not deeplink.lower().startswith("abamobilebank://"):
+        return Response(
+            "<!DOCTYPE html><html><body><p>❌ Invalid or expired ABA link</p></body></html>",
+            status=400, mimetype="text/html; charset=utf-8")
+    # ធានា type=payway → ចូលអេក្រង់ Pay ផ្ទាល់
+    low = deeplink.lower()
+    if "type=payway" not in low and "qrcode=" in low:
+        host_q = deeplink.split("://", 1)[-1]
+        if "?" in host_q:
+            host, q = host_q.split("?", 1)
+            deeplink = f"abamobilebank://{host}?type=payway&{q}"
+        else:
+            deeplink = deeplink + "?type=payway"
+    # Android Intent → package ABA, ចូល pay screen
+    path_q = deeplink.split("://", 1)[-1]
+    intent_url = (
+        f"intent://{path_q}#Intent;scheme=abamobilebank;"
+        f"package=com.paygo24.ibank;S.browser_fallback_url={quote(deeplink, safe='')};end"
+    )
+    js_dl = _json.dumps(deeplink)
+    js_intent = _json.dumps(intent_url)
+    safe_dl = deeplink.replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;")
+    safe_intent = intent_url.replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;")
+    html = f"""<!DOCTYPE html>
+<html lang="km"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>បើក ABA Pay…</title>
+<style>
+body{{font-family:system-ui,sans-serif;text-align:center;padding:2rem;background:#0b1f3a;color:#fff;margin:0}}
+.btn{{display:inline-block;margin:12px 8px;padding:14px 28px;background:#ed1c24;color:#fff;
+text-decoration:none;border-radius:12px;font-size:1.15rem;font-weight:700}}
+.btn2{{background:#1a73e8}}
+.hint{{color:#a8c0d8;font-size:0.9rem;margin-top:1.5rem;line-height:1.5}}
+</style>
+<script>
+(function(){{
+  var dl = {js_dl};
+  var intent = {js_intent};
+  var isAndroid = /Android/i.test(navigator.userAgent || "");
+  function go(){{
+    if (isAndroid) {{
+      window.location.href = intent;
+      setTimeout(function(){{ window.location.href = dl; }}, 500);
+    }} else {{
+      window.location.href = dl;
+    }}
+  }}
+  go();
+  setTimeout(go, 350);
+  setTimeout(go, 1000);
+}})();
+</script>
+</head>
+<body>
+  <p style="font-size:1.3rem;margin-top:2rem">🏦 កំពុងបើក <b>ABA Mobile → Pay</b>…</p>
+  <p><a class="btn" href="{safe_intent}">បើក ABA Pay (Android)</a></p>
+  <p><a class="btn btn2" href="{safe_dl}">បើក ABA Pay (iOS)</a></p>
+  <p class="hint">
+    បើមិនចូល App — ចុច ••• → <b>បើកក្នុង Safari / Chrome</b><br>
+    (Telegram in-app browser ជួនកាលរារាំង banking app)
+  </p>
+</body>
+</html>"""
+    return Response(html, mimetype="text/html; charset=utf-8")
+
+@flask_app.route("/webhook/camrapid", methods=["POST"])
+def camrapid_webhook():
+    """ទទួល Webhook ពី CamRapidPay — confirm តាម _safe_confirm_deposit (atomic + anti-bypass).
+    នៅតែ verify ជាមួយ CamRapidPay API មុន credit (មិនជឿ webhook body តែមួយឡើយ)."""
+    try:
+        data = flask_request.get_json(silent=True) or {}
+        reference = str(data.get("reference") or data.get("bill_number") or "").strip()
+        logger.info(f"[camrapid_webhook] received: {data}")
+        if not reference:
+            return jsonify({"received": True, "ok": False, "reason": "no_ref"}), 200
+        # ── មិនជឿ webhook តែមួយ — re-check gateway ──
+        info = _camrapid_check_detail(reference)
+        if not info.get("paid"):
+            logger.info(f"[camrapid_webhook] ref={reference} not paid yet per API")
+            return jsonify({"received": True, "ok": False, "reason": "not_paid"}), 200
+        matched = False
+        for dep_id, dep in list(smm_deps.items()):
+            if str(dep.get("reference") or "") == reference and dep.get("status") == "pending":
+                matched = True
+                _safe_confirm_deposit(
+                    dep_id, reference,
+                    paid_amount=info.get("amount"),
+                    source="webhook",
+                )
+                break
+        if not matched:
+            logger.info(f"[camrapid_webhook] no pending dep for ref={reference}")
+        return jsonify({"received": True, "ok": matched}), 200
+    except Exception as e:
+        logger.error(f"[camrapid_webhook] error: {e}")
+        return jsonify({"received": False}), 200
+
+@flask_app.route("/status")
+def status():
+    if not _check_key():
+        return jsonify({"error": "Unauthorized"}), 403
+    return jsonify({
+        "status": "running",
+        "users": len(users_db),
+        "smm_orders": len(smm_orders),
+        "smm_services": len(smm_services),
+        "wallets": len(wallets),
+    })
+
+@flask_app.route("/shutdown", methods=["GET", "POST"])
+def shutdown():
+    if not _check_key():
+        return jsonify({"error": "Unauthorized"}), 403
+    logger.warning("🛑 Shutdown requested!")
+    try:
+        bot.send_message(ADMIN_ID, "🛑 <b>Bot កំពុងបិទ...</b>", parse_mode="HTML")
+        time.sleep(1)
+    except Exception as _e: logger.debug(f"[silent] {_e}")
+    def _stop():
+        time.sleep(0.5)
+        bot.stop_polling()
+        time.sleep(1)
+        os._exit(0)
+    threading.Thread(target=_stop, daemon=True).start()
+    return jsonify({"status": "shutting_down"})
+
+@flask_app.route("/restart", methods=["GET", "POST"])
+def restart():
+    if not _check_key():
+        return jsonify({"error": "Unauthorized"}), 403
+    logger.warning("🔄 Restart requested!")
+    try:
+        bot.send_message(ADMIN_ID, "🔄 <b>Bot កំពុង Restart...</b>", parse_mode="HTML")
+        time.sleep(1)
+    except Exception as _e: logger.debug(f"[silent] {_e}")
+    def _restart():
+        time.sleep(0.5)
+        bot.stop_polling()
+        time.sleep(1)
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    threading.Thread(target=_restart, daemon=True).start()
+    return jsonify({"status": "restarting"})
+
+@flask_app.route("/broadcast_web", methods=["POST"])
+def broadcast_web():
+    if not _check_key():
+        return jsonify({"error": "Unauthorized"}), 403
+    data = flask_request.get_json(silent=True) or {}
+    text = data.get("text", "").strip()
+    if not text:
+        return jsonify({"error": "No text provided"}), 400
+    sent = failed = blocked_n = 0
+    for u_id in list(users_db.keys()):
+        if users_db.get(u_id, {}).get("banned") or users_db.get(u_id, {}).get("blocked"):
+            continue
+        try:
+            bot.send_message(int(u_id), text, parse_mode="HTML")
+            sent += 1
+        except Exception as e:
+            if _is_block_error(e):
+                _mark_user_blocked(u_id, True)
+                blocked_n += 1
+            else:
+                failed += 1
+        time.sleep(0.05)
+    return jsonify({"sent": sent, "failed": failed, "blocked": blocked_n})
+
+def run_flask():
+    logger.info(f"🌐 Control Server running on port {CONTROL_PORT}")
+    flask_app.run(host="0.0.0.0", port=CONTROL_PORT, debug=False, use_reloader=False)
+
+def _self_ping():
+    """Ping self every 5 min to prevent Render free tier spin down"""
+    import urllib.request
+    while True:
+        try:
+            time.sleep(300)  # 5 minutes
+            render_url = os.getenv("RENDER_EXTERNAL_URL", "")
+            if render_url:
+                urllib.request.urlopen(f"{render_url}/health", timeout=10)
+                logger.info("✅ Self-ping OK")
+        except Exception as e:
+            logger.warning(f"⚠️ Self-ping failed: {e}")
+
+
+@bot.message_handler(commands=["paystatus", "paytest"])
+def cmd_pay_debug(message):
+    """Admin: /paystatus = មើល config | /paytest = សាក generate QR $0.10"""
+    uid = message.from_user.id
+    if uid != ADMIN_ID and uid not in sub_admins:
+        return
+    cam = bool(_effective_camrapid_key())
+    aba = has_aba_payway()
+    khp = has_khpay()
+    pref = os.getenv("PAY_METHOD") or "auto"
+    txt = (
+        f"💳 <b>Payment Status</b> — <code>{INSTANCE_NAME or 'MASTER'}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"PAY_METHOD: <code>{pref}</code>\n"
+        f"CamRapid: {'✅' if cam else '❌'} key | toggle={'ON' if is_pay_method_enabled('camrapid') else 'OFF'}\n"
+        f"ABA: {'✅' if aba else '❌'} key | toggle={'ON' if is_pay_method_enabled('aba') else 'OFF'}\n"
+        f"KHPAY: {'✅' if khp else '❌'} key | toggle={'ON' if is_pay_method_enabled('khpay') else 'OFF'}\n"
+        f"KHPAY merchant: <code>{_effective_khpay_merchant() or '(default)'}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"DATA_DIR: <code>{os.getenv('DATA_DIR') or '.'}</code>"
+    )
+    bot.send_message(uid, txt, parse_mode="HTML")
+    if message.text and message.text.startswith("/paytest"):
+        bot.send_message(uid, "⏳ សាក Generate QR $0.10 …")
+        try:
+            if khp and is_pay_method_enabled("khpay"):
+                _send_deposit_qr_khpay(uid, 0.10)
+            elif aba and is_pay_method_enabled("aba"):
+                _send_deposit_qr_aba(uid, 0.10)
+            elif cam and is_pay_method_enabled("camrapid"):
+                _send_deposit_qr(uid, 0.10, method="camrapid")
+            else:
+                bot.send_message(uid, "❌ គ្មាន method ណាមួយ ready — ប្រើ /paystatus")
+        except Exception as e:
+            logger.exception(f"[paytest] {e}")
+            bot.send_message(uid, f"❌ paytest error:\n<code>{type(e).__name__}: {e}</code>", parse_mode="HTML")
+
+
+def _ensure_clean_updates(tb, label="Bot"):
+    """មុន polling: លុប webhook ដើម្បីជៀស 409 Conflict (getUpdates ជាន់គ្នា)."""
+    try:
+        tb.delete_webhook(drop_pending_updates=True)
+        logger.info(f"[{label}] webhook cleared (drop_pending) — ready for getUpdates")
+    except Exception as e:
+        logger.warning(f"[{label}] delete_webhook: {e}")
+
+
+def _acquire_token_poll_lock(token: str, label: str):
+    """
+    Exclusive lock per bot token ក្នុង container តែមួយ។
+    បើ sub-bot ពីរព្យាយាម poll token តែមួយ → instance ទីពីរ exit.
+    """
+    import hashlib
+    h = hashlib.sha256((token or "none").encode()).hexdigest()[:16]
+    lock_path = f"/tmp/tg_poll_{h}.lock"
+    try:
+        fp = open(lock_path, "w")
+        try:
+            import fcntl
+            fcntl.flock(fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            logger.error(
+                "❌ [%s] token lock busy — process ផ្សេងកំពុង poll token នេះរួចហើយ។ Exit.",
+                label,
+            )
+            return None
+        except Exception as e:
+            logger.warning("[%s] flock: %s (continue without lock)", label, e)
+        fp.write(f"pid={os.getpid()} instance={INSTANCE_NAME or 'master'}\n")
+        fp.flush()
+        return fp  # keep open to hold lock
+    except Exception as e:
+        logger.warning("[%s] lock file: %s", label, e)
+        return False  # False = no lock but continue
+
+
+def _bot_polling_with_retry():
+    """Polling with auto-reconnect; handle 409 (another getUpdates instance)."""
+    label = INSTANCE_NAME or "master"
+    token_tail = (BOT_TOKEN or "")[-5:]
+    logger.info("Polling identity: instance=%s token=...%s", label, token_tail)
+
+    lock_fp = _acquire_token_poll_lock(BOT_TOKEN, label)
+    if lock_fp is None:
+        # sub-bot duplicate in same container — stop this process
+        if INSTANCE_NAME:
+            logger.error("Sub-bot %s exiting to avoid 409", INSTANCE_NAME)
+            os._exit(0)
+        time.sleep(20)
+
+    fail_409 = 0
+    while True:
+        try:
+            _ensure_clean_updates(bot, label)
+            logger.info("🤖 Bot polling ចាប់ផ្ដើម... instance=%s", label)
+            bot.infinity_polling(timeout=20, long_polling_timeout=15, skip_pending=True)
+            fail_409 = 0
+        except Exception as e:
+            msg = str(e)
+            is_409 = ("409" in msg) or ("Conflict" in msg) or ("getUpdates" in msg and "terminated" in msg)
+            if is_409:
+                fail_409 += 1
+                wait = min(45 + fail_409 * 20, 180)
+                logger.error(
+                    "❌ 409 Conflict instance=%s token=...%s — other getUpdates active. Retry %ss",
+                    label, token_tail, wait,
+                )
+                try:
+                    bot.delete_webhook(drop_pending_updates=True)
+                except Exception:
+                    pass
+                # Sub-bot: after 3 conflicts, exit so only one runner remains
+                if INSTANCE_NAME and fail_409 >= 3:
+                    logger.error("Sub-bot %s exit after repeated 409", INSTANCE_NAME)
+                    os._exit(0)
+                time.sleep(wait)
+            else:
+                logger.warning(f"⚠️ Polling error: {e} — Retry in 10s...")
+                time.sleep(10)
+
+# ═══════════════════════════════════════════════════════════
+#  DAILY AUTO-REPORT — ផ្ញើ Profit + Top report ដល់ Admin ស្វ័យប្រវត្តិ
+#  រៀងរាល់ថ្ងៃម្តង តាមម៉ោងកំណត់ (default 08:00 ម៉ោងកម្ពុជា UTC+7)
+# ═══════════════════════════════════════════════════════════
+def _daily_report_scheduler():
+    """រត់ជា background thread — ពិនិត្យរាល់នាទី ថាដល់ម៉ោងផ្ញើ report ថ្ងៃនេះ
+    ឬនៅ។ ប្រើ _dpath persistence ដើម្បីកុំឲ្យផ្ញើ 2 ដងក្នុងថ្ងៃតែមួយ ទោះបី bot
+    restart ក៏ដោយ (ចងចាំ 'last_sent_date')។"""
+    while True:
+        try:
+            time.sleep(60)
+            if not daily_report_cfg.get("enabled", True):
+                continue
+            now_kh = datetime.datetime.now(_KH_TZ)
+            today  = now_kh.strftime("%Y-%m-%d")
+            if now_kh.hour != int(daily_report_cfg.get("hour", 8)):
+                continue
+            if daily_report_cfg.get("last_sent_date") == today:
+                continue
+            daily_report_cfg["last_sent_date"] = today
+            _save(DAILY_REPORT_FILE, daily_report_cfg)
+            txt = (f"⏰ <b>របាយការណ៍ប្រចាំថ្ងៃ</b> — {today}\n"
+                   f"━━━━━━━━━━━━━━━━━━\n\n" + _profit_report_text() +
+                   "\n\n" + _top_report_text(7))
+            bot.send_message(ADMIN_ID, txt, parse_mode="HTML")
+            logger.info(f"📤 Daily report sent for {today}")
+        except Exception as e:
+            logger.warning(f"⚠️ Daily report scheduler error: {e}")
+
+# ═══════════════════════════════════════════════════════════
+#  DISK WATCHDOG — ជូនដំណឹង Admin មុន Disk ជិតពេញ (root cause ចាស់
+#  ដែលធ្លាប់ធ្វើឲ្យ file .json ដាច់កណ្ដាល និង Data User/Order បាត់)
+# ═══════════════════════════════════════════════════════════
+DISK_WATCH_FILE = _dpath("disk_watch_cfg.json")
+disk_watch_cfg  = _load(DISK_WATCH_FILE, {"last_alert_date": ""})
+
+def _disk_watchdog():
+    """រត់ background — ពិនិត្យរាល់ 30 នាទី។ ជូនដំណឹង Admin (១ដងក្នុងមួយថ្ងៃ
+    ដើម្បីកុំឲ្យ spam) ពេល Disk ប្រើលើស 85%, ហើយផ្ញើ Backup បន្ថែមជាបន្ទាន់
+    ពេលដល់ 95% ដើម្បីការពារ Data មុនពេល Disk ពេញទាំងស្រុង។"""
+    while True:
+        try:
+            time.sleep(1800)  # 30 នាទី
+            usage = shutil.disk_usage(DATA_DIR)
+            pct = usage.used / usage.total * 100
+            today = datetime.datetime.now(_KH_TZ).strftime("%Y-%m-%d")
+            if pct >= 85 and disk_watch_cfg.get("last_alert_date") != today:
+                disk_watch_cfg["last_alert_date"] = today
+                _save(DISK_WATCH_FILE, disk_watch_cfg)
+                free_gb = usage.free / (1024**3)
+                txt = (f"⚠️ <b>Disk ជិតពេញ! ({pct:.0f}%)</b>\n"
+                       f"នៅសល់ត្រឹមតែ {free_gb:.2f} GB\n\n"
+                       f"👉 សូម Resize Disk ក្នុង Render Dashboard ជាបន្ទាន់ "
+                       f"(Disks → Resize) មុនពេល Data ខូច/បាត់ ដូចធ្លាប់កើត។")
+                bot.send_message(ADMIN_ID, txt, parse_mode="HTML")
+                if pct >= 95:
+                    buf, n = _build_backup_zip()
+                    if buf:
+                        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                        buf.name = f"kaijaklike_EMERGENCY_backup_{ts}.zip"
+                        bot.send_document(ADMIN_ID, buf,
+                            caption=f"🚨 <b>Emergency Backup</b> (Disk {pct:.0f}%) — {n} files")
+        except Exception as e:
+            logger.warning(f"⚠️ Disk watchdog error: {e}")
+
+# ═══════════════════════════════════════════════════════════
+#  AUTO DAILY BACKUP — ផ្ញើ Backup ទៅ Admin ស្វ័យប្រវត្តិរៀងរាល់ថ្ងៃ
+#  ដើម្បីកុំឲ្យ Recovery យឺត ដូចលើកមុនដែលគ្មាន Backup ថ្មីៗសល់ (.bak
+#  ដែល _save() ថ្មីរក្សាទុកជួយបានតែ ១ជំហានចុងក្រោយ មិនមែនប្រវត្តិវែងទេ)
+# ═══════════════════════════════════════════════════════════
+def _auto_backup_scheduler():
+    while True:
+        try:
+            time.sleep(60)
+            if not daily_report_cfg.get("enabled", True):
+                continue
+            now_kh = datetime.datetime.now(_KH_TZ)
+            today  = now_kh.strftime("%Y-%m-%d")
+            if now_kh.hour != 3 or disk_watch_cfg.get("last_backup_date") == today:
+                continue
+            disk_watch_cfg["last_backup_date"] = today
+            _save(DISK_WATCH_FILE, disk_watch_cfg)
+            buf, n = _build_backup_zip()
+            if buf:
+                buf.name = f"kaijaklike_auto_backup_{today}.zip"
+                bot.send_document(ADMIN_ID, buf,
+                    caption=f"🕒 <b>Auto Backup ប្រចាំថ្ងៃ</b> — {n} files — {today}")
+        except Exception as e:
+            logger.warning(f"⚠️ Auto-backup scheduler error: {e}")
+
+
+def _resume_pending_deposits():
+    """បន្ទាប់ restart / restore — បន្ត poll QR deposit ដែលនៅ pending
+    (បើមិនមាន thread នេះ លុយអ្នកប្រើបង់ហើយមិនចូល balance)."""
+    try:
+        n = 0
+        now = time.time()
+        for dep_id, dep in list(smm_deps.items()):
+            if not isinstance(dep, dict):
+                continue
+            if dep.get("status") != "pending":
+                continue
+            created = _dep_created_ts(dep_id, dep)
+            # allow longer window than DEPOSIT_EXPIRE for resume (max 1h from create)
+            max_age = max(DEPOSIT_EXPIRE_SEC, int(os.getenv("KHPAY_EXPIRE_SEC", "180")) or 180, 600) + 120
+            if created and (now - created) > max_age:
+                dep["status"] = "expired"
+                continue
+            uid_str = str(dep.get("uid") or "")
+            try:
+                uid = int(uid_str)
+            except (TypeError, ValueError):
+                continue
+            amount = float(dep.get("amount") or 0)
+            ref = str(dep.get("reference") or "").strip()
+            if not ref or amount <= 0:
+                continue
+            method = (dep.get("method") or "").lower()
+            checker = None
+            if method in ("khpay", "khp"):
+                checker = _khpay_check
+            elif method in ("aba", "abapay", "aba_payway"):
+                checker = _aba_check
+            elif method in ("camrapid", "camrapidpay"):
+                checker = _camrapid_check
+            else:
+                # auto-detect by available gateways
+                if has_khpay():
+                    checker = _khpay_check
+                elif has_aba_payway():
+                    checker = _aba_check
+                else:
+                    checker = _camrapid_check
+            threading.Thread(
+                target=_watch_deposit,
+                args=(uid, uid_str, dep_id, amount, ref),
+                kwargs={"checker": checker},
+                daemon=True,
+            ).start()
+            n += 1
+        if n:
+            _save(SMM_DEP_FILE, smm_deps)
+            logger.info(f"[resume_deposits] resumed {n} pending deposit watcher(s)")
+            try:
+                bot.send_message(
+                    ADMIN_ID,
+                    f"♻️ <b>Resume pending deposits:</b> {n}\n"
+                    f"(បន្ទាប់ restart — បន្តតាមដាន QR ដែលមិនទាន់បង់)",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+        else:
+            logger.info("[resume_deposits] no pending deposits to resume")
+    except Exception as e:
+        logger.error(f"[resume_deposits] {e}")
+
+
+# ═══════════════════════════════════════════════════════════
+#  RE-ENGAGE (KaiJakLike only): never-buy + inactive + deposit CTA
+#  Auto every 5 hours — copy each send to Admin
+# ═══════════════════════════════════════════════════════════
+REENGAGE_INTERVAL_SEC = 5 * 3600
+REENGAGE_INACTIVE_DAYS = 7
+REENGAGE_MAX_PER_RUN = 80
+REENGAGE_SLEEP_BETWEEN = 0.08
+
+def _user_last_order_ts(uid_str):
+    last = 0
+    try:
+        for o in smm_orders.values():
+            if str(o.get("uid") or "") != str(uid_str):
+                continue
+            last = max(last, int(o.get("ts") or 0))
+    except Exception:
+        pass
+    return last
+
+def _reengage_kb(uid=None):
+    kb = InlineKeyboardMarkup()
+    try:
+        kb.row(
+            InlineKeyboardButton("💸 ដាក់លុយ", callback_data="dep:menu", color="progress"),
+            InlineKeyboardButton("🛒 Order ឥឡូវ", callback_data="back:smmcats", color="active"),
+        )
+    except Exception:
+        kb.row(InlineKeyboardButton("💸 ដាក់លុយ", callback_data="dep:menu"))
+        kb.row(InlineKeyboardButton("🛒 Order ឥឡូវ", callback_data="back:smmcats"))
+    return kb
+
+def _reengage_text(kind, uid):
+    name = ""
+    try:
+        name = (users_db.get(str(uid), {}) or {}).get("name") or ""
+    except Exception:
+        pass
+    hi = "សួស្តី" + ((" " + name) if name else "") + "!"
+    bal_now = 0.0
+    try:
+        bal_now = float(bal(uid))
+    except Exception:
+        pass
+    bal_line = f"💳 Balance បច្ចុប្បន្ន: <b>${bal_now:.2f}</b>\n"
+    if kind == "never":
+        return (
+            f"👋 <b>{hi}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"អ្នកនៅមិនទាន់ធ្វើ Order សោះ!\n\n"
+            f"🇰🇭 <b>TikTok Khmer</b> — ជនជាតិខ្មែរពិត ១០០%\n"
+            f"❤️ Likes · 👁️ Views · 👤 Followers\n"
+            f"⚡ លឿន · សុវត្ថិភាព · ចាប់ពី <b>$0.99</b>\n\n"
+            f"{bal_line}"
+            f"👉 ដាក់លុយតិចៗ រួច Order auto បានភ្លាម។\n"
+            f"សាកម្តង — ឃើញខុសគ្នា! 🔥"
+        )
+    return (
+        f"👋 <b>{hi}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"យើងខ្វះអ្នកយូរហើយ! 😢\n"
+        f"កញ្ចប់ <b>TikTok Khmer</b> នៅតែពិសេស:\n\n"
+        f"❤️ 500–1K Likes + Views — <b>$0.99</b>\n"
+        f"❤️ 1K–2K — <b>$1.99</b>\n"
+        f"👁️ Views / 👤 Followers — <b>$0.99</b>\n\n"
+        f"{bal_line}"
+        f"💸 ដាក់លុយ → ប្រើ auto Order បានភ្លាម\n"
+        f"ត្រឡប់មក Order ម្តងទៀតបានឥឡូវ! 🚀"
+    )
+
+def _reengage_run_once():
+    """DISABLED — no auto messages to non-buyers / inactive users."""
+    global reengage_state
+    logger.info("[reengage] disabled — skip auto promo to non-buyers")
+    return
+    now = int(time.time())
+    cutoff = now - REENGAGE_INACTIVE_DAYS * 86400
+    sent_map = reengage_state.get("sent") if isinstance(reengage_state, dict) else {}
+    if not isinstance(sent_map, dict):
+        sent_map = {}
+    last_order = {}
+    try:
+        for o in smm_orders.values():
+            u = str(o.get("uid") or "")
+            if not u:
+                continue
+            ts = int(o.get("ts") or 0)
+            if ts > last_order.get(u, 0):
+                last_order[u] = ts
+    except Exception as e:
+        logger.warning(f"[reengage] scan orders: {e}")
+
+    targets = []
+    for uid_str, u in list(users_db.items()):
+        try:
+            if not uid_str or not str(uid_str).lstrip("-").isdigit():
+                continue
+            uid_i = int(uid_str)
+            if uid_i == ADMIN_ID or uid_i in sub_admins:
+                continue
+            if isinstance(u, dict) and (u.get("banned") or u.get("blocked")):
+                continue
+            last_sent = int(sent_map.get(uid_str) or 0)
+            if now - last_sent < int(REENGAGE_INTERVAL_SEC * 0.9):
+                continue
+            lo = last_order.get(uid_str, 0)
+            if lo <= 0:
+                targets.append((uid_str, "never"))
+            elif lo < cutoff:
+                targets.append((uid_str, "inactive"))
+        except Exception:
+            continue
+
+    if not targets:
+        logger.info("[reengage] no targets this cycle")
+        reengage_state = {"last_run": now, "sent": sent_map}
+        _save(REENGAGE_FILE, reengage_state)
+        return
+
+    targets.sort(key=lambda x: 0 if x[1] == "never" else 1)
+    targets = targets[:REENGAGE_MAX_PER_RUN]
+    ok_n = fail_n = 0
+    for uid_str, kind in targets:
+        try:
+            uid_i = int(uid_str)
+            text = _reengage_text(kind, uid_i)
+            bot.send_message(
+                uid_i,
+                text,
+                parse_mode="HTML",
+                reply_markup=_reengage_kb(uid_i),
+                disable_web_page_preview=True,
+            )
+            sent_map[uid_str] = now
+            ok_n += 1
+            try:
+                uinfo = users_db.get(uid_str) or {}
+                uname = uinfo.get("username") or ""
+                uname_s = ("@" + uname) if uname else "—"
+                kind_km = "មិនដែលទិញ" if kind == "never" else "ខានទិញយូរ"
+                nm = uinfo.get("name") or "—"
+                bal_s = f"{float(bal(uid_i)):.2f}"
+                admin_msg = (
+                    "📣 <b>Re-engage ផ្ញើហើយ</b>\n"
+                    "━━━━━━━━━━━━━━━━━━\n"
+                    f"📌 ប្រភេទ: <b>{kind_km}</b>\n"
+                    f"🙍 ឈ្មោះ: <b>{nm}</b>\n"
+                    f"🔗 Username: {uname_s}\n"
+                    f"🆔 ID: <code>{uid_str}</code>\n"
+                    f"💳 Balance: <b>${bal_s}</b>\n"
+                    "━━━━━━━━━━━━━━━━━━\n"
+                    "<i>សារដែល User ទទួល:</i>\n"
+                    + str(text)
+                )
+                bot.send_message(ADMIN_ID, admin_msg, parse_mode="HTML", disable_web_page_preview=True)
+            except Exception as _ae:
+                logger.debug(f"[reengage] admin copy fail: {_ae}")
+            time.sleep(REENGAGE_SLEEP_BETWEEN)
+        except Exception as e:
+            fail_n += 1
+            try:
+                if _is_block_error(e):
+                    _mark_user_blocked(int(uid_str), True)
+            except Exception:
+                pass
+            logger.debug(f"[reengage] fail {uid_str}: {e}")
+    reengage_state = {"last_run": now, "sent": sent_map}
+    _save(REENGAGE_FILE, reengage_state)
+    logger.info(f"[reengage] sent={ok_n} fail={fail_n} total_targets={len(targets)}")
+    try:
+        if ok_n:
+            bot.send_message(
+                ADMIN_ID,
+                f"📣 <b>Re-engage auto</b>\n"
+                f"✅ ផ្ញើ: <b>{ok_n}</b>\n"
+                f"❌ បរាជ័យ: <b>{fail_n}</b>\n"
+                f"⏱ រៀងរាល់ 5 ម៉ោង",
+                parse_mode="HTML",
+            )
+    except Exception:
+        pass
+
+def _reengage_scheduler():
+    logger.info("📣 Re-engage scheduler DISABLED (no auto msg to non-buyers)")
+    return
+    time.sleep(90)
+    while True:
+        try:
+            last = int((reengage_state or {}).get("last_run") or 0)
+            now = int(time.time())
+            if now - last >= REENGAGE_INTERVAL_SEC:
+                _reengage_run_once()
+            else:
+                left = REENGAGE_INTERVAL_SEC - (now - last)
+                logger.info(f"[reengage] next run in ~{left // 60} min")
+        except Exception as e:
+            logger.warning(f"[reengage] scheduler error: {e}")
+        time.sleep(600)
+
+
+
+@bot.callback_query_handler(func=lambda c: (c.data or "").startswith("uord:"))
+def cb_user_order_detail(call):
+    """User taps order from history/track list."""
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception:
+        pass
+    uid = call.from_user.id
+    uid_str = str(uid)
+    oid = (call.data or "").split(":", 1)[-1].strip()
+    o = smm_orders.get(oid)
+    if not o or str(o.get("uid")) != uid_str:
+        try:
+            bot.send_message(uid, "❌ Order រកមិនឃើញ ឬមិនមែនរបស់អ្នក។", reply_markup=main_kb(uid))
+        except Exception:
+            pass
+        return
+    # live sync when pending
+    try:
+        if o.get("status") == "pending" and o.get("api_order_id"):
+            _smm_sync_order(oid)
+            o = smm_orders.get(oid, o)
+        elif o.get("status") == "refilling" and o.get("refill_id"):
+            _smm_sync_refill(oid)
+            o = smm_orders.get(oid, o)
+    except Exception as e:
+        logger.debug(f"[uord sync] {e}")
+    try:
+        bot.send_message(
+            uid,
+            _format_user_order_detail(oid, o),
+            parse_mode="HTML",
+            reply_markup=main_kb(uid),
+        )
+    except Exception as e:
+        logger.warning(f"[uord detail] {e}")
+
+
+# ═══════════════════════════════════════════════════════════
+#  MAIN
+# ═══════════════════════════════════════════════════════════
+if __name__ == "__main__":
+    logger.info(f"🚀 Kaijaklike Bot [{INSTANCE_NAME or 'MASTER'}] កំពុងចាប់ផ្ដើម...")
+    logger.info(f"🔑 Control Key: {CONTROL_KEY}  ← ដូរនៅ CONTROL_KEY!")
+    logger.info(f"📊 Services loaded: {len(smm_services)}")
+    _warm_stripped_text_map()
+    threading.Thread(target=run_flask, daemon=True).start()
+    threading.Thread(target=_self_ping, daemon=True).start()
+    threading.Thread(target=_smm_order_watcher, daemon=True).start()
+    threading.Thread(target=_daily_report_scheduler, daemon=True).start()
+    threading.Thread(target=_disk_watchdog, daemon=True).start()
+    threading.Thread(target=_auto_backup_scheduler, daemon=True).start()
+    # re-engage auto promo DISABLED — do not start _reengage_scheduler
+    # threading.Thread(target=_reengage_scheduler, daemon=True).start()
+    # ── Reconnect Order Bot / Payment Bot បើធ្លាប់ setup ទុករួច (persist ឆ្លងកាត់ restart) ──
+    # Order/Pay notify bots: តែ Master ប៉ុណ្ណោះ (clone inherit env នឹង 409)
+    if IS_MASTER:
+        if notify_bots_cfg.get("order_token"):
+            if _start_order_bot(notify_bots_cfg["order_token"]):
+                logger.info("🤖 Order Bot reconnected")
+            else:
+                logger.warning("⚠️ Order Bot reconnect failed (token ចាស់អាចខូច)")
+        if notify_bots_cfg.get("pay_token"):
+            if _start_pay_bot(notify_bots_cfg["pay_token"]):
+                logger.info("🤖 Payment Bot reconnected")
+            else:
+                logger.warning("⚠️ Payment Bot reconnect failed (token ចាស់អាចខូច)")
+    else:
+        logger.info("Clone %s — skip Order/Pay bot polling", INSTANCE_NAME)
+    if IS_MASTER:
+        for _cln_name, _cln_cfg in clone_registry.items():
+            try:
+                _spawn_clone(_cln_name, _cln_cfg)
+                logger.info(f"🤖 Autostart clone '{_cln_name}' on port {_cln_cfg['port']}")
+            except Exception as _e:
+                logger.error(f"Autostart clone '{_cln_name}' failed: {_e}")
+        threading.Thread(target=_clone_watchdog, daemon=True).start()
+    _log_payment_startup()
+    _bot_polling_with_retry()
