@@ -1,7 +1,7 @@
 import os
 """
 ╔══════════════════════════════════════════════════════════════╗
-║     Kaijaklike Bot — カイロゼン SMM  [v12]                ║
+║     Kaijaklike Bot — カイロゼン SMM  [v12.1]                ║
 ║     SMM Panel · ដាក់លុយ ABA PayWay + KHPAY + Manual QR       ║
 ║     Panel Admin · បន្ថែម/កាត់ Balance                       ║
 ║     Compatible: Python 3.10+ · Termux / Render / VPS       ║
@@ -825,6 +825,12 @@ if not smm_providers.get("migrated"):
         _save(SMM_PROV_FILE, smm_providers)
     except Exception as _e:
         logging.getLogger(__name__).error(f"[providers migrate] {_e}")
+
+BOT_VERSION = "v12.1"
+try:
+    print(f"[{BOT_VERSION}] Multi SMM API loaded — websites: {len(smm_providers.get('providers', {}))}", flush=True)
+except Exception:
+    pass
 reengage_state = _load(REENGAGE_FILE,  {"last_run": 0, "sent": {}})
 smm_profit   = _load(SMM_PROFIT_FILE,{"pct": 20})
 DAILY_REPORT_FILE = _dpath("daily_report_cfg.json")
@@ -7204,7 +7210,7 @@ def _prov_menu(uid):
     import html as _html
     P_ = _prov_all()
     dflt = smm_providers.get("default")
-    lines = ["⚙️ <b>SMM API — Websites</b>", "━━━━━━━━━━━━━━━━━━"]
+    lines = [f"⚙️ <b>SMM API — Websites</b> <code>{BOT_VERSION}</code>", "━━━━━━━━━━━━━━━━━━"]
     kb = InlineKeyboardMarkup()
     if not P_:
         lines.append("❌ មិនទាន់មាន Website API ទេ")
@@ -7247,6 +7253,13 @@ def _prov_view(uid, pid):
            InlineKeyboardButton("🗑️ លុប", callback_data=f"smmapi:del:{pid}", color="inactive"))
     kb.add(InlineKeyboardButton("⬅️ ត្រឡប់", callback_data="smmapi:list", color="progress"))
     bot.send_message(uid, txt, parse_mode="HTML", reply_markup=kb)
+
+@bot.message_handler(commands=["ver"])
+def cmd_ver(message):
+    if message.chat.id != ADMIN_ID: return
+    bot.send_message(message.chat.id,
+        f"🤖 Kaijaklike <b>{BOT_VERSION}</b> · Multi SMM API ✅\n🌐 Websites: <b>{len(_prov_all())}</b>",
+        parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("smmapi:"))
 def cb_smmapi(call):
