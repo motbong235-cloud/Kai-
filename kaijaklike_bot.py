@@ -1,12 +1,13 @@
 import os
 """
 ╔══════════════════════════════════════════════════════════════╗
-║     Kaijaklike Bot — カイロゼン SMM  [v11]                ║
+║     Kaijaklike Bot — カイロゼン SMM  [v12]                ║
 ║     SMM Panel · ដាក់លុយ ABA PayWay + KHPAY + Manual QR       ║
 ║     Panel Admin · បន្ថែម/កាត់ Balance                       ║
 ║     Compatible: Python 3.10+ · Termux / Render / VPS       ║
 ║     v10: /newbot — បង្កើត Bot ថ្មីដោយផ្ទាល់ខាងក្នុង Telegram  ║
 ║          /mybots — គ្រប់គ្រង Bot រងទាំងអស់ (start/stop/del)  ║
+║     v12: Multi SMM API — ភ្ជាប់ Website API បានច្រើន         ║
 ╚══════════════════════════════════════════════════════════════╝
 ដំឡើង:
   pip install pyTelegramBotAPI requests flask qrcode pillow --break-system-packages
@@ -463,7 +464,8 @@ SETTINGS_FILE   = _dpath("smm_settings.json")
 NOTIFY_FILE     = _dpath("smm_notify.json")
 NOTIFY_BOTS_FILE = _dpath("smm_notify_bots.json")   # ★ Order Bot / Payment Bot ដាច់ដោយឡែក — token+chat
 
-SMM_API_FILE    = _dpath("smm_api.json")
+SMM_API_FILE    = _dpath("smm_api.json")          # legacy (Website 1) — ទុកសម្រាប់ migrate
+SMM_PROV_FILE   = _dpath("smm_providers.json")    # v12: Website API ច្រើន (providers)
 SMM_SVC_FILE    = _dpath("smm_services.json")
 SMM_ORD_FILE    = _dpath("smm_orders.json")
 ORDER_SEQ_FILE  = _dpath("smm_order_seq.json")  # sequential Order ID counter (total orders)
@@ -780,6 +782,49 @@ except Exception:
 smm_api      = _load(SMM_API_FILE,   {"url": "", "key": ""})
 smm_services = _load(SMM_SVC_FILE,   {})
 smm_orders   = _load(SMM_ORD_FILE,   {})
+
+# ══════════ v12: Multi SMM Provider (Website API ច្រើន) ══════════
+smm_providers = _load(SMM_PROV_FILE, {"providers": {}, "default": "", "seq": 0, "migrated": False})
+if not isinstance(smm_providers, dict):
+    smm_providers = {}
+smm_providers.setdefault("providers", {})
+smm_providers.setdefault("default", "")
+smm_providers.setdefault("seq", 0)
+smm_providers.setdefault("migrated", False)
+
+def _prov_host_name(url):
+    try:
+        from urllib.parse import urlparse
+        h = (urlparse(url).netloc or url).lower()
+        for pre in ("www.", "api."):
+            if h.startswith(pre):
+                h = h[len(pre):]
+        return (h or "Website")[:24]
+    except Exception:
+        return "Website"
+
+# Migrate Website 1 ចាស់ (smm_api.json) → provider "p1" ម្តងគត់ + ចងភ្ជាប់ Service/Order ចាស់ទៅ p1
+if not smm_providers.get("migrated"):
+    try:
+        _lurl = str((smm_api or {}).get("url") or "").strip()
+        _lkey = str((smm_api or {}).get("key") or "").strip()
+        if _lurl and _lkey and not smm_providers["providers"]:
+            smm_providers["providers"]["p1"] = {
+                "name": _prov_host_name(_lurl), "url": _lurl, "key": _lkey, "enabled": True}
+            smm_providers["default"] = "p1"
+            smm_providers["seq"] = 1
+            for _sv in smm_services.values():
+                if isinstance(_sv, dict) and not _sv.get("manual") and _sv.get("api_id") and not _sv.get("provider_id"):
+                    _sv["provider_id"] = "p1"
+            for _od in smm_orders.values():
+                if isinstance(_od, dict) and _od.get("api_order_id") and not _od.get("provider_id"):
+                    _od["provider_id"] = "p1"
+            _save(SMM_SVC_FILE, smm_services)
+            _save(SMM_ORD_FILE, smm_orders)
+        smm_providers["migrated"] = True
+        _save(SMM_PROV_FILE, smm_providers)
+    except Exception as _e:
+        logging.getLogger(__name__).error(f"[providers migrate] {_e}")
 reengage_state = _load(REENGAGE_FILE,  {"last_run": 0, "sent": {}})
 smm_profit   = _load(SMM_PROFIT_FILE,{"pct": 20})
 DAILY_REPORT_FILE = _dpath("daily_report_cfg.json")
@@ -2919,53 +2964,86 @@ def handle_document(message):
         logger.error(f"[restore] {e}")
         bot.send_message(uid, f"❌ Restore បរាជ័យ: {e}", reply_markup=admin_kb())
 
-def _smm_api_post(params, timeout=25):
-    url = smm_api.get("url", "")
-    if not url: return None
-    try:
-        r = http.post(url, data=params, timeout=timeout)
-        return r.json()
-    except Exception as e:
-        logger.error(f"SMM API: {e}"); return None
+# ══════════ Multi SMM Provider helpers (v12) ══════════
+def _prov_all():
+    return smm_providers.get("providers", {})
 
-def _smm_api_status(api_order_id):
-    """ពិនិត្យស្ថានភាព Order ដែលបានដាក់តាម SMM API (action=status)"""
-    key = smm_api.get("key", ""); url = smm_api.get("url", "")
-    if not key or not url or not api_order_id: return None
-    try:
-        r = http.post(url, data={"key": key, "action": "status", "order": api_order_id}, timeout=25)
-        return r.json()
-    except Exception as e:
-        logger.error(f"SMM API status: {e}"); return None
+def _prov_get(pid=None):
+    """ត្រឡប់ (pid, provider)។ pid ច្បាស់លាស់ → រកតែវា (មិន fallback ទៅ default ដើម្បីកុំឲ្យ
+    Order ទៅខុស Website)។ pid ទទេ (record ចាស់) → ប្រើ default។"""
+    P_ = _prov_all()
+    if pid:
+        p_ = P_.get(str(pid))
+        return (str(pid), p_) if p_ else (None, None)
+    d_ = smm_providers.get("default") or ""
+    if d_ in P_:
+        return d_, P_[d_]
+    for k_, v_ in P_.items():
+        return k_, v_
+    return None, None
 
-def _smm_api_refill(api_order_id):
-    """ស្នើសុំ Refill (បំពេញបន្ថែម) ពី Supplier API (action=refill) សម្រាប់ Order
-    ដែល Service គាំទ្រ Refill។ ត្រឡប់ refill id (str) បើជោគជ័យ, បើពុំនោះ None។"""
-    key = smm_api.get("key", ""); url = smm_api.get("url", "")
-    if not key or not url or not api_order_id: return None
-    try:
-        r = http.post(url, data={"key": key, "action": "refill", "order": api_order_id}, timeout=25)
-        d = r.json()
-        if isinstance(d, list) and d:
-            d = d[0]
-        if isinstance(d, dict) and not d.get("error") and d.get("refill") is not None:
-            return str(d["refill"])
+def _prov_ready(p):
+    return bool(p and str(p.get("url") or "").strip() and str(p.get("key") or "").strip())
+
+def _prov_name(pid):
+    p_ = _prov_all().get(str(pid or ""))
+    return (p_ or {}).get("name") or (str(pid) if pid else "—")
+
+def _prov_pid_of_order(o):
+    o = o or {}
+    pid = o.get("provider_id")
+    if not pid:
+        pid = (smm_services.get(o.get("slug")) or {}).get("provider_id")
+    return pid or None
+
+def _smm_api_post(params, timeout=25, pid=None):
+    _pid, p_ = _prov_get(pid)
+    if not _prov_ready(p_):
         return None
-    except Exception as e:
-        logger.error(f"SMM API refill: {e}"); return None
-
-def _smm_api_refill_status(refill_id):
-    """ពិនិត្យស្ថានភាព Refill request (action=refill_status)។"""
-    key = smm_api.get("key", ""); url = smm_api.get("url", "")
-    if not key or not url or not refill_id: return None
+    data = dict(params)
+    data["key"] = p_["key"]
     try:
-        r = http.post(url, data={"key": key, "action": "refill_status", "refill": refill_id}, timeout=25)
-        d = r.json()
-        if isinstance(d, list) and d:
-            d = d[0]
-        return d if isinstance(d, dict) else None
+        r = http.post(p_["url"], data=data, timeout=timeout)
+        return r.json()
     except Exception as e:
-        logger.error(f"SMM API refill_status: {e}"); return None
+        logger.error(f"SMM API [{p_.get('name', _pid)}]: {e}"); return None
+
+def _smm_api_balance(pid):
+    """(balance, currency) ឬ raise Exception បើមានបញ្ហា"""
+    _pid, p_ = _prov_get(pid)
+    if not _prov_ready(p_):
+        raise ValueError("API មិនទាន់ set")
+    r = http.post(p_["url"], data={"key": p_["key"], "action": "balance"}, timeout=10)
+    d = r.json()
+    if isinstance(d, dict) and d.get("error"):
+        raise ValueError(str(d["error"]))
+    return d.get("balance", d.get("Balance", "?")), d.get("currency", d.get("Currency", "USD"))
+
+def _smm_api_status(api_order_id, pid=None):
+    """ពិនិត្យស្ថានភាព Order ដែលបានដាក់តាម SMM API (action=status)"""
+    if not api_order_id:
+        return None
+    return _smm_api_post({"action": "status", "order": api_order_id}, pid=pid)
+
+def _smm_api_refill(api_order_id, pid=None):
+    """ស្នើសុំ Refill (action=refill)។ ត្រឡប់ refill id (str) បើជោគជ័យ, បើពុំនោះ None។"""
+    if not api_order_id:
+        return None
+    d = _smm_api_post({"action": "refill", "order": api_order_id}, pid=pid)
+    if isinstance(d, list) and d:
+        d = d[0]
+    if isinstance(d, dict) and not d.get("error") and d.get("refill") is not None:
+        return str(d["refill"])
+    return None
+
+def _smm_api_refill_status(refill_id, pid=None):
+    """ពិនិត្យស្ថានភាព Refill request (action=refill_status)។"""
+    if not refill_id:
+        return None
+    d = _smm_api_post({"action": "refill_status", "refill": refill_id}, pid=pid)
+    if isinstance(d, list) and d:
+        d = d[0]
+    return d if isinstance(d, dict) else None
 
 def _smm_sync_order(oid):
     """🔄 ត្រួតពិនិត្យ + Sync ស្ថានភាព Order មួយពី Supplier API ភ្លាមៗ (Live) —
@@ -2978,7 +3056,7 @@ def _smm_sync_order(oid):
     if o.get("status") != "pending": return o.get("status")
     api_oid = o.get("api_order_id")
     if not api_oid: return o.get("status")
-    res = _smm_api_status(api_oid)
+    res = _smm_api_status(api_oid, pid=_prov_pid_of_order(o))
     if not res or not isinstance(res, dict): return o.get("status")
     st = str(res.get("status", "")).strip().lower()
     if st == "completed":
@@ -3043,7 +3121,7 @@ def _smm_sync_order(oid):
         # ── បើ Service គាំទ្រ Refill និងមិនទាន់សុំ Refill ពីមុន → សុំ Refill ស្វ័យប្រវត្តិសិន
         # ជំនួសសងលុយភ្លាម (សូម្បីតែសងលុយវិញ បើ Refill បរាជ័យ ក៏ Fallback ទៅ Logic ចាស់វិញ) ──
         if svc.get("refill") and not o.get("refill_id") and not o.get("refill_tried") and remains > 0:
-            rf_id = _smm_api_refill(o.get("api_order_id"))
+            rf_id = _smm_api_refill(o.get("api_order_id"), pid=_prov_pid_of_order(o))
             smm_orders[oid]["refill_tried"] = True
             smm_orders[oid]["remains"] = remains
             if rf_id:
@@ -3115,7 +3193,7 @@ def _smm_sync_refill(oid):
     if not o or o.get("status") != "refilling": return o.get("status") if o else None
     rf_id = o.get("refill_id")
     if not rf_id: return "refilling"
-    res = _smm_api_refill_status(rf_id)
+    res = _smm_api_refill_status(rf_id, pid=_prov_pid_of_order(o))
     if not res: return "refilling"
     st = str(res.get("status", "")).strip().lower()
     if st in ("completed", "success"):
@@ -3188,19 +3266,25 @@ def _smm_order_watcher():
         except Exception as e:
             logger.error(f"[order_watcher] {e}")
 
-def _smm_fetch_service(api_id):
-    key = smm_api.get("key", "")
-    url = smm_api.get("url", "")
-    if not key or not url:
+_smm_svc_list_cache = {}   # pid -> (ts, data) — cache 60s កុំទាញ list ពេញៗ ជាច្រើនដង
+
+def _smm_fetch_service(api_id, pid=None):
+    _pid, p_ = _prov_get(pid)
+    if not _prov_ready(p_):
         logger.error("SMM API: url or key not set")
         return None
     try:
-        r = http.post(url, data={"key": key, "action": "services"}, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-        if isinstance(data, dict) and data.get("error"):
-            logger.error(f"SMM API error: {data['error']}")
-            return None
+        ent = _smm_svc_list_cache.get(_pid)
+        if ent and time.time() - ent[0] < 60:
+            data = ent[1]
+        else:
+            r = http.post(p_["url"], data={"key": p_["key"], "action": "services"}, timeout=30)
+            r.raise_for_status()
+            data = r.json()
+            if isinstance(data, dict) and data.get("error"):
+                logger.error(f"SMM API error: {data['error']}")
+                return None
+            _smm_svc_list_cache[_pid] = (time.time(), data)
         for s in data:
             if str(s.get("service")) == str(api_id):
                 # API panels use "rate" as cost per 1000, some use "min" fallback
@@ -3298,6 +3382,12 @@ def _user_orders_inline_kb(uid_str, limit=8):
         ))
     return kb
 
+
+def _svc_tag(s):
+    aid = s.get("api_id", "?")
+    if len(_prov_all()) > 1 and s.get("provider_id"):
+        return f"{_prov_name(s['provider_id'])[:10]}:{aid}"
+    return str(aid)
 
 def _smm_clean_name(raw):
     raw = re.sub(r'\s*\[.*?\]\s*', ' ', raw)
@@ -7100,40 +7190,147 @@ def cb_smmqty(call):
     except:
         bot.send_message(uid, link_prompt, parse_mode="HTML", reply_markup=cancel_kb())
 
+def _prov_test_line(pid):
+    import html as _html
+    p_ = _prov_all().get(pid) or {}
+    nm = _html.escape(str(p_.get("name") or pid))
+    try:
+        b_, c_ = _smm_api_balance(pid)
+        return f"✅ <b>{nm}</b> — 💰 {b_} {c_}"
+    except Exception as e:
+        return f"❌ <b>{nm}</b> — <code>{_html.escape(str(e)[:120])}</code>"
+
+def _prov_menu(uid):
+    import html as _html
+    P_ = _prov_all()
+    dflt = smm_providers.get("default")
+    lines = ["⚙️ <b>SMM API — Websites</b>", "━━━━━━━━━━━━━━━━━━"]
+    kb = InlineKeyboardMarkup()
+    if not P_:
+        lines.append("❌ មិនទាន់មាន Website API ទេ")
+    for pid, p_ in P_.items():
+        mark = ("🟢" if p_.get("enabled", True) else "🔴") + (" ⭐" if pid == dflt else "")
+        n_svc = sum(1 for sv in smm_services.values() if sv.get("provider_id") == pid)
+        nm = str(p_.get("name") or pid)
+        lines.append(f"{mark} <b>{_html.escape(nm)}</b> — <code>{_html.escape(str(p_.get('url','')))}</code> · {n_svc} services")
+        kb.add(InlineKeyboardButton(f"{mark} {nm}", callback_data=f"smmapi:view:{pid}", color="progress"))
+    kb.add(InlineKeyboardButton("➕ បន្ថែម Website API", callback_data="smmapi:setup", color="progress"))
+    if P_:
+        kb.add(InlineKeyboardButton("🔌 សាកល្បងទាំងអស់", callback_data="smmapi:testall", color="active"))
+    bot.send_message(uid, "\n".join(lines), parse_mode="HTML", reply_markup=kb)
+
+def _prov_view(uid, pid):
+    import html as _html
+    p_ = _prov_all().get(pid)
+    if not p_:
+        bot.send_message(uid, "❌ រកមិនឃើញ Website នេះ", reply_markup=admin_kb()); return
+    key = str(p_.get("key") or "")
+    masked = (key[:6] + "****" + key[-4:]) if len(key) > 10 else ("****" if key else "❌ មិនទាន់ set")
+    on = p_.get("enabled", True)
+    n_svc = sum(1 for sv in smm_services.values() if sv.get("provider_id") == pid)
+    n_pend = sum(1 for o in smm_orders.values()
+                 if isinstance(o, dict) and o.get("status") in ("pending", "refilling") and _prov_pid_of_order(o) == pid)
+    is_def = (smm_providers.get("default") == pid)
+    txt = (f"🌐 <b>{_html.escape(str(p_.get('name') or pid))}</b>  <code>[{pid}]</code>\n"
+           f"━━━━━━━━━━━━━━━━━━\n"
+           f"🔗 URL: <code>{_html.escape(str(p_.get('url','')))}</code>\n"
+           f"🔑 Key: <code>{_html.escape(masked)}</code>\n"
+           f"📌 ស្ថានភាព: <b>{'🟢 បើក' if on else '🔴 បិទ'}</b>{' · ⭐ Default' if is_def else ''}\n"
+           f"📦 Services: <b>{n_svc}</b> · ⏳ Pending orders: <b>{n_pend}</b>")
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("🔌 សាកល្បង + Balance", callback_data=f"smmapi:test:{pid}", color="active"))
+    kb.add(InlineKeyboardButton("✏️ កែ URL + Key", callback_data=f"smmapi:edit:{pid}", color="progress"),
+           InlineKeyboardButton("🏷️ ប្តូរឈ្មោះ", callback_data=f"smmapi:rename:{pid}", color="progress"))
+    if not is_def:
+        kb.add(InlineKeyboardButton("⭐ ដាក់ជា Default", callback_data=f"smmapi:def:{pid}", color="active"))
+    kb.add(InlineKeyboardButton("🔴 បិទ" if on else "🟢 បើក", callback_data=f"smmapi:toggle:{pid}", color="inactive" if on else "active"),
+           InlineKeyboardButton("🗑️ លុប", callback_data=f"smmapi:del:{pid}", color="inactive"))
+    kb.add(InlineKeyboardButton("⬅️ ត្រឡប់", callback_data="smmapi:list", color="progress"))
+    bot.send_message(uid, txt, parse_mode="HTML", reply_markup=kb)
+
 @bot.callback_query_handler(func=lambda c: c.data.startswith("smmapi:"))
 def cb_smmapi(call):
     uid = call.message.chat.id
     if uid != ADMIN_ID: return
-    action = call.data[7:]
+    parts = call.data.split(":", 2)
+    action = parts[1] if len(parts) > 1 else ""
+    pid = parts[2] if len(parts) > 2 else ""
     bot.answer_callback_query(call.id)
+    P_ = _prov_all()
 
-    if action == "setup":
-        waiting[uid] = "smm_api_url"
+    if action in ("list", "clear"):
+        _prov_menu(uid)
+
+    elif action == "setup":
+        waiting[uid] = {"step": "prov_url", "pid": None}
         bot.send_message(uid,
-            "🌐 <b>ផ្ញើ SMM API URL</b>\nឧ: <code>https://smmking.net/api/v2</code>",
+            "🌐 <b>បន្ថែម Website API ថ្មី</b>\nផ្ញើ SMM API URL\nឧ: <code>https://smmking.net/api/v2</code>",
             parse_mode="HTML", reply_markup=cancel_kb())
 
-    elif action == "test":
-        url = smm_api.get("url",""); key = smm_api.get("key","")
-        if not url or not key:
-            bot.send_message(uid, "❌ API មិនទាន់ set!", reply_markup=admin_kb()); return
-        try:
-            r = http.post(url, data={"key": key, "action": "balance"}, timeout=10)
-            d = r.json()
-            balance  = d.get("balance", d.get("Balance", "?"))
-            currency = d.get("currency", d.get("Currency", "USD"))
-            bot.send_message(uid,
-                f"✅ <b>Connection OK!</b>\n━━━━━━━━━━━━━━━━━━\n"
-                f"💰 Balance: <b>{balance} {currency}</b>",
-                parse_mode="HTML", reply_markup=admin_kb())
-        except Exception as e:
-            bot.send_message(uid, f"❌ Connection failed: <code>{e}</code>",
-                             parse_mode="HTML", reply_markup=admin_kb())
+    elif action == "view":
+        _prov_view(uid, pid)
 
-    elif action == "clear":
-        smm_api.clear(); smm_api.update({"url":"","key":""})
-        _save(SMM_API_FILE, smm_api)
-        bot.send_message(uid, "🗑️ SMM API cleared!", reply_markup=admin_kb())
+    elif action == "edit":
+        if pid not in P_: _prov_menu(uid); return
+        waiting[uid] = {"step": "prov_url", "pid": pid}
+        bot.send_message(uid,
+            f"✏️ <b>កែ {_prov_name(pid)}</b>\nផ្ញើ SMM API URL ថ្មី\nឧ: <code>https://smmking.net/api/v2</code>",
+            parse_mode="HTML", reply_markup=cancel_kb())
+
+    elif action == "rename":
+        if pid not in P_: _prov_menu(uid); return
+        waiting[uid] = {"step": "prov_rename", "pid": pid}
+        bot.send_message(uid, f"🏷️ ផ្ញើឈ្មោះថ្មីសម្រាប់ <b>{_prov_name(pid)}</b>:",
+                         parse_mode="HTML", reply_markup=cancel_kb())
+
+    elif action == "toggle":
+        if pid not in P_: _prov_menu(uid); return
+        P_[pid]["enabled"] = not P_[pid].get("enabled", True)
+        _save(SMM_PROV_FILE, smm_providers)
+        _prov_view(uid, pid)
+
+    elif action == "def":
+        if pid not in P_: _prov_menu(uid); return
+        smm_providers["default"] = pid
+        _save(SMM_PROV_FILE, smm_providers)
+        _prov_view(uid, pid)
+
+    elif action == "test" and pid:
+        if pid not in P_: _prov_menu(uid); return
+        bot.send_message(uid, _prov_test_line(pid), parse_mode="HTML")
+
+    elif action in ("test", "testall"):
+        if not P_:
+            bot.send_message(uid, "❌ API មិនទាន់ set!", reply_markup=admin_kb()); return
+        bot.send_message(uid, "\n".join(_prov_test_line(k) for k in list(P_.keys())),
+                         parse_mode="HTML", reply_markup=admin_kb())
+
+    elif action == "del":
+        if pid not in P_: _prov_menu(uid); return
+        n_svc = sum(1 for sv in smm_services.values() if sv.get("provider_id") == pid)
+        n_pend = sum(1 for o in smm_orders.values()
+                     if isinstance(o, dict) and o.get("status") in ("pending", "refilling") and _prov_pid_of_order(o) == pid)
+        if n_svc or n_pend:
+            bot.send_message(uid,
+                f"🚫 <b>មិនអាចលុប {_prov_name(pid)} បានទេ</b>\n━━━━━━━━━━━━━━━━━━\n"
+                f"📦 Services ភ្ជាប់នៅ: <b>{n_svc}</b>\n⏳ Pending orders: <b>{n_pend}</b>\n\n"
+                f"សូមលុប Service ទាំងនោះ និងរង់ចាំ Order ចប់ជាមុន ឬចុច 🔴 បិទ ជំនួស។",
+                parse_mode="HTML", reply_markup=admin_kb()); return
+        kb = InlineKeyboardMarkup()
+        kb.add(InlineKeyboardButton("✅ បញ្ជាក់លុប", callback_data=f"smmapi:delok:{pid}", color="danger"),
+               InlineKeyboardButton("❌ Cancel", callback_data=f"smmapi:view:{pid}", color="inactive"))
+        bot.send_message(uid, f"🗑️ លុប <b>{_prov_name(pid)}</b> មែនទេ?", parse_mode="HTML", reply_markup=kb)
+
+    elif action == "delok":
+        if pid not in P_: _prov_menu(uid); return
+        nm = _prov_name(pid)
+        P_.pop(pid, None)
+        if smm_providers.get("default") == pid:
+            smm_providers["default"] = next(iter(P_), "")
+        _save(SMM_PROV_FILE, smm_providers)
+        _smm_svc_list_cache.pop(pid, None)
+        bot.send_message(uid, f"🗑️ បានលុប <b>{nm}</b>", parse_mode="HTML")
+        _prov_menu(uid)
 
 # ── Admin: Confirm / Reject deposit ──
 @bot.callback_query_handler(func=lambda c: c.data.startswith("admconf:"))
@@ -7546,6 +7743,8 @@ def cb_editsvc(call):
     api_id    = s.get("api_id", "?")
     cur_plabel = _PLATFORM_LABEL_BY_KEY.get(s.get("platform"), "⚠️ មិនទាន់កំណត់ (Guess ស្វ័យប្រវត្តិ)")
     rf_on = bool(s.get("refill"))
+    prov_line = (f"🔗 Website: <b>{_prov_name(s.get('provider_id'))}</b>\n"
+                 if (s.get("provider_id") and len(_prov_all()) > 1) else "")
     waiting[uid] = {"step": "edit_svc_name", "slug": slug}
     kb = InlineKeyboardMarkup()
     kb.add(InlineKeyboardButton("🌐 កែ Platform (សម្រាប់ Link)",
@@ -7558,7 +7757,7 @@ def cb_editsvc(call):
     bot.send_message(uid,
         f"✏️ <b>កែ Service</b>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"🆔 API ID: <code>{api_id}</code>\n"
+        f"🆔 API ID: <code>{api_id}</code>\n{prov_line}"
         f"📝 ឈ្មោះ​បច្ចុប្បន្ន:\n<b>{old_label}</b>\n"
         f"🌐 Platform បច្ចុប្បន្ន: <b>{cur_plabel}</b>\n"
         + (f"🔄 Refill ស្វ័យប្រវត្តិ: <b>{'✅ បើក' if rf_on else '⭕ បិទ'}</b>\n" if not s.get("manual") else "")
@@ -7639,6 +7838,45 @@ def cb_editsvcplatpick(call):
         parse_mode="HTML", reply_markup=admin_kb())
 
 
+def _smm_add_ask_ids(uid, cat, platform, pid):
+    import html as _html
+    waiting[uid] = {"step": "smm_add_ids", "cat": cat, "platform": platform, "provider_id": pid or ""}
+    head = f"📂 Category: <b>{_html.escape(str(cat))}</b>"
+    if platform:
+        head += f" · 🌐 Platform: <b>{_PLATFORM_LABEL_BY_KEY.get(platform, platform)}</b>"
+    if pid:
+        head += f"\n🔗 Website: <b>{_html.escape(_prov_name(pid))}</b>"
+    bot.send_message(uid,
+        head + "\n━━━━━━━━━━━━━━━━━━\n"
+        "ផ្ញើ Service IDs (comma separated):\n"
+        "ឧ: <code>5441,5448,5502</code>\n\n"
+        "💡 IDs រក នៅ SMM Panel → Services របស់ Website នោះ",
+        parse_mode="HTML", reply_markup=cancel_kb())
+
+def _smm_add_after_cat(uid, cat, platform):
+    en = [(k, v) for k, v in _prov_all().items() if v.get("enabled", True) and _prov_ready(v)]
+    if len(en) > 1:
+        waiting[uid] = {"step": "smm_add_prov", "cat": cat, "platform": platform}
+        kb = InlineKeyboardMarkup()
+        for k, v in en:
+            kb.add(InlineKeyboardButton(f"🌐 {v.get('name', k)}", callback_data=f"smmaddprov:{k}", color="active"))
+        kb.add(InlineKeyboardButton("❌ Cancel", callback_data="back:main", color="inactive"))
+        bot.send_message(uid, "🔗 <b>ជ្រើស Website API</b> សម្រាប់ Service ទាំងនេះ:",
+                         parse_mode="HTML", reply_markup=kb)
+        return
+    _smm_add_ask_ids(uid, cat, platform, en[0][0] if en else "")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("smmaddprov:"))
+def cb_smmaddprov(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID: bot.answer_callback_query(call.id); return
+    pid = call.data[len("smmaddprov:"):]
+    bot.answer_callback_query(call.id)
+    step = waiting.get(uid)
+    if not isinstance(step, dict) or step.get("step") != "smm_add_prov": return
+    if pid not in _prov_all(): return
+    _smm_add_ask_ids(uid, step.get("cat", ""), step.get("platform"), pid)
+
 @bot.callback_query_handler(func=lambda c: c.data.startswith("smmaddcat:"))
 def cb_smmaddcat(call):
     uid = call.message.chat.id
@@ -7650,13 +7888,7 @@ def cb_smmaddcat(call):
         bot.send_message(uid, "✏️ វាយ Category name (ឧ: TikTok Live, Spotify):",
                          reply_markup=cancel_kb())
     else:
-        waiting[uid] = {"step": "smm_add_ids", "cat": cat}
-        bot.send_message(uid,
-            f"📂 Category: <b>{cat}</b>\n━━━━━━━━━━━━━━━━━━\n"
-            f"ផ្ញើ Service IDs (comma separated):\n"
-            f"ឧ: <code>5441,5448,5502</code>\n\n"
-            f"💡 IDs រក នៅ SMM Panel → Services",
-            parse_mode="HTML", reply_markup=cancel_kb())
+        _smm_add_after_cat(uid, cat, None)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("smmaddplat:"))
 def cb_smmaddplat(call):
@@ -7667,14 +7899,7 @@ def cb_smmaddplat(call):
     step = waiting.get(uid, {})
     if not isinstance(step, dict): return
     cat = step.get("cat","")
-    waiting[uid] = {"step": "smm_add_ids", "cat": cat, "platform": key}
-    plabel = _PLATFORM_LABEL_BY_KEY.get(key, key)
-    bot.send_message(uid,
-        f"📂 Category: <b>{cat}</b> · 🌐 Platform: <b>{plabel}</b>\n"
-        f"ផ្ញើ API Service IDs (comma):\n"
-        f"ឧ: <code>5441,5448,5502</code>\n\n"
-        f"💡 រក IDs នៅ SMM API Panel ➡️ Services",
-        parse_mode="HTML", reply_markup=cancel_kb())
+    _smm_add_after_cat(uid, cat, key)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("delsvc:"))
 def cb_delsvc(call):
@@ -9627,8 +9852,9 @@ def handle_msg(message):
         if isinstance(step, dict) and step.get("step") == "smm_add_ids":
             cat = step["cat"]
             platform = step.get("platform") or _CAT_TO_PLATFORM_KEY.get(cat)
-            # Check API configured first
-            if not smm_api.get("url") or not smm_api.get("key"):
+            # Check API configured first (Website ដែលបានជ្រើស)
+            add_pid, add_prov = _prov_get(step.get("provider_id") or None)
+            if not _prov_ready(add_prov):
                 waiting.pop(uid, None)
                 bot.send_message(uid,
                     "❌ <b>SMM API មិនទាន់ Set!</b>\n"
@@ -9642,11 +9868,13 @@ def handle_msg(message):
             bot.send_message(uid, f"⏳ Fetching {len(ids)} service(s) from API...")
             ok, fail = [], []
             for api_id in ids:
-                info = _smm_fetch_service(api_id)
+                info = _smm_fetch_service(api_id, pid=add_pid)
                 if info:
-                    slug = f"{cat.lower().replace(' ', '_')}_{api_id}"
+                    _cslug = cat.lower().replace(' ', '_')
+                    slug = f"{_cslug}_{api_id}" if add_pid in ("", "p1") else f"{_cslug}_{add_pid}_{api_id}"
                     smm_services[slug] = {
                         "api_id":    api_id,
+                        "provider_id": add_pid,
                         "cost_rate": info["cost_rate"],
                         "min":       info["min"],
                         "max":       info["max"],
@@ -9667,33 +9895,55 @@ def handle_msg(message):
             msg += f"\n\n✅ Total services: <b>{len(smm_services)}</b>"
             bot.send_message(uid, msg, parse_mode="HTML", reply_markup=admin_kb()); return
 
-        if step == "smm_api_url":
-            smm_api["url"] = text.strip().rstrip("/")
-            waiting[uid] = "smm_api_key"
+        if isinstance(step, dict) and step.get("step") == "prov_url":
+            url = text.strip().rstrip("/")
+            if not url.lower().startswith(("http://", "https://")):
+                bot.send_message(uid, "❌ URL ត្រូវចាប់ផ្តើមដោយ <code>https://</code> — ផ្ញើម្តងទៀត",
+                                 parse_mode="HTML", reply_markup=cancel_kb()); return
+            waiting[uid] = {"step": "prov_key", "pid": step.get("pid"), "url": url}
             bot.send_message(uid,
-                f"✅ URL: <code>{smm_api['url']}</code>\n\n🔑 ឥឡូវ ផ្ញើ API Key:",
+                f"✅ URL: <code>{url}</code>\n\n🔑 ឥឡូវ ផ្ញើ API Key:",
                 parse_mode="HTML", reply_markup=cancel_kb()); return
 
-        if step == "smm_api_key":
-            smm_api["key"] = text.strip()
-            _save(SMM_API_FILE, smm_api)
+        if isinstance(step, dict) and step.get("step") == "prov_key":
+            key = text.strip()
+            url = step.get("url", "")
+            pid = step.get("pid")
             waiting.pop(uid, None)
+            P_ = _prov_all()
+            if pid and pid in P_:
+                P_[pid]["url"] = url
+                P_[pid]["key"] = key
+            else:
+                n_ = int(smm_providers.get("seq", 0)) + 1
+                while f"p{n_}" in P_:
+                    n_ += 1
+                smm_providers["seq"] = n_
+                pid = f"p{n_}"
+                P_[pid] = {"name": _prov_host_name(url), "url": url, "key": key, "enabled": True}
+                if not smm_providers.get("default"):
+                    smm_providers["default"] = pid
+            _save(SMM_PROV_FILE, smm_providers)
+            _smm_svc_list_cache.pop(pid, None)
             bot.send_message(uid, "⏳ Testing connection...", reply_markup=admin_kb())
-            try:
-                r = http.post(smm_api["url"],
-                              data={"key": smm_api["key"], "action": "balance"}, timeout=10)
-                d = r.json()
-                balance  = d.get("balance", d.get("Balance", "?"))
-                currency = d.get("currency", d.get("Currency", "USD"))
-                bot.send_message(uid,
-                    f"✅ <b>SMM API ភ្ជាប់ហើយ!</b>\n━━━━━━━━━━━━━━━━━━\n"
-                    f"🌐 URL: <code>{smm_api['url']}</code>\n"
-                    f"💰 Balance: <b>{balance} {currency}</b>",
-                    parse_mode="HTML", reply_markup=admin_kb())
-            except Exception as e:
-                bot.send_message(uid,
-                    f"⚠️ API Saved ប៉ុន្តែ test failed: <code>{e}</code>",
-                    parse_mode="HTML", reply_markup=admin_kb())
+            line = _prov_test_line(pid)
+            head = "✅ <b>SMM API ភ្ជាប់ហើយ!</b>" if line.startswith("✅") else "⚠️ API Saved ប៉ុន្តែ test failed"
+            bot.send_message(uid,
+                f"{head}\n━━━━━━━━━━━━━━━━━━\n🌐 URL: <code>{url}</code>\n{line}",
+                parse_mode="HTML", reply_markup=admin_kb())
+            _prov_view(uid, pid)
+            return
+
+        if isinstance(step, dict) and step.get("step") == "prov_rename":
+            pid = step.get("pid")
+            nm = text.strip()[:30]
+            waiting.pop(uid, None)
+            if pid in _prov_all() and nm:
+                _prov_all()[pid]["name"] = nm
+                _save(SMM_PROV_FILE, smm_providers)
+                _prov_view(uid, pid)
+            else:
+                bot.send_message(uid, "❌ ឈ្មោះមិនត្រឹមត្រូវ", reply_markup=admin_kb())
             return
 
         if isinstance(step, dict) and step.get("step") == "depbonus_edit":
@@ -10135,19 +10385,7 @@ def handle_msg(message):
             bot.send_message(uid, "\n".join(lines)[:4000], parse_mode="HTML", reply_markup=admin_kb()); return
 
         if text == "⚙️ កំណត់ SMM API":
-            cur_url = smm_api.get("url","❌ មិនទាន់ set")
-            cur_key = smm_api.get("key","❌ មិនទាន់ set")
-            masked = cur_key[:6] + "****" + cur_key[-4:] if len(cur_key) > 10 else cur_key
-            kb_api = InlineKeyboardMarkup([
-                [InlineKeyboardButton("✏️ កំណត់ URL + Key", callback_data="smmapi:setup", color="progress")],
-                [InlineKeyboardButton("🔌 សាកល្បងភ្ជាប់",  callback_data="smmapi:test", color="active")],
-                [InlineKeyboardButton("🗑️ លុប API",         callback_data="smmapi:clear", color="inactive")],
-            ])
-            bot.send_message(uid,
-                f"⚙️ <b>SMM API Config</b>\n━━━━━━━━━━━━━━━━━━\n"
-                f"🌐 URL: <code>{cur_url}</code>\n"
-                f"🔑 Key: <code>{masked}</code>",
-                parse_mode="HTML", reply_markup=kb_api); return
+            _prov_menu(uid); return
 
         if text == "➕ បន្ថែម SMM":
             cats_kb = InlineKeyboardMarkup([
@@ -10176,7 +10414,7 @@ def handle_msg(message):
                     label = s.get("label", slug)[:30]
                     api_id = s.get("api_id", "?")
                     btns.append([InlineKeyboardButton(
-                        f"🗑️ [{api_id}] {label}", callback_data=f"delsvc:{slug}", color="inactive")])
+                        f"🗑️ [{_svc_tag(s)}] {label}", callback_data=f"delsvc:{slug}", color="inactive")])
                 btns.append([InlineKeyboardButton(
                     f"🗑️ លុបទាំងអស់ {cat}", callback_data=f"delsvc:cat:{cat}", color="inactive")])
                 bot.send_message(uid,
@@ -10197,7 +10435,7 @@ def handle_msg(message):
                     label  = s.get("label", slug)[:35]
                     api_id = s.get("api_id", "?")
                     btns.append([InlineKeyboardButton(
-                        f"✏️ [{api_id}] {label}", callback_data=f"editsvc:{slug}", color="progress")])
+                        f"✏️ [{_svc_tag(s)}] {label}", callback_data=f"editsvc:{slug}", color="progress")])
                 bot.send_message(uid,
                     f"✏️ <b>កែឈ្មោះ — {cat}</b>\n━━━━━━━━━━━━━━━━━━\nចុចដើម្បីកែ:",
                     parse_mode="HTML", reply_markup=InlineKeyboardMarkup(btns))
@@ -10265,21 +10503,12 @@ def handle_msg(message):
                 parse_mode="HTML", reply_markup=btns); return
 
         if text == "💰 ឆែកលុយ API":
-            url = smm_api.get("url",""); key = smm_api.get("key","")
-            if not url or not key:
+            if not _prov_all():
                 bot.send_message(uid, "❌ SMM API មិនទាន់ set!", reply_markup=admin_kb()); return
-            try:
-                r = http.post(url, data={"key": key, "action": "balance"}, timeout=10)
-                d = r.json()
-                balance  = d.get("balance", d.get("Balance", "?"))
-                currency = d.get("currency", d.get("Currency", "USD"))
-                bot.send_message(uid,
-                    f"💰 <b>SMM API Balance</b>\n━━━━━━━━━━━━━━━━━━\n"
-                    f"💵 Balance: <b>{balance} {currency}</b>\n"
-                    f"🌐 API: <code>{url}</code>",
-                    parse_mode="HTML", reply_markup=admin_kb())
-            except Exception as e:
-                bot.send_message(uid, f"❌ API Error: {e}", reply_markup=admin_kb())
+            lines = ["💰 <b>SMM API Balance</b>", "━━━━━━━━━━━━━━━━━━"]
+            for _pid in list(_prov_all().keys()):
+                lines.append(_prov_test_line(_pid))
+            bot.send_message(uid, "\n".join(lines), parse_mode="HTML", reply_markup=admin_kb())
             return
 
         if text == "💰 កាបូបលុយ":
@@ -11010,15 +11239,23 @@ def handle_msg(message):
             except Exception as _e: logger.debug(f"[silent] {_e}")
             return
         ded_bal(uid, price)
-        key = smm_api.get("key",""); api_url = smm_api.get("url","")
         res = None
         api_failed = False; api_err_msg = ""
-        if key and api_url and not s.get("manual"):
-            res = _smm_api_post({"key":key,"action":"add","service":s["api_id"],"link":link,"quantity":qty})
-            if not res or not isinstance(res, dict) or res.get("error") or not res.get("order"):
+        _sp = s.get("provider_id") or None
+        order_pid, _prov = _prov_get(_sp)
+        if not s.get("manual"):
+            if _sp and not _prov_ready(_prov):
                 api_failed = True
-                api_err_msg = (str(res.get("error")) if isinstance(res, dict) and res.get("error")
-                               else "SMM API មិនឆ្លើយតប ឬបញ្ជាទិញមិនជោគជ័យ")
+                api_err_msg = "Service នេះមិនទាន់ភ្ជាប់ API ត្រឹមត្រូវ (Admin ត្រូវពិនិត្យ)"
+            elif _prov and not _prov.get("enabled", True):
+                api_failed = True
+                api_err_msg = "Service នេះត្រូវបានផ្អាកជាបណ្តោះអាសន្ន"
+            elif _prov_ready(_prov):
+                res = _smm_api_post({"action":"add","service":s["api_id"],"link":link,"quantity":qty}, pid=order_pid)
+                if not res or not isinstance(res, dict) or res.get("error") or not res.get("order"):
+                    api_failed = True
+                    api_err_msg = (str(res.get("error")) if isinstance(res, dict) and res.get("error")
+                                   else "SMM API មិនឆ្លើយតប ឬបញ្ជាទិញមិនជោគជ័យ")
         # ── API Order បរាជ័យ → សងលុយវិញភ្លាម កុំឲ្យ User ខាតលុយឥតបានការ ──
         if api_failed:
             add_bal(uid, price)
@@ -11047,6 +11284,8 @@ def handle_msg(message):
             "qty":qty,"price":price,"link":link,"api_order_id":api_oid,
             "status":"pending","ts":int(time.time())
         }
+        if order_pid and not s.get("manual"):
+            order_rec["provider_id"] = order_pid
         if disc_pct > 0:
             order_rec["base_price"] = base_price
             order_rec["discount_pct"] = disc_pct

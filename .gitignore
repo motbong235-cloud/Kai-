@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+# Secrets / local env
+.env
+# Bot data (wallets, users, orders, API keys!) — កុំ push ឡើង GitHub
+smm_*.json
+*.json.bak
+*.bak
+*.corrupted_*
+*.tmp.*
+daily_report_cfg.json
