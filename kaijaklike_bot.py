@@ -11460,15 +11460,16 @@ def handle_msg(message):
                 )
             else:
                 admin_msg = (
-                    f"✍️ <b>ប្រតិបត្តិការ — Manual Order</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━\n"
-                    f"🆔 Order: <code>{oid}</code>\n"
-                    f"👤 {udisp}\n"
-                    f"📦 {_html_esc(str(s.get('label', slug)))}\n"
-                    f"🔢 {qty:,} | 💰 ${price:.4f}{admin_disc}\n"
-                    f"{_link_disp}\n"
-                    f"━━━━━━━━━━━━━━━━━━\n"
-                    f"⏳ ត្រូវ Admin ដាក់ដោយដៃ — ចុច ✅ Done / ❌ Reject"
+                    _channel_order_msg(
+                        uid_str,
+                        label=s.get("label", slug),
+                        price=price,
+                        link=link,
+                        oid=oid,
+                        qty=qty,
+                        status_label="កំពុងដំណើរការ ⏳",
+                    )
+                    + "\n\n⏳ ត្រូវ Admin ដាក់ដោយដៃ — ចុច ✅ Done / ❌ Reject"
                 )
             try:
                 onotify(admin_msg, reply_markup=kb_adm)
