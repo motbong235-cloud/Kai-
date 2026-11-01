@@ -3429,10 +3429,12 @@ def _notify(msg):
         logger.debug(f"[silent] {_e}")
     try:
         msg = _emojify(msg) if msg else msg
-        bot.send_message(cid, msg, parse_mode="HTML", disable_web_page_preview=True)
+        m = bot.send_message(cid, msg, parse_mode="HTML", disable_web_page_preview=True)
         logger.info(f"[notify] sent to {cid}")
+        return m
     except Exception as e:
         logger.warning(f"[notify] failed cid={cid} err={e}")
+        return None
 
 def _mask_uid(uid):
     """Mask UID for public channel: 56xxxxxxxx"""
@@ -7522,7 +7524,18 @@ def _process_manord_action(call, tb):
             f"⚠️ Order <code>{oid}</code> ត្រូវបានដំណើរការរួចហើយ (ស្ថានភាព: <b>{o.get('status')}</b>)",
             parse_mode="HTML"); return
     if action == "done":
-        waiting[uid] = {"step": "manual_order_done", "oid": oid, "user_uid": o["uid"], "via_bot": _bot_tag(tb)}
+        waiting[uid] = {
+            "step": "manual_order_done",
+            "oid": oid,
+            "user_uid": o["uid"],
+            "via_bot": _bot_tag(tb),
+            "msg_chat": call.message.chat.id,
+            "msg_id": call.message.message_id,
+        }
+        try:
+            tb.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
+        except Exception as _e:
+            logger.debug(f"[silent] {_e}")
         tb.send_message(uid,
             f"✅ <b>Complete Order</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
@@ -7567,34 +7580,82 @@ def _process_manord_action(call, tb):
 
 
 def _finish_manual_order(uid, tb, step, text):
-    """បញ្ចប់ Manual Order (វាយ Note រួច Complete) — ហៅពី bot service ឬ Order Bot
-    ដាច់ដោយឡែក (`tb`)។ សារទៅ User (customer) ប្រើ `bot` service ជានិច្ច។"""
-    oid      = step.get("oid")
+    """បញ្ចប់ Manual Order (វាយ Note រួច Complete)."""
+    oid = step.get("oid")
     user_uid = step.get("user_uid")
-    o        = smm_orders.get(oid)
+    o = smm_orders.get(oid)
     if not o:
         tb.send_message(uid, "❌ Order រកមិនឃើញ", reply_markup=_tb_admin_kb(tb))
-        waiting.pop(uid, None); return
+        waiting.pop(uid, None)
+        return
     note = text.strip()
-    smm_orders[oid]["status"]   = "completed"
-    smm_orders[oid]["note"]     = note
+    smm_orders[oid]["status"] = "completed"
+    smm_orders[oid]["note"] = note
     _save(SMM_ORD_FILE, smm_orders)
     waiting.pop(uid, None)
+
+    # Edit admin Order Bot message -> success format
     try:
-        bot.send_message(int(user_uid),
-            f"✅ <b>Order បានដំណើរការហើយ!</b>\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"🆔 <code>{oid}</code>\n"
-            f"📊 {o.get('label','?')}\n"
-            f"🔢 ចំនួន: <b>{o.get('qty',0):,}</b>\n"
-            + (f"📝 Note: {note}\n" if note and note != "-" else "") +
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"🙏 អរគុណ!",
-            parse_mode="HTML")
-    except Exception as _e: logger.debug(f"[silent] {_e}")
-    tb.send_message(uid,
-        f"✅ <b>Order Completed!</b>\n🆔 <code>{oid}</code>",
-        parse_mode="HTML", reply_markup=_tb_admin_kb(tb))
+        mid = step.get("msg_id")
+        mchat = step.get("msg_chat")
+        if mid and mchat:
+            done_txt = _channel_order_msg(
+                o.get("uid"),
+                label=o.get("label"),
+                price=o.get("price"),
+                link=o.get("link"),
+                oid=oid,
+                api_order_id=o.get("api_order_id"),
+                qty=o.get("qty"),
+                status_label="ជោគជ័យ ✅",
+            )
+            if note and note != "-":
+                done_txt = done_txt + "\n📝 Note: " + str(note)
+            done_txt = _emojify(done_txt) if done_txt else done_txt
+            tb.edit_message_text(
+                done_txt,
+                chat_id=int(mchat),
+                message_id=int(mid),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+    except Exception as e:
+        logger.warning("[edit admin order msg] %s", e)
+
+    # Edit channel order message -> success
+    try:
+        _edit_channel_order_status(oid, "ជោគជ័យ ✅")
+    except Exception as e:
+        logger.warning("[edit channel after done] %s", e)
+
+    # Notify user
+    try:
+        parts = [
+            "✅ <b>Order បានដំណើរការហើយ!</b>",
+            "━━━━━━━━━━━━━━━━━━",
+            f"🆔 <code>{oid}</code>",
+            f"📊 {o.get('label', '?')}",
+            f"🔢 ចំនួន: <b>{o.get('qty', 0):,}</b>",
+        ]
+        if note and note != "-":
+            parts.append(f"📝 Note: {note}")
+        parts.append("━━━━━━━━━━━━━━━━━━")
+        parts.append("🙏 អរគុណ!")
+        bot.send_message(int(user_uid), "\n".join(parts), parse_mode="HTML")
+    except Exception as e:
+        logger.debug("[silent] %s", e)
+
+    # Confirm admin
+    try:
+        adm = [
+            "✅ <b>Order Completed!</b>",
+            f"🆔 <code>{oid}</code>",
+            "📦 ការបញ្ជា: <b>ជោគជ័យ ✅</b>",
+            "សារលើ Channel ត្រូវបាន update",
+        ]
+        tb.send_message(uid, "\n".join(adm), parse_mode="HTML", reply_markup=_tb_admin_kb(tb))
+    except Exception as e:
+        logger.debug("[silent] %s", e)
 
 
 def _finish_manual_reject(uid, tb, step, text):
@@ -7622,6 +7683,10 @@ def _finish_manual_reject(uid, tb, step, text):
     smm_orders[oid]["refunded"] = price
     smm_orders[oid]["reject_reason"] = reason
     _save(SMM_ORD_FILE, smm_orders)
+    try:
+        _edit_channel_order_status(oid, "បដិសេធ ❌")
+    except Exception as _e:
+        logger.debug(f"[silent] {_e}")
     # Refund first
     try:
         add_bal(int(o["uid"]), price)
@@ -11411,7 +11476,7 @@ def handle_msg(message):
                 logger.debug(f"[silent] {_e}")
 
             try:
-                _notify(_channel_order_msg(
+                _cm = _notify(_channel_order_msg(
                     uid_str,
                     label=s.get("label", slug),
                     price=price,
@@ -11420,13 +11485,17 @@ def handle_msg(message):
                     qty=qty,
                     status_label="កំពុងដំណើរការ ⏳",
                 ))
+                if _cm is not None and oid in smm_orders:
+                    smm_orders[oid]["channel_msg_id"] = _cm.message_id
+                    smm_orders[oid]["channel_chat_id"] = _cm.chat.id
+                    _save(SMM_ORD_FILE, smm_orders)
             except Exception as e:
                 logger.warning(f"[order channel] failed: {e}")
         else:
             # Auto API — ផ្ញើទាំង Channel (invoice សាធារណៈ) និង Order Bot (log សម្រាប់ Admin)
             api_oid = order_rec.get("api_order_id") or (res.get("order") if isinstance(res, dict) else None)
             try:
-                _notify(_channel_order_msg(
+                _cm = _notify(_channel_order_msg(
                     uid_str,
                     label=s.get("label", slug),
                     price=price,
@@ -11434,7 +11503,12 @@ def handle_msg(message):
                     oid=oid,
                     api_order_id=api_oid,
                     qty=qty,
+                    status_label="កំពុងដំណើរការ ⏳",
                 ))
+                if _cm is not None and oid in smm_orders:
+                    smm_orders[oid]["channel_msg_id"] = _cm.message_id
+                    smm_orders[oid]["channel_chat_id"] = _cm.chat.id
+                    _save(SMM_ORD_FILE, smm_orders)
             except Exception as e:
                 logger.warning(f"[order channel] failed: {e}")
 
