@@ -3779,22 +3779,18 @@ def _notify_diag(kind, msg):
         logger.debug(f"[notify_diag] {_e}")
 
 def _notify_via(kind, text, reply_markup=None, parse_mode="HTML"):
-    """kind = 'order' | 'pay'. Notify bot first, main bot as fallback; both with degraded retries."""
+    """kind = 'order' | 'pay'. Notify bot first, main bot as fallback — never both to same chat."""
     name = "onotify" if kind == "order" else "pnotify"
     tb = order_bot if kind == "order" else pay_bot
     try:
         if text and ("<!DOCTYPE" in text or "<!doctype" in text or "<html" in (text or "").lower()):
             text = _tg_escape(text, 1500)
             parse_mode = None
-        # Order/Pay notify: មិនប្រើ <tg-emoji> — Telegram ងាយ ENTITY_TEXT_INVALID
-        # ជាមួយ InlineKeyboard (Done/Reject) + HTML លាយ premium entities។
-        # រក្សា unicode emoji ធម្មតា តែ strip tg-emoji tags បើមាន។
         try:
             if reply_markup is not None:
                 text = _strip_tg_emoji_tags(text or "")
             else:
                 text = _emojify(text) if text else text
-                # still avoid nested entity issues in notify bots
                 if tb is not None:
                     text = _strip_tg_emoji_tags(text or "")
         except Exception as _e:
@@ -3803,23 +3799,71 @@ def _notify_via(kind, text, reply_markup=None, parse_mode="HTML"):
         if parse_mode is None and text and "<tg-emoji" in str(text):
             parse_mode = "HTML"
         ok = False
+        target = _notify_target_chat_id(kind)
+        sent_chats = set()
         if tb:
-            ok, err, how = _send_with_fallbacks(tb, _notify_target_chat_id(kind), text, reply_markup, parse_mode, f"{name}/{kind}_bot")
+            ok, err, how = _send_with_fallbacks(tb, target, text, reply_markup, parse_mode, f"{name}/{kind}_bot")
+            if ok:
+                sent_chats.add(str(target))
             if ok and how in ("plain-text", "text-only"):
-                _notify_diag(kind, f"ℹ️ {kind.title()} Bot: សារមកដល់ ប៉ុន្តែត្រូវផ្ញើបែបសាមញ្ញ ({how}) ព្រោះ Telegram បដិសេធមុន:\n{err}")
-            # plain-buttons is the preferred path for Done/Reject — not an error
+                _notify_diag(kind, "ℹ️ %s Bot: សារមកដល់ ប៉ុន្តែត្រូវផ្ញើបែបសាមញ្ញ (%s) ព្រោះ Telegram បដិសេធមុន:\n%s" % (kind.title(), how, err))
             if not ok:
-                _notify_diag(kind, f"⚠️ {kind.title()} Bot ផ្ញើមិនបាន:\n{err}\n\n(ពិនិត្យថា Admin បាន /start {kind.title()} Bot ហើយ Chat ID ត្រឹមត្រូវ)")
+                _notify_diag(kind, "⚠️ %s Bot ផ្ញើមិនបាន:\n%s\n\n(ពិនិត្យថា Admin បាន /start %s Bot ហើយ Chat ID ត្រឹមត្រូវ)" % (kind.title(), err, kind.title()))
+        # Fallback to main bot ONLY if notify-bot failed AND destination is different
         if not ok:
-            ok, err2, how2 = _send_with_fallbacks(bot, ADMIN_ID, text, reply_markup, parse_mode, f"{name}/main")
-            if not ok:
-                logger.error(f"[{name}] all channels failed: {err2}")
+            main_chat = ADMIN_ID
+            if str(main_chat) in sent_chats or str(main_chat) == str(target) and ok:
+                logger.info(f"[{name}] skip main fallback — already delivered to {target}")
+            else:
+                ok2, err2, how2 = _send_with_fallbacks(bot, main_chat, text, reply_markup, parse_mode, f"{name}/main")
+                if not ok2:
+                    logger.error(f"[{name}] all channels failed: {err2}")
     except Exception as e:
         logger.warning(f"[{name}] failed: {e}")
 
 
-def onotify(text, reply_markup=None, parse_mode="HTML"):
-    """Order notification -> Order Bot (if set) + fallback to main bot ADMIN (with degraded retries)."""
+
+# ── Dedup order/payment notifies (prevents 1 order → 2~4 identical admin messages) ──
+_NOTIFY_DEDUP = {}  # key -> ts
+_NOTIFY_DEDUP_TTL = 90  # seconds
+
+
+def _notify_dedup_ok(key: str) -> bool:
+    """Return True if this key has NOT been sent recently (caller should send)."""
+    import time as _time
+    now = _time.time()
+    # prune
+    dead = [k for k, ts in _NOTIFY_DEDUP.items() if now - ts > _NOTIFY_DEDUP_TTL]
+    for k in dead:
+        _NOTIFY_DEDUP.pop(k, None)
+    key = str(key or "").strip()
+    if not key:
+        return True
+    prev = _NOTIFY_DEDUP.get(key)
+    if prev is not None and now - prev < _NOTIFY_DEDUP_TTL:
+        logger.warning(f"[notify-dedup] skip duplicate key={key[:80]}")
+        return False
+    _NOTIFY_DEDUP[key] = now
+    return True
+
+
+def _extract_order_id_from_text(text: str) -> str:
+    import re as _re
+    m = _re.search(r"(?:Order ID|Order:|🆔|📋 Order ID:)[\s:<b>/]*code>?\s*([A-Za-z0-9_-]+)", text or "", _re.I)
+    if m:
+        return m.group(1)
+    m = _re.search(r"<code>(\d{2,12})</code>", text or "")
+    if m:
+        return m.group(1)
+    return ""
+
+
+def onotify(text, reply_markup=None, parse_mode="HTML", dedup_key=None):
+    """Order notification -> Order Bot (if set) + fallback to main bot ADMIN (with degraded retries).
+    dedup_key: pass order id to guarantee one admin message per order."""
+    key = dedup_key or _extract_order_id_from_text(text or "")
+    if key and not _notify_dedup_ok(f"order:{key}"):
+        return
     _notify_via("order", text, reply_markup, parse_mode)
 
 
@@ -11472,20 +11516,28 @@ def handle_msg(message):
                     + "\n\n⏳ ត្រូវ Admin ដាក់ដោយដៃ — ចុច ✅ Done / ❌ Reject"
                 )
             try:
-                onotify(admin_msg, reply_markup=kb_adm)
+                onotify(admin_msg, reply_markup=kb_adm, dedup_key=str(oid))
             except Exception as _e:
                 logger.debug(f"[silent] {_e}")
 
+            # Channel invoice — skip if same chat as Order Bot (prevents double in one chat)
             try:
-                _cm = _notify(_channel_order_msg(
-                    uid_str,
-                    label=s.get("label", slug),
-                    price=price,
-                    link=link,
-                    oid=oid,
-                    qty=qty,
-                    status_label="កំពុងដំណើរការ ⏳",
-                ))
+                _ch_cfg = _get_notify_cfg()
+                _ch_id = str((_ch_cfg or {}).get("channel_id") or "").strip()
+                _ord_chat = str(_notify_target_chat_id("order") or "").strip()
+                if _ch_id and _ord_chat and _ch_id == _ord_chat:
+                    logger.info(f"[order channel] skip — same chat as order bot ({_ch_id})")
+                    _cm = None
+                else:
+                    _cm = _notify(_channel_order_msg(
+                        uid_str,
+                        label=s.get("label", slug),
+                        price=price,
+                        link=link,
+                        oid=oid,
+                        qty=qty,
+                        status_label="កំពុងដំណើរការ ⏳",
+                    ))
                 if _cm is not None and oid in smm_orders:
                     smm_orders[oid]["channel_msg_id"] = _cm.message_id
                     smm_orders[oid]["channel_chat_id"] = _cm.chat.id
