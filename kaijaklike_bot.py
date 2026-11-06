@@ -3070,6 +3070,10 @@ def _smm_sync_order(oid):
         smm_orders[oid]["remains"] = res.get("remains", 0)
         _save(SMM_ORD_FILE, smm_orders)
         try:
+            _edit_channel_order_status(oid, "ជោគជ័យ ✅")
+        except Exception as _e:
+            logger.debug("[channel edit sync] %s", _e)
+        try:
             bot.send_message(int(o["uid"]),
                 f"✅ <b>Order បានជោគជ័យគ្រប់ចំនួន 100%!</b> 🎉\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
@@ -3096,6 +3100,10 @@ def _smm_sync_order(oid):
         price = float(o.get("price") or 0)
         smm_orders[oid]["refunded"] = price
         _save(SMM_ORD_FILE, smm_orders)
+        try:
+            _edit_channel_order_status(oid, "លុបចោល ⚠️")
+        except Exception as _e:
+            logger.debug("[channel edit cancel] %s", _e)
         # Refund ស្វ័យប្រវត្តិ — ដាច់ដោយឡែកពី Notify, ដើម្បីកុំឲ្យ User ខាតលុយបើផ្ញើសារទៅគាត់មិនចេញ
         add_bal(int(o["uid"]), price)
         try:
@@ -3497,8 +3505,15 @@ def _channel_order_msg(uid, label, price, link, oid, api_order_id=None, qty=None
     if price is not None:
         svc_line = f"{svc_line} - ${float(price):.2f}"
 
+    st = (status_label or "").strip()
+    if any(x in st for x in ("ជោគជ័យ", "✅", "success", "done", "completed")):
+        title = "✅ <b>ការបញ្ជាទិញជោគជ័យ!</b>"
+    elif any(x in st for x in ("បដិសេធ", "❌", "reject", "cancel")):
+        title = "❌ <b>ការបញ្ជាទិញត្រូវបានបដិសេធ</b>"
+    else:
+        title = "📦 <b>ការបញ្ជាទិញថ្មី!</b>"
     lines = [
-        f"📦 <b>ការបញ្ជាទិញថ្មី!</b>",
+        title,
         f"",
         f"Buyer ID: <code>{_mask_uid(uid)}</code>",
         f"",
@@ -3520,6 +3535,100 @@ def _channel_order_msg(uid, label, price, link, oid, api_order_id=None, qty=None
         f"អរគុណចំពោះការប្រើប្រាស់ ❤️",
     ]
     return "\n".join(lines)
+
+
+
+
+def _edit_channel_order_status(oid, status_label="ជោគជ័យ ✅"):
+    """Edit the public channel invoice for this order (stored channel_msg_id).
+    Uses main service bot (same as _notify). Safe no-op if missing ids."""
+    o = smm_orders.get(str(oid)) or smm_orders.get(oid)
+    if not o:
+        return False
+    mid = o.get("channel_msg_id")
+    cid = o.get("channel_chat_id")
+    if not mid:
+        logger.info("[channel edit] no channel_msg_id for order %s", oid)
+        return False
+    if not cid:
+        try:
+            env_cid = (os.environ.get("NOTIFY_CHANNEL_ID") or "").strip()
+            if env_cid:
+                cid = int(env_cid)
+            else:
+                cfg = _load(NOTIFY_FILE, {})
+                cid = int(cfg.get("channel_id") or NOTIFY_CHANNEL_ID_DEFAULT)
+        except Exception:
+            cid = NOTIFY_CHANNEL_ID_DEFAULT
+    try:
+        note = o.get("note") or ""
+        if status_label and ("បដិសេធ" in str(status_label) or "reject" in str(status_label).lower()):
+            reason = o.get("reject_reason") or ""
+            if reason:
+                note = reason
+        txt = _channel_order_msg(
+            o.get("uid"),
+            label=o.get("label"),
+            price=o.get("price"),
+            link=o.get("link"),
+            oid=oid,
+            api_order_id=o.get("api_order_id"),
+            qty=o.get("qty"),
+            status_label=status_label,
+        )
+        if note and str(note).strip() not in ("", "-"):
+            txt = txt + "\n📝 Note: " + str(note).strip()[:300]
+        txt = _emojify(txt) if txt else txt
+        bot.edit_message_text(
+            txt,
+            chat_id=int(cid),
+            message_id=int(mid),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+        logger.info("[channel edit] order %s -> %s (chat=%s mid=%s)", oid, status_label, cid, mid)
+        return True
+    except Exception as e:
+        logger.warning("[channel edit] failed oid=%s err=%s", oid, e)
+        return False
+
+
+def _repair_channel_order_messages(limit=300):
+    """Re-edit channel messages for already completed/rejected orders that still show pending."""
+    n_ok = n_skip = n_fail = 0
+    for oid, o in list(smm_orders.items()):
+        if not isinstance(o, dict):
+            continue
+        st = str(o.get("status") or "").lower()
+        if st not in ("completed", "rejected", "canceled", "cancelled", "partial"):
+            continue
+        if not o.get("channel_msg_id"):
+            n_skip += 1
+            continue
+        if st in ("completed",):
+            label = "ជោគជ័យ ✅"
+        elif st in ("rejected",):
+            label = "បដិសេធ ❌"
+        elif st in ("canceled", "cancelled"):
+            label = "លុបចោល ⚠️"
+        else:
+            label = "Partial ⚠️"
+        try:
+            if _edit_channel_order_status(oid, label):
+                n_ok += 1
+            else:
+                n_fail += 1
+        except Exception:
+            n_fail += 1
+        if n_ok + n_fail >= limit:
+            break
+        try:
+            import time as _time
+            _time.sleep(0.05)
+        except Exception:
+            pass
+    logger.info("[channel repair] ok=%s fail=%s skip_no_mid=%s", n_ok, n_fail, n_skip)
+    return {"ok": n_ok, "fail": n_fail, "skip": n_skip}
 
 
 def _send_deposit_notify(uid, amount, bonus, new_bal, reference="", method_label="ដាក់ប្រាក់"):
@@ -12089,6 +12198,12 @@ def _bot_polling_with_retry():
         try:
             _ensure_clean_updates(bot, label)
             logger.info("🤖 Bot polling ចាប់ផ្ដើម... instance=%s", label)
+            try:
+                if not globals().get("_CHANNEL_REPAIR_STARTED"):
+                    globals()["_CHANNEL_REPAIR_STARTED"] = True
+                    threading.Thread(target=lambda: _repair_channel_order_messages(250), daemon=True).start()
+            except Exception as _e:
+                logger.debug("[channel repair start] %s", _e)
             bot.infinity_polling(timeout=20, long_polling_timeout=15, skip_pending=True)
             fail_409 = 0
         except Exception as e:
