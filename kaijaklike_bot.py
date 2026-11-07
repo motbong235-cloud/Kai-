@@ -4625,13 +4625,22 @@ def _aba_create(uid, amount, username, _attempt=1):
     _timeout = (10, int(os.getenv("ABA_READ_TIMEOUT", "60") or 60))
     _max_try = int(os.getenv("ABA_CREATE_RETRIES", "5") or 5)
     try:
+        # Safe username: letters/digits/_ only, max 32 — never pass raw @telegram handle
+        import re as _re
+        _uname = str(username or f"u{uid}")
+        _uname = _re.sub(r"[^a-zA-Z0-9_]", "", _uname)[:32] or f"u{uid}"
+        # Unique bill note reduces "duplicate / stuck" QR failures on provider side
+        _bill = f"k{uid}_{int(time.time())}_{_attempt}"
         r = http.post(
             ABA_CREATE_URL,
             json={
                 "api_key":     api_key,
                 "merchant_id": merchant_id,
-                "username":    username,
+                "username":    _uname,
                 "amount":      round(float(amount), 2),
+                "bill_id":     _bill,
+                "order_id":    _bill,
+                "reference":   _bill,
             },
             headers={
                 "Content-Type": "application/json",
@@ -4672,12 +4681,22 @@ def _aba_create(uid, amount, username, _attempt=1):
             or r.status_code in (402, 408, 425, 429)
             or "QR_GENERATION_FAILED" in code.upper()
             or "qr_generation" in str(msg).lower()
+            or "wallet" in str(msg).lower()
         )
         if _retry_http and _attempt < _max_try:
-            wait = 2.0 * _attempt + (1.5 if r.status_code == 402 else 0)
-            logger.warning(f"[aba_create] retryable HTTP {r.status_code} code={code} wait={wait:.1f}s attempt={_attempt}")
+            wait = 2.5 * _attempt + (2.0 if r.status_code == 402 else 0)
+            # Alternate username forms across retries
+            _alt = f"u{uid}" if _attempt % 2 else f"tg{uid}"
+            logger.warning(f"[aba_create] retryable HTTP {r.status_code} code={code} wait={wait:.1f}s attempt={_attempt} uname={_alt}")
             time.sleep(wait)
-            return _aba_create(uid, amount, username, _attempt=_attempt + 1)
+            return _aba_create(uid, amount, _alt, _attempt=_attempt + 1)
+        # Final friendly hint for admin
+        if "QR_GENERATION_FAILED" in code.upper() or r.status_code == 402:
+            _last_aba_error = (
+                f"HTTP 402 [QR_GENERATION_FAILED]: could not create QR "
+                f"(check wallet balance / merchant config on khmer-system.com). "
+                f"raw={msg}"
+            )
         return None
     except Exception as e:
         _last_aba_error = f"{type(e).__name__}: {e}"
@@ -5283,12 +5302,9 @@ def _send_deposit_qr_aba(uid, amount, promo_code_name=None, bonus=0.0, promo_bon
     except Exception as _e:
         logger.debug(f"[silent] {_e}")
 
-    username = ""
-    try:
-        u = users.get(uid_str) or {}
-        username = (u.get("username") or u.get("name") or f"tg{uid}")[:40]
-    except Exception:
-        username = f"tg{uid}"
+    # Khmer System is picky about username — Telegram @handle often triggers
+    # INVALID_REQUEST / QR_GENERATION_FAILED. Always use stable numeric id.
+    username = f"u{uid}"
 
     data = _aba_create(uid, amount, username)
     if not data:
@@ -5306,9 +5322,27 @@ def _send_deposit_qr_aba(uid, amount, promo_code_name=None, bonus=0.0, promo_bon
             parse_mode="HTML",
         )
         try:
+            uname = ""
+            try:
+                uname = (users.get(uid_str) or {}).get("username") or ""
+            except Exception:
+                pass
+            who = f"@{uname}" if uname else f"ID {uid_str}"
+            hint = ""
+            err_l = str(err).lower()
+            if "qr_generation_failed" in err_l or "402" in err_l or "wallet" in err_l:
+                hint = (
+                    "\n\n💡 <b>ត្រូវពិនិត្យ:</b>\n"
+                    "1) Wallet balance លើ <code>khmer-system.com</code>\n"
+                    "2) Merchant ID + Profile Key ត្រូវគ្នា\n"
+                    "3) សាក /paytest ក្នុង bot\n"
+                    "4) រង់ចាំ 1–2 នាទី រួចសាកម្តងទៀត"
+                )
             pnotify(
-                f"⚠️ <b>ABA QR បរាជ័យ</b>\n👤 <code>{uid_str}</code> — ${amount:.2f}\n"
-                f"🔎 <code>{_tg_escape(str(err), 400)}</code>"
+                f"⚠️ <b>ABA PayWay បរាជ័យ</b> (aba_generate_qr)\n"
+                f"👤 {who} (ID: <code>{uid_str}</code>) — ${amount:.2f}\n"
+                f"🔎 <code>{_tg_escape(str(err), 350)}</code>"
+                f"{hint}"
             )
         except Exception:
             pass
