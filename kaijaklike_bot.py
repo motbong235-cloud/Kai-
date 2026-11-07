@@ -1325,13 +1325,18 @@ def _effective_camrapid_key():
     """Return runtime key if set, else fall back to env/default"""
     return camrapid_cfg.get("key") or CAMRAPID_API_KEY
 
+def _clean_aba_secret(v):
+    """Strip spaces/quotes that break Khmer System auth when pasted from admin."""
+    s = str(v or "").strip().strip('"').strip("'").strip()
+    return s
+
 def _effective_aba_key():
     """Return runtime ABA PayWay (KHMER SYSTEM) Profile Key if set, else fall back to env/default"""
-    return aba_cfg.get("key") or ABA_API_KEY
+    return _clean_aba_secret(aba_cfg.get("key") or ABA_API_KEY)
 
 def _effective_aba_merchant():
     """Return runtime ABA PayWay (KHMER SYSTEM) Merchant ID if set, else fall back to env/default"""
-    return aba_cfg.get("merchant_id") or ABA_MERCHANT_ID
+    return _clean_aba_secret(aba_cfg.get("merchant_id") or ABA_MERCHANT_ID)
 
 def _effective_khpay_key():
     return khpay_cfg.get("key") or KHPAY_API_KEY
@@ -4625,23 +4630,27 @@ def _aba_create(uid, amount, username, _attempt=1):
     _timeout = (10, int(os.getenv("ABA_READ_TIMEOUT", "60") or 60))
     _max_try = int(os.getenv("ABA_CREATE_RETRIES", "5") or 5)
     try:
-        # Safe username: letters/digits/_ only, max 32 — never pass raw @telegram handle
+        # Match working bot/website EXACTLY — only 4 fields (extra fields break QR on some merchants)
         import re as _re
-        _uname = str(username or f"u{uid}")
-        _uname = _re.sub(r"[^a-zA-Z0-9_]", "", _uname)[:32] or f"u{uid}"
-        # Unique bill note reduces "duplicate / stuck" QR failures on provider side
-        _bill = f"k{uid}_{int(time.time())}_{_attempt}"
+        _uname = str(username or f"u{uid}").lstrip("@")
+        _uname = _re.sub(r"[^A-Za-z0-9_]", "", _uname)[:32] or f"u{uid}"
+        _amt = round(float(amount), 2)
+        if _amt < 0.01:
+            _last_aba_error = "amount too small"
+            return None
+        _body = {
+            "api_key": api_key,
+            "merchant_id": merchant_id,
+            "username": _uname,
+            "amount": _amt,
+        }
+        logger.info(
+            f"[aba_create] POST attempt={_attempt} mid={merchant_id[:4]}*** "
+            f"keylen={len(api_key)} uname={_uname} amount={_amt}"
+        )
         r = http.post(
             ABA_CREATE_URL,
-            json={
-                "api_key":     api_key,
-                "merchant_id": merchant_id,
-                "username":    _uname,
-                "amount":      round(float(amount), 2),
-                "bill_id":     _bill,
-                "order_id":    _bill,
-                "reference":   _bill,
-            },
+            json=_body,
             headers={
                 "Content-Type": "application/json",
                 "Accept": "application/json",
@@ -4685,8 +4694,9 @@ def _aba_create(uid, amount, username, _attempt=1):
         )
         if _retry_http and _attempt < _max_try:
             wait = 2.5 * _attempt + (2.0 if r.status_code == 402 else 0)
-            # Alternate username forms across retries
-            _alt = f"u{uid}" if _attempt % 2 else f"tg{uid}"
+            # Alternate username forms across retries (same as working porpor fallback style)
+            _alts = [f"u{uid}", f"tg{uid}", "customer", f"c{int(time.time()) % 100000}"]
+            _alt = _alts[min(_attempt, len(_alts) - 1)]
             logger.warning(f"[aba_create] retryable HTTP {r.status_code} code={code} wait={wait:.1f}s attempt={_attempt} uname={_alt}")
             time.sleep(wait)
             return _aba_create(uid, amount, _alt, _attempt=_attempt + 1)
