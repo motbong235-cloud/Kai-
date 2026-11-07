@@ -3263,6 +3263,92 @@ def _smm_sync_refill(oid):
         return "partial"
     return "refilling"
 
+
+def _is_provider_balance_error(msg):
+    """True បើ SMM panel អស់លុយ / លុយមិនគ្រប់ — គួរ queue order ទុក auto-retry។"""
+    s = str(msg or "").lower()
+    keys = (
+        "insufficient", "not enough", "no balance", "low balance",
+        "balance is not enough", "not enough funds", "not enough money",
+        "out of balance", "zero balance", "balance too low",
+        "no funds", "អស់លុយ", "លុយមិនគ្រប់", "សមតុល្យមិនគ្រប់",
+    )
+    return any(k in s for k in keys)
+
+
+def _smm_try_submit_queued(oid):
+    """ព្យាយាមដាក់ order ដែល queue ទុក (API អស់លុយមុន) ទៅ SMM panel ម្តងទៀត។
+    ត្រឡប់ True បើបាន api_order_id ហើយ។"""
+    o = smm_orders.get(oid)
+    if not o or not isinstance(o, dict):
+        return False
+    if o.get("api_order_id"):
+        return True
+    if not o.get("api_queued"):
+        return False
+    if str(o.get("status") or "").lower() not in ("pending", "queued"):
+        return False
+    slug = o.get("slug")
+    s = smm_services.get(slug) if slug else None
+    if not s or s.get("manual"):
+        return False
+    link = o.get("link") or ""
+    qty = o.get("qty") or 0
+    order_pid, _prov = _prov_get(o.get("provider_id") or s.get("provider_id"))
+    if not _prov_ready(_prov) or not _prov.get("enabled", True):
+        return False
+    try:
+        bal_v, _cur = _smm_api_balance(order_pid)
+        try:
+            if float(str(bal_v).replace(",", "")) <= 0:
+                return False
+        except Exception:
+            pass
+    except Exception:
+        pass
+    res = _smm_api_post(
+        {"action": "add", "service": s.get("api_id"), "link": link, "quantity": qty},
+        pid=order_pid,
+    )
+    if not res or not isinstance(res, dict) or res.get("error") or not res.get("order"):
+        err = (str(res.get("error")) if isinstance(res, dict) and res.get("error") else "retry failed")
+        o["api_last_error"] = err
+        o["api_retry_ts"] = int(time.time())
+        _save(SMM_ORD_FILE, smm_orders)
+        return False
+    api_oid = str(res.get("order", ""))
+    o["api_order_id"] = api_oid
+    o["api_queued"] = False
+    o["status"] = "pending"
+    o["api_submitted_ts"] = int(time.time())
+    if order_pid:
+        o["provider_id"] = order_pid
+    _save(SMM_ORD_FILE, smm_orders)
+    logger.info(f"[api_queue] submitted {oid} → API {api_oid}")
+    try:
+        uid = int(o.get("uid"))
+        _msg_u = (
+            "✅ <b>Order របស់អ្នកចាប់ផ្តើមដំណើរការហើយ!</b>\n"
+            f"🆔 <code>{oid}</code>\n"
+            f"📊 {o.get('label', slug)}\n"
+            f"🆔 API: <code>{api_oid}</code>"
+        )
+        bot.send_message(uid, _msg_u, parse_mode="HTML")
+    except Exception as _e:
+        logger.debug(f"[api_queue user notify] {_e}")
+    try:
+        _msg_a = (
+            "⚡ <b>Queue → API OK</b>\n"
+            f"🆔 <code>{oid}</code>\n"
+            f"📊 {o.get('label', slug)}\n"
+            f"API Order: <code>{api_oid}</code>"
+        )
+        onotify(_msg_a)
+    except Exception:
+        pass
+    return True
+
+
 def _smm_order_watcher():
     """ 🕑 Background thread — Poll ស្ថានភាព Order ដែលដាក់ស្វ័យប្រវត្តិតាម API ជាទៀងទាត់
     ដោយហៅ _smm_sync_order() សម្រាប់ Order pending នីមួយៗ, និង _smm_sync_refill()
@@ -3273,6 +3359,12 @@ def _smm_order_watcher():
             time.sleep(SMM_ORDER_POLL_INTERVAL)
             for oid, o in list(smm_orders.items()):
                 st = o.get("status")
+                # Auto-submit orders queued when SMM panel had no balance
+                if o.get("api_queued") and not o.get("api_order_id") and st in ("pending", "queued"):
+                    try:
+                        _smm_try_submit_queued(oid)
+                    except Exception as _qe:
+                        logger.warning(f"[api_queue] {oid}: {_qe}")
                 if st == "pending" and o.get("api_order_id"):
                     _smm_sync_order(oid)
                 elif st == "refilling" and o.get("refill_id"):
@@ -3317,6 +3409,7 @@ def _smm_fetch_service(api_id, pid=None):
 
 _ORD_STATUS_LABELS = {
     "pending":   "⏳ កំពុងដំណើរការ",
+    "queued":    "📥 រង់ចាំ API",
     "completed": "✅ ជោគជ័យ",
     "partial":   "⚠️ ប្រគល់មិនគ្រប់",
     "canceled":  "❌ បានលុបចោល",
@@ -11487,26 +11580,81 @@ def handle_msg(message):
                     api_failed = True
                     api_err_msg = (str(res.get("error")) if isinstance(res, dict) and res.get("error")
                                    else "SMM API មិនឆ្លើយតប ឬបញ្ជាទិញមិនជោគជ័យ")
-        # ── API Order បរាជ័យ → សងលុយវិញភ្លាម កុំឲ្យ User ខាតលុយឥតបានការ ──
+        # ── API Order បរាជ័យ ──
+        # Panel អស់លុយ → ទុក order (user បង់រួច) queue រង់ចាំ auto-submit
+        # Error ផ្សេង → សងលុយ user ភ្លាម
         if api_failed:
+            if _is_provider_balance_error(api_err_msg):
+                oid = _make_order_id()
+                order_rec = {
+                    "uid": uid_str, "slug": slug, "label": s.get("label", slug),
+                    "qty": qty, "price": price, "link": link, "api_order_id": "",
+                    "status": "pending", "ts": int(time.time()),
+                    "api_queued": True, "api_last_error": api_err_msg,
+                }
+                if order_pid:
+                    order_rec["provider_id"] = order_pid
+                if disc_pct > 0:
+                    order_rec["base_price"] = base_price
+                    order_rec["discount_pct"] = disc_pct
+                    order_rec["discount_amt"] = disc_amt
+                smm_orders[oid] = order_rec
+                _save(SMM_ORD_FILE, smm_orders)
+                bot.send_message(
+                    uid,
+                    "\n".join([
+                        "✅ <b>ទទួល Order រួច!</b>",
+                        "━━━━━━━━━━━━━━━━━━",
+                        f"🆔 <code>{oid}</code>",
+                        f"📊 {s.get('label', slug)}",
+                        f"🔢 ចំនួន: <b>{qty:,}</b> | 💰 <b>${price:.4f}</b>",
+                        f"🔗 <code>{link}</code>",
+                        "━━━━━━━━━━━━━━━━━━",
+                        "⏳ ប្រព័ន្ធកំពុងរៀបចំ — នឹងដំណើរការស្វ័យប្រវត្តិពេលរួច",
+                        f"💳 Balance: <b>${bal(uid):.2f}</b>",
+                    ]),
+                    parse_mode="HTML",
+                    reply_markup=main_kb(uid),
+                )
+                try:
+                    onotify("\n".join([
+                        "📥 <b>Order Queue (SMM API អស់លុយ)</b>",
+                        f"🆔 <code>{oid}</code>",
+                        f"👤 {_user_display(uid_str)}",
+                        f"📊 {s.get('label', slug)} | {qty:,} | ${price:.4f}",
+                        f"🔗 <code>{link}</code>",
+                        f"⚠️ {api_err_msg}",
+                        "➡️ នឹង auto-submit ពេល panel មាន balance",
+                    ]))
+                except Exception as _e:
+                    logger.debug(f"[silent] {_e}")
+                return
             add_bal(uid, price)
-            bot.send_message(uid,
-                f"❌ <b>Order មិនជោគជ័យ!</b>\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"📊 {s.get('label',slug)}\n"
-                f"⚠️ មូលហេតុ: <i>{api_err_msg}</i>\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"💰 លុយត្រូវបានសងវិញ: <b>${price:.2f}</b>\n"
-                f"💳 Balance: <b>${bal(uid):.2f}</b>\n"
-                f"សូមព្យាយាមម្ដងទៀត ឬទាក់ទង Admin។",
-                parse_mode="HTML", reply_markup=main_kb(uid))
-            try: onotify(
-                f"⚠️ <b>SMM Order បរាជ័យ (Auto-Refunded)</b>\n"
-                f"👤 {_user_display(uid_str)}\n"
-                f"📊 {s.get('label',slug)} | {qty:,} | ${price:.4f}\n"
-                f"🔗 <code>{link}</code>\n"
-                f"⚠️ {api_err_msg}")
-            except Exception as _e: logger.debug(f"[silent] {_e}")
+            bot.send_message(
+                uid,
+                "\n".join([
+                    "❌ <b>Order មិនជោគជ័យ!</b>",
+                    "━━━━━━━━━━━━━━━━━━",
+                    f"📊 {s.get('label', slug)}",
+                    f"⚠️ មូលហេតុ: <i>{api_err_msg}</i>",
+                    "━━━━━━━━━━━━━━━━━━",
+                    f"💰 លុយត្រូវបានសងវិញ: <b>${price:.2f}</b>",
+                    f"💳 Balance: <b>${bal(uid):.2f}</b>",
+                    "សូមព្យាយាមម្ដងទៀត ឬទាក់ទង Admin។",
+                ]),
+                parse_mode="HTML",
+                reply_markup=main_kb(uid),
+            )
+            try:
+                onotify("\n".join([
+                    "⚠️ <b>SMM Order បរាជ័យ (Auto-Refunded)</b>",
+                    f"👤 {_user_display(uid_str)}",
+                    f"📊 {s.get('label', slug)} | {qty:,} | ${price:.4f}",
+                    f"🔗 <code>{link}</code>",
+                    f"⚠️ {api_err_msg}",
+                ]))
+            except Exception as _e:
+                logger.debug(f"[silent] {_e}")
             return
         api_oid = str(res.get("order","")) if res else ""
         oid = _make_order_id()
