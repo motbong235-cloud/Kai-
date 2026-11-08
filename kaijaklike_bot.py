@@ -488,6 +488,7 @@ SUPPORT_CFG_FILE= _dpath("smm_support.json")
 CAMRAPID_CFG_FILE= _dpath("smm_camrapid.json")
 ABA_CFG_FILE    = _dpath("smm_aba.json")
 KHPAY_CFG_FILE  = _dpath("smm_khpay.json")
+RIELPAY_CFG_FILE = _dpath("smm_rielpay.json")
 WEBHOOK_CFG_FILE = _dpath("smm_webhook.json")
 PAYTOGGLE_CFG_FILE = _dpath("smm_paytoggle.json")   # បិទ/បើក វិធីទូទាត់ម្តងៗ (v13)
 EMOJI_FILE      = _mdpath("smm_emoji.json")   # ចែក share រួមគ្នារវាង bot ដើម និង clone ទាំងអស់ (មិនញែកតាម DATA_DIR ទេ)
@@ -1273,8 +1274,9 @@ support_cfg  = _load(SUPPORT_CFG_FILE, {"kh": "", "en": ""})   # custom support 
 camrapid_cfg = _load(CAMRAPID_CFG_FILE, {"key": ""})            # live-editable API key
 aba_cfg      = _load(ABA_CFG_FILE, {"key": "", "merchant_id": ""})  # live-editable ABA PayWay (KHMER SYSTEM) key/merchant
 khpay_cfg    = _load(KHPAY_CFG_FILE, {"key": "", "merchant_id": ""})
+rielpay_cfg  = _load(RIELPAY_CFG_FILE, {"key": ""})
 webhook_cfg  = _load(WEBHOOK_CFG_FILE, {"url": ""})              # live-editable CamRapidPay webhook URL
-paytoggle_cfg= _load(PAYTOGGLE_CFG_FILE, {"camrapid_enabled": False, "aba_enabled": True, "khpay_enabled": True})  # បិទ/បើក វិធីទូទាត់ (v13)
+paytoggle_cfg= _load(PAYTOGGLE_CFG_FILE, {"camrapid_enabled": False, "aba_enabled": True, "khpay_enabled": True, "rielpay_enabled": True})  # បិទ/បើក វិធីទូទាត់ (v13)
 paytoggle_cfg["camrapid_enabled"] = False  # hard-disable CamRapidPay
 
 
@@ -1283,6 +1285,9 @@ def _sync_payment_keys_from_env():
     changed = False
     if KHPAY_API_KEY and not (khpay_cfg.get("key") or "").strip():
         khpay_cfg["key"] = KHPAY_API_KEY
+        changed = True
+    if RIELPAY_API_KEY and not (rielpay_cfg.get("key") or "").strip():
+        rielpay_cfg["key"] = RIELPAY_API_KEY
         changed = True
     if KHPAY_MERCHANT_ID and not (khpay_cfg.get("merchant_id") or "").strip():
         khpay_cfg["merchant_id"] = KHPAY_MERCHANT_ID
@@ -1315,6 +1320,8 @@ def _sync_payment_keys_from_env():
         try:
             if khpay_cfg.get("key"):
                 _save(KHPAY_CFG_FILE, khpay_cfg)
+            if rielpay_cfg.get("key"):
+                _save(RIELPAY_CFG_FILE, rielpay_cfg)
             if camrapid_cfg.get("key"):
                 _save(CAMRAPID_CFG_FILE, camrapid_cfg)
             if aba_cfg.get("key"):
@@ -1352,12 +1359,13 @@ def _effective_khpay_merchant():
     """Optional KHPAY merchant_id (mch_...) — omit = default merchant in account"""
     return (khpay_cfg.get("merchant_id") or KHPAY_MERCHANT_ID or "").strip()
 
+def _effective_rielpay_key():
+    """Runtime RielPay key: bot admin setting first, then env."""
+    return (rielpay_cfg.get("key") or RIELPAY_API_KEY or "").strip()
+
 def has_rielpay():
     """True if RielPay API key is configured (rielpays.com)."""
-    return bool((RIELPAY_API_KEY or "").strip())
-
-def _effective_rielpay_key():
-    return (RIELPAY_API_KEY or "").strip()
+    return bool(_effective_rielpay_key())
 
 def has_khpay():
     return bool(_effective_khpay_key())
@@ -1401,7 +1409,7 @@ def _log_payment_startup():
 
 
 
-PAY_METHOD_LABELS = {"aba": "💳 ABA PayWay", "khpay": "💠 KHPAY", "rielpay": "💳 ABA PayWay"}  # rielpay backend, ABA name for users
+PAY_METHOD_LABELS = {"aba": "💳 ABA PayWay (KS)", "khpay": "💠 KHPAY", "rielpay": "💳 ABA PayWay"}  # rielpay = user-facing ABA
 
 def is_pay_method_enabled(method):
     """True បើ admin មិនទាន់បិទវិធីទូទាត់នេះទេ។
@@ -1421,6 +1429,8 @@ def _paytoggle_status_lines():
             configured = bool(_effective_camrapid_key())
         elif method == "aba":
             configured = has_aba_payway()
+        elif method == "rielpay":
+            configured = has_rielpay()
         else:
             configured = has_khpay()
         on = is_pay_method_enabled(method)
@@ -6046,6 +6056,37 @@ def cb_dep_method(call):
         return
     _process_deposit(uid, uid_str, pending["amount"], pending.get("promo_code"), method=method)
 
+
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("set_rielpay:"))
+def cb_set_rielpay(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID:
+        bot.answer_callback_query(call.id, "🚫"); return
+    action = call.data.split(":", 1)[1]
+    if action == "clear":
+        rielpay_cfg["key"] = ""
+        _save(RIELPAY_CFG_FILE, rielpay_cfg)
+        bot.answer_callback_query(call.id, "✅ លុប Key ហើយ")
+        try:
+            bot.edit_message_text(
+                "💳 <b>RielPay</b>\nKey ត្រូវបានលុប។ បើ env មាន RIELPAY_API_KEY នឹងប្រើជំនួស។",
+                uid, call.message.message_id, parse_mode="HTML",
+            )
+        except Exception:
+            bot.send_message(uid, "✅ RielPay Key លុបហើយ", reply_markup=admin_settings_kb())
+        return
+    if action == "edit":
+        waiting[uid] = {"step": "set_rielpay_key"}
+        bot.answer_callback_query(call.id)
+        bot.send_message(
+            uid,
+            "🔑 <b>ផ្ញើ RielPay API Key</b>\n"
+            "ឧ. <code>sk_live_...</code> ឬ <code>sk_test_...</code>\n"
+            "➖ ផ្ញើ <code>-</code> ដើម្បីលុប",
+            parse_mode="HTML",
+        )
+        return
+
 @bot.callback_query_handler(func=lambda c: c.data.startswith("paytoggle:"))
 def cb_paytoggle(call):
     """បិទ/បើក វិធីទូទាត់ (CamRapidPay / ABA PayWay) ពី Admin Panel — v13"""
@@ -6189,8 +6230,9 @@ def admin_settings_kb():
                KeyboardButton("👥 Sub Admins", color="progress"))
     kb.row(KeyboardButton("💳 ABA PayWay Key", color="progress"),
            KeyboardButton("💠 KHPAY Key", color="progress"))
-    kb.row(KeyboardButton("🔀 វិធីទូទាត់", color="progress"),
-           KeyboardButton("⏳ QR Cooldown", color="progress"))
+    kb.row(KeyboardButton("🔑 RielPay API (ABA)", color="progress"),
+           KeyboardButton("🔀 វិធីទូទាត់", color="progress"))
+    kb.row(KeyboardButton("⏳ QR Cooldown", color="progress"))
     if IS_MASTER:
         kb.row(KeyboardButton("📢 Force Subscribe", color="progress"))
         kb.row(KeyboardButton("🤖 Setup Order Bot", color="progress"),
@@ -11453,7 +11495,26 @@ def handle_msg(message):
                 f"💡 អាចប្រើ ABA + KHPAY ព្រមគ្នា — User ជ្រើសរើសពេលដាក់លុយ។",
                 parse_mode="HTML", reply_markup=kb2); return
 
-        if text == "💠 KHPAY Key":
+        
+        if text == "🔑 RielPay API (ABA)":
+            if uid != ADMIN_ID:
+                bot.send_message(uid, "🚫 Master Admin only!", reply_markup=sub_admin_kb()); return
+            cur = _effective_rielpay_key()
+            masked = (cur[:8] + "..." + cur[-4:]) if len(cur) > 12 else (("*" * len(cur)) if cur else "(មិនទាន់កំណត់)")
+            kb2 = InlineKeyboardMarkup()
+            kb2.add(InlineKeyboardButton("✏️ បំពេញ / ប្តូរ API Key", callback_data="set_rielpay:edit", color="progress"))
+            kb2.add(InlineKeyboardButton("🗑 លុប Key", callback_data="set_rielpay:clear", color="danger"))
+            bot.send_message(uid,
+                "💳 <b>RielPay → បង្ហាញជា ABA PayWay</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                f"🔑 Key: <code>{masked}</code>\n"
+                f"🌐 API: <code>rielpays.com</code>\n\n"
+                "📌 យក key ពី Dashboard → Stores → API keys (<code>sk_...</code>)\n"
+                "🔀 បើក/បិទ នៅ «វិធីទូទាត់»\n"
+                "➖ ផ្ញើ <code>-</code> ដើម្បីលុប key",
+                parse_mode="HTML", reply_markup=kb2); return
+
+if text == "💠 KHPAY Key":
             if uid != ADMIN_ID:
                 bot.send_message(uid, "🚫 Admin only!", reply_markup=sub_admin_kb()); return
             cur = _effective_khpay_key()
@@ -11571,7 +11632,32 @@ def handle_msg(message):
                                  parse_mode="HTML", reply_markup=admin_kb())
             return
 
-        if step == "set_aba_key":
+        
+        if step == "set_rielpay_key":
+            waiting.pop(uid, None)
+            if text.strip() == "-":
+                rielpay_cfg["key"] = ""
+                _save(RIELPAY_CFG_FILE, rielpay_cfg)
+                bot.send_message(uid, "✅ RielPay Key លុបហើយ!", reply_markup=admin_settings_kb())
+            else:
+                k = text.strip()
+                if len(k) < 8:
+                    bot.send_message(uid, "❌ Key ខ្លីពេក!", reply_markup=admin_settings_kb()); return
+                rielpay_cfg["key"] = k
+                _save(RIELPAY_CFG_FILE, rielpay_cfg)
+                masked = k[:8] + "..." + k[-4:] if len(k) > 12 else ("*" * len(k))
+                bot.send_message(
+                    uid,
+                    f"✅ <b>RielPay API Key រក្សាទុក!</b>\n"
+                    f"🔑 <code>{masked}</code>\n"
+                    f"User ឃើញឈ្មោះ <b>ABA PayWay</b> + ប៊ូតុង OPEN ABA Mobile\n"
+                    f"បើកវិធីនៅ «🔀 វិធីទូទាត់» បើនៅបិទ",
+                    parse_mode="HTML",
+                    reply_markup=admin_settings_kb(),
+                )
+            return
+
+if step == "set_aba_key":
             waiting.pop(uid, None)
             if text.strip() == "-":
                 aba_cfg["key"] = ""
