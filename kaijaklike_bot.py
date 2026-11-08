@@ -11514,7 +11514,7 @@ def handle_msg(message):
                 "➖ ផ្ញើ <code>-</code> ដើម្បីលុប key",
                 parse_mode="HTML", reply_markup=kb2); return
 
-if text == "💠 KHPAY Key":
+        if text == "💠 KHPAY Key":
             if uid != ADMIN_ID:
                 bot.send_message(uid, "🚫 Admin only!", reply_markup=sub_admin_kb()); return
             cur = _effective_khpay_key()
@@ -11657,7 +11657,7 @@ if text == "💠 KHPAY Key":
                 )
             return
 
-if step == "set_aba_key":
+        if step == "set_aba_key":
             waiting.pop(uid, None)
             if text.strip() == "-":
                 aba_cfg["key"] = ""
