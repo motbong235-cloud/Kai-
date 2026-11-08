@@ -4165,379 +4165,221 @@ def _user_display(uid_str):
         return " ".join(parts) + f" (<code>{uid_str}</code>)"
     return f"<code>{uid_str}</code>"
 
+
 # ═══════════════════════════════════════════════════════════
-#  KHQR CARD GENERATOR
+#  KHQR CARD GENERATOR — from shopbot/khqr_card.py (ABA style)
 # ═══════════════════════════════════════════════════════════
-_CARD_NAVY      = (5, 59, 47)       # deep emerald (header / headline text)
-_CARD_NAVY2     = (3, 33, 30)       # deeper teal (header gradient bottom)
-_CARD_RED       = (217, 45, 32)
-_CARD_WHITE     = (255, 255, 255)
-_CARD_SUBTITLE  = (170, 221, 199)   # mint (header subtitle)
-_CARD_GRAY      = (100, 116, 109)
-_CARD_MUTED     = (145, 152, 148)
-_CARD_BORDER    = (224, 231, 227)
-_CARD_GOLD      = (201, 162, 39)
-_CARD_VIOLET    = (6, 95, 70)       # emerald accent (panel border / pill outline)
-_CARD_PANEL     = (247, 250, 249)
-_CARD_CHIP_BG   = (234, 250, 244)   # pale mint chip background
+"""Render a KHQR payment card as a PNG: red KHQR header, shop name, amount,
+QR code with a currency icon in the middle, and a short "scan with" note.
 
-_FONT_REG = [
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/system/fonts/Roboto-Regular.ttf",
-    "/data/data/com.termux/files/usr/share/fonts/DejaVuSans.ttf",
-]
-_FONT_BOLD = [
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    "/system/fonts/Roboto-Bold.ttf",
-    "/data/data/com.termux/files/usr/share/fonts/DejaVuSans-Bold.ttf",
-]
+    from khqr_card import render_card, png_bytes
+    img = render_card(qr_string, "My Shop", 1.00, "USD")      # PIL image, 750x1100
+    open("pay.png", "wb").write(png_bytes(img))
+
+    python khqr_card.py "<KHQR string>" "My Shop" 1.00 USD pay.png
+
+`qr_string` must be the real KHQR payload given by your payment provider (or
+your own Bakong/KHQR generator). This module only DRAWS it - it never creates
+or changes payment data. The card is deliberately neutral (it says "KHQR", not
+the name of any bank), because the same QR can be paid from any KHQR app.
+
+Needs:  Pillow   (Termux: pkg install python-pillow)
+        segno    (Termux: pip install segno)   - or the 'qrcode' package
+"""
+import io
+import os
+import sys
+
+from PIL import Image, ImageChops, ImageDraw, ImageFont
+
+W, H = 750, 1100
+BG = (246, 247, 251)
+WHITE = (255, 255, 255)
+RED = (222, 27, 33)
+NAVY = (31, 42, 68)
+GREY = (75, 85, 104)
+DASH = (207, 214, 228)
+CARD = (55, 105, 695, 965)      # x0, y0, x1, y1
+HEADER_BOTTOM = 235
+NOTCH = 40                      # the cut corner at the bottom-right of the red header
+RADIUS = 36
+QR_BOX = (146, 436, 604, 894)
+ICON_R = 48                     # outer (white) radius of the centre icon
+SS = 2                          # supersampling for smooth shapes and text
+
+BOLD_FONTS = [os.environ.get("FONT_BOLD", ""),
+              "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+              "/system/fonts/Roboto-Bold.ttf", "/system/fonts/DroidSans-Bold.ttf",
+              "/data/data/com.termux/files/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+              "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf", "DejaVuSans-Bold.ttf"]
+REGULAR_FONTS = [os.environ.get("FONT_REGULAR", ""),
+                 "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                 "/system/fonts/Roboto-Regular.ttf", "/system/fonts/DroidSans.ttf",
+                 "/data/data/com.termux/files/usr/share/fonts/TTF/DejaVuSans.ttf",
+                 "/usr/share/fonts/TTF/DejaVuSans.ttf", "DejaVuSans.ttf"]
+KHMER_FONTS = [os.environ.get("FONT_KHMER", ""),
+               "/system/fonts/NotoSansKhmer-Bold.ttf", "/system/fonts/NotoSansKhmer-Regular.ttf",
+               "/system/fonts/NotoSansKhmer-VF.ttf",
+               "/usr/share/fonts/truetype/noto/NotoSansKhmer-Bold.ttf",
+               "/usr/share/fonts/opentype/noto/NotoSansKhmer-Bold.ttf"]
 
 
-def _admin_format_order(oid, o):
-    """Admin view — any order by ID (no uid restriction)."""
-    import html as _html
-    if not o:
-        return None
-    uid_o = str(o.get("uid") or "")
-    u = users_db.get(uid_o, {})
-    name = _html.escape((u.get("name") or "").strip() or "—")
-    uname = (u.get("username") or "").strip().lstrip("@")
-    uname_disp = f"@{_html.escape(uname)}" if uname else "—"
-    lab = _html.escape(str(o.get("label") or "?"))
-    link = _html.escape(str(o.get("link") or "—"))
-    st = o.get("status") or "?"
+def _font(candidates, size):
+    for path in candidates:
+        if path:
+            try:
+                return ImageFont.truetype(path, size)
+            except OSError:
+                pass
     try:
-        st_label = _ord_status_label(st)
-    except Exception:
-        st_label = st
-    qty = o.get("qty", "?")
+        return ImageFont.load_default(size)      # Pillow >= 10.1
+    except TypeError:
+        return ImageFont.load_default()
+
+
+def qr_matrix(text):
+    """Return the QR as a list of rows of booleans (True = dark), error correction H
+    so the centre icon never stops it from scanning."""
     try:
-        qty_s = f"{int(qty):,}"
-    except Exception:
-        qty_s = str(qty)
-    price = float(o.get("price") or 0)
-    api_oid = o.get("api_order_id") or "—"
-    reason = o.get("reject_reason") or o.get("note") or ""
-    lines = [
-        f"🔍 <b>Order Detail</b>",
-        f"━━━━━━━━━━━━━━━━━━",
-        f"🆔 Order: <code>{_html.escape(str(oid))}</code>",
-        f"📌 Status: <b>{_html.escape(str(st_label))}</b> (<code>{_html.escape(str(st))}</code>)",
-        f"━━━━━━━━━━━━━━━━━━",
-        f"👤 User ID: <code>{_html.escape(uid_o)}</code>",
-        f"🙍 Name: <b>{name}</b>",
-        f"🔗 Username: {uname_disp}",
-        f"━━━━━━━━━━━━━━━━━━",
-        f"📦 {lab}",
-        f"🔢 Qty: <b>{qty_s}</b>",
-        f"💰 Price: <b>${price:.4f}</b>",
-        f"🔗 Link: <code>{link}</code>",
-        f"🆔 API Order: <code>{_html.escape(str(api_oid))}</code>",
-    ]
-    if o.get("refunded"):
-        lines.append(f"💳 Refunded: <b>${float(o.get('refunded') or 0):.4f}</b>")
-    if reason:
-        lines.append(f"📝 Note: {_html.escape(str(reason))}")
-    if o.get("created") or o.get("ts") or o.get("time"):
-        ts = o.get("created") or o.get("ts") or o.get("time")
-        lines.append(f"🕐 <code>{_html.escape(str(ts))}</code>")
-    return "\n".join(lines)
+        import segno
+        return [[bool(c) for c in row] for row in segno.make_qr(text, error="h").matrix]
+    except ImportError:
+        pass
+    try:
+        import qrcode
+        q = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_H, border=0)
+        q.add_data(text)
+        q.make(fit=True)
+        return [[bool(c) for c in row] for row in q.get_matrix()]
+    except ImportError:
+        raise RuntimeError("No QR library installed. Run:  pip install segno")
 
 
-def _admin_format_user(uid_str):
-    """Admin view — user profile + balance + recent orders by Telegram ID."""
-    import html as _html
-    uid_str = str(uid_str).strip()
-    u = users_db.get(uid_str, {})
-    name = _html.escape((u.get("name") or "").strip() or "—")
-    uname = (u.get("username") or "").strip().lstrip("@")
-    uname_disp = f"@{_html.escape(uname)}" if uname else "—"
-    b = bal(uid_str)
-    banned = bool(u.get("banned"))
-    blocked = bool(u.get("blocked"))
-    last = u.get("last") or u.get("last_seen") or "—"
-    # orders for this user
-    u_orders = [(oid, o) for oid, o in smm_orders.items() if str(o.get("uid")) == uid_str]
-    # newest last in dict order — take last 10
-    recent = u_orders[-10:] if u_orders else []
-    lines = [
-        f"👤 <b>User Detail</b>",
-        f"━━━━━━━━━━━━━━━━━━",
-        f"🆔 ID: <code>{_html.escape(uid_str)}</code>",
-        f"🙍 Name: <b>{name}</b>",
-        f"🔗 Username: {uname_disp}",
-        f"💳 Balance: <b>${b:.4f}</b>",
-        f"🚫 Banned: {'✅' if banned else '❌'} | Blocked: {'✅' if blocked else '❌'}",
-        f"🕐 Last: <code>{_html.escape(str(last))}</code>",
-        f"📦 Orders total: <b>{len(u_orders)}</b>",
-        f"━━━━━━━━━━━━━━━━━━",
-    ]
-    if recent:
-        lines.append("<b>Order ចុងក្រោយ:</b>")
-        for oid, o in reversed(recent):
-            st = o.get("status") or "?"
-            lab = _html.escape(str(o.get("label") or "?")[:28])
-            price = float(o.get("price") or 0)
-            lines.append(f"• <code>{_html.escape(str(oid))}</code> | {lab} | ${price:.2f} | <b>{_html.escape(str(st))}</b>")
+def _fit_text(draw, text, max_w, size, min_size=16):
+    """Largest bold font <= size whose text fits max_w px (else truncate with an ellipsis)."""
+    while size >= min_size:
+        f = _font(BOLD_FONTS, size * SS)
+        if draw.textlength(text, font=f) <= max_w * SS:
+            return text, f
+        size -= 2
+    f = _font(BOLD_FONTS, min_size * SS)
+    while len(text) > 1 and draw.textlength(text + "…", font=f) > max_w * SS:
+        text = text[:-1]
+    return text + "…", f
+
+
+def _icon(currency):
+    """Black disc with a white ring and the currency sign ($ or ៛)."""
+    k = 4
+    d = ICON_R * 2
+    patch = Image.new("RGBA", (d * k, d * k), (0, 0, 0, 0))
+    g = ImageDraw.Draw(patch)
+    g.ellipse((0, 0, d * k - 1, d * k - 1), fill=WHITE + (255,))
+    ring = 8 * k
+    g.ellipse((ring, ring, d * k - 1 - ring, d * k - 1 - ring), fill=(0, 0, 0, 255))
+    if currency.upper() == "KHR":
+        font, sign = _font(KHMER_FONTS, 46 * k), "៛"
+        if not any(KHMER_FONTS) or font.getmask(sign).getbbox() is None:
+            font, sign = _font(BOLD_FONTS, 40 * k), "R"
     else:
-        lines.append("<i>គ្មាន order</i>")
-    return "\n".join(lines)
+        font, sign = _font(BOLD_FONTS, 46 * k), "$"
+    g.text((d * k // 2, d * k // 2), sign, font=font, fill=WHITE + (255,), anchor="mm")
+    return patch.resize((d, d), Image.LANCZOS)
 
 
+def render_card(qr_text, merchant, amount, currency="USD", note=None):
+    currency = currency.upper()
+    amount_txt = "{:,.0f}".format(amount) if currency == "KHR" else "%.2f" % amount
+    note = note or "Scan with any mobile banking app supporting KHQR"
 
-def _card_font(size, bold=False):
-    for path in (_FONT_BOLD if bold else _FONT_REG):
-        try:
-            return ImageFont.truetype(path, size)
-        except (OSError, IOError):
-            continue
-    return ImageFont.load_default(size=size)
+    # ---- shapes and text at 2x, then shrink for smooth edges
+    big = Image.new("RGB", (W * SS, H * SS), BG)
+    d = ImageDraw.Draw(big)
+    x0, y0, x1, y1 = CARD
+    card_mask = Image.new("L", big.size, 0)
+    ImageDraw.Draw(card_mask).rounded_rectangle(
+        (x0 * SS, y0 * SS, x1 * SS, y1 * SS), radius=RADIUS * SS, fill=255)
+    big.paste(WHITE, mask=card_mask)
 
-def _tw(draw, text, font):
-    return draw.textbbox((0, 0), text, font=font)[2]
+    head_mask = Image.new("L", big.size, 0)
+    ImageDraw.Draw(head_mask).polygon([
+        (x0 * SS, y0 * SS), (x1 * SS, y0 * SS), (x1 * SS, (HEADER_BOTTOM - NOTCH) * SS),
+        ((x1 - NOTCH) * SS, HEADER_BOTTOM * SS), (x0 * SS, HEADER_BOTTOM * SS)], fill=255)
+    big.paste(RED, mask=ImageChops.multiply(head_mask, card_mask))
 
-def _cx_text(draw, cx, y, text, font, fill):
-    draw.text((cx - _tw(draw, text, font) / 2, y), text, font=font, fill=fill)
+    d.text(((x0 + x1) * SS // 2, 165 * SS), "KHQR", font=_font(BOLD_FONTS, 46 * SS),
+           fill=WHITE, anchor="mm")
 
-def _vgrad(draw, box, top_color, bottom_color):
-    x0, y0, x1, y1 = box
-    h = max(1, y1 - y0)
-    for i in range(h):
-        t = i / h
-        r = int(top_color[0] + (bottom_color[0] - top_color[0]) * t)
-        g = int(top_color[1] + (bottom_color[1] - top_color[1]) * t)
-        b = int(top_color[2] + (bottom_color[2] - top_color[2]) * t)
-        draw.line([(x0, y0 + i), (x1, y0 + i)], fill=(r, g, b))
+    name, f_name = _fit_text(d, merchant, 530, 26)
+    d.text((110 * SS, 280 * SS), name, font=f_name, fill=NAVY, anchor="ls")
 
-def _qr_matrix(data):
-    try:
-        import qrcode as _qrcode
-        qr = _qrcode.QRCode(border=0, error_correction=_qrcode.constants.ERROR_CORRECT_M)
-        qr.add_data(data); qr.make(fit=True)
-        m = qr.get_matrix()
-        return np.array([[0 if c else 255 for c in row] for row in m], dtype=np.uint8)
-    except Exception as e:
-        raise RuntimeError(f"qrcode lib error: {e}")
+    f_amt = _font(BOLD_FONTS, 52 * SS)
+    d.text((110 * SS, 345 * SS), amount_txt, font=f_amt, fill=(17, 24, 39), anchor="ls")
+    amt_w = d.textlength(amount_txt, font=f_amt) / SS
+    d.text(((110 + amt_w + 16) * SS, 345 * SS), currency, font=_font(BOLD_FONTS, 26 * SS),
+           fill=GREY, anchor="ls")
 
-def _qr_img(data, box_px):
-    matrix = _qr_matrix(data)
-    n = matrix.shape[0]
-    mod = max(1, box_px // n)
-    img = Image.new("RGB", (mod * n, mod * n), _CARD_PANEL)
-    draw = ImageDraw.Draw(img)
-    for ry in range(n):
-        for rx in range(n):
-            if matrix[ry, rx] == 0:
-                x0, y0 = rx * mod, ry * mod
-                draw.rectangle([x0, y0, x0 + mod - 1, y0 + mod - 1], fill=_CARD_NAVY)
-    return img.resize((box_px, box_px), Image.LANCZOS)
+    for x in range(90, 652, 18):
+        d.line((x * SS, 385 * SS, min(x + 10, 652) * SS, 385 * SS), fill=DASH, width=3 * SS)
 
-def _pill_box(draw, cx, y, text, font, pad_x, pad_y, fill, outline=None, outline_w=2,
-              text_fill=_CARD_NAVY):
-    """Draw a centered, auto-width rounded pill with text. Returns pill height."""
-    bbox = draw.textbbox((0, 0), text, font=font)
-    tw_, th_ = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    pill_h = th_ + 2 * pad_y
-    pill_w = tw_ + 2 * pad_x
-    box = [cx - pill_w / 2, y, cx + pill_w / 2, y + pill_h]
-    draw.rounded_rectangle(box, radius=pill_h / 2, fill=fill,
-                            outline=outline, width=outline_w if outline else 0)
-    draw.text((cx - tw_ / 2 - bbox[0], y + pad_y - bbox[1]), text, font=font, fill=text_fill)
-    return pill_h
+    f_note = _font(REGULAR_FONTS, 22 * SS)
+    for i, line in enumerate(_wrap(d, note, 560, f_note)):
+        d.text((375 * SS, (999 + 32 * i) * SS), line, font=f_note, fill=GREY, anchor="mm")
+
+    img = big.resize((W, H), Image.LANCZOS)
+
+    # ---- QR fills the whole 458px box, like the reference (nearest-neighbour keeps edges sharp)
+    m = qr_matrix(qr_text)
+    n = len(m)
+    box = QR_BOX[2] - QR_BOX[0]
+    q = Image.new("L", (n, n), 255)
+    q.putdata([0 if dark else 255 for row in m for dark in row])
+    img.paste(q.resize((box, box), Image.NEAREST).convert("RGB"), (QR_BOX[0], QR_BOX[1]))
+
+    img = img.convert("RGBA")
+    cx, cy = (QR_BOX[0] + QR_BOX[2]) // 2, (QR_BOX[1] + QR_BOX[3]) // 2
+    img.alpha_composite(_icon(currency), (cx - ICON_R, cy - ICON_R))
+    return img.convert("RGB")
+
+
+def _wrap(draw, text, max_w, font):
+    """Split text into at most two balanced lines that fit max_w * SS."""
+    if draw.textlength(text, font=font) <= max_w * SS:
+        return [text]
+    words = text.split()
+    best = None
+    for i in range(1, len(words)):
+        a, b = " ".join(words[:i]), " ".join(words[i:])
+        width = max(draw.textlength(a, font=font), draw.textlength(b, font=font))
+        if best is None or width < best[0]:
+            best = (width, [a, b])
+    return best[1] if best else [text]
+
+
+def png_bytes(img):
+    buf = io.BytesIO()
+    img.save(buf, "PNG", optimize=True)
+    return buf.getvalue()
+
 
 def _build_qr_image(qr_string, amount=None, ref=None, label=None, subtitle=None,
                     expires_min=None, width=720):
-    """ABA-style KHQR card (red KHQR ribbon + amount + QR with $ center) → BytesIO PNG."""
-    if expires_min is None:
-        expires_min = max(1, round(DEPOSIT_EXPIRE_SEC / 60))
+    """Render ABA-style KHQR card via shopbot khqr_card.render_card."""
     try:
-        from PIL import Image, ImageDraw, ImageFont, ImageFilter
-        W = max(480, int(width))
-        # Colors matching official ABA KHQR card look
-        RED = (220, 38, 38)          # ribbon
-        RED_DARK = (185, 28, 28)
-        NAVY = (15, 23, 42)
-        MUTED = (100, 116, 139)
-        BG = (248, 250, 252)         # soft page bg
-        CARD = (255, 255, 255)
-        LINE = (203, 213, 225)
-
-        # Layout
-        MARGIN = int(W * 0.06)
-        CARD_W = W - 2 * MARGIN
-        RADIUS = int(W * 0.04)
-        RIBBON_H = int(W * 0.11)
-        PAD = int(W * 0.07)
-        QR_SIZE = int(CARD_W * 0.62)
-        FOOT_H = int(W * 0.12)
-
-        f_khqr = _card_font(int(W * 0.055), bold=True)
-        f_name = _card_font(int(W * 0.038), bold=True)
-        f_amt  = _card_font(int(W * 0.085), bold=True)
-        f_usd  = _card_font(int(W * 0.032), bold=True)
-        f_foot = _card_font(int(W * 0.024))
-        f_small = _card_font(int(W * 0.022))
-
-        # Heights
-        name_h = int(W * 0.055)
-        amt_h = int(W * 0.11)
-        gap = int(W * 0.025)
-        qr_block = QR_SIZE + int(W * 0.04)
-        CARD_H = RIBBON_H + PAD + name_h + amt_h + gap + qr_block + FOOT_H + PAD
-        H = CARD_H + 2 * MARGIN
-
-        img = Image.new("RGB", (W, H), BG)
-        draw = ImageDraw.Draw(img)
-        cx = W // 2
-
-        # Card shadow
-        shadow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-        sd = ImageDraw.Draw(shadow)
-        sd.rounded_rectangle(
-            [MARGIN + 4, MARGIN + 6, MARGIN + CARD_W + 4, MARGIN + CARD_H + 6],
-            radius=RADIUS, fill=(0, 0, 0, 35),
-        )
+        merchant = (label or subtitle or globals().get("STORE_NAME") or "Kai Shop")
         try:
-            shadow = shadow.filter(ImageFilter.GaussianBlur(8))
+            amt = float(amount) if amount is not None else 0.0
         except Exception:
-            pass
-        img = Image.alpha_composite(img.convert("RGBA"), shadow).convert("RGB")
-        draw = ImageDraw.Draw(img)
-
-        # White card
-        card_box = [MARGIN, MARGIN, MARGIN + CARD_W, MARGIN + CARD_H]
-        draw.rounded_rectangle(card_box, radius=RADIUS, fill=CARD)
-
-        # Red ribbon (top) — rounded only on top corners via mask-ish overdraw
-        ribbon = [MARGIN, MARGIN, MARGIN + CARD_W, MARGIN + RIBBON_H]
-        draw.rounded_rectangle(
-            [MARGIN, MARGIN, MARGIN + CARD_W, MARGIN + RIBBON_H + RADIUS],
-            radius=RADIUS, fill=RED,
-        )
-        # Cover bottom of ribbon radius so body stays white
-        draw.rectangle(
-            [MARGIN, MARGIN + RIBBON_H - 2, MARGIN + CARD_W, MARGIN + RIBBON_H + RADIUS + 2],
-            fill=CARD,
-        )
-        draw.rectangle(
-            [MARGIN, MARGIN, MARGIN + CARD_W, MARGIN + RIBBON_H],
-            fill=RED,
-        )
-        # Folded corner accent (right)
-        fold = int(W * 0.06)
-        draw.polygon(
-            [
-                (MARGIN + CARD_W - fold, MARGIN),
-                (MARGIN + CARD_W, MARGIN),
-                (MARGIN + CARD_W, MARGIN + fold),
-            ],
-            fill=RED_DARK,
-        )
-
-        # KHQR title centered in ribbon
-        khqr_txt = "KHQR"
-        tw = draw.textlength(khqr_txt, font=f_khqr) if hasattr(draw, "textlength") else f_khqr.getsize(khqr_txt)[0]
-        draw.text(
-            (cx - tw / 2, MARGIN + (RIBBON_H - f_khqr.size) // 2 - 2),
-            khqr_txt, font=f_khqr, fill=(255, 255, 255),
-        )
-
-        y = MARGIN + RIBBON_H + PAD
-
-        # Merchant / store name
-        store = (label or subtitle or STORE_NAME or "Merchant").strip()
-        if len(store) > 28:
-            store = store[:26] + "…"
-        tw = draw.textlength(store, font=f_name) if hasattr(draw, "textlength") else f_name.getsize(store)[0]
-        draw.text((cx - tw / 2, y), store, font=f_name, fill=NAVY)
-        y += name_h
-
-        # Amount
-        try:
-            amt_val = float(amount) if amount is not None else 0.0
-        except Exception:
-            amt_val = 0.0
-        amt_txt = f"{amt_val:.2f}"
-        usd_txt = "USD"
-        tw_a = draw.textlength(amt_txt, font=f_amt) if hasattr(draw, "textlength") else f_amt.getsize(amt_txt)[0]
-        tw_u = draw.textlength(usd_txt, font=f_usd) if hasattr(draw, "textlength") else f_usd.getsize(usd_txt)[0]
-        gap_u = int(W * 0.015)
-        total_w = tw_a + gap_u + tw_u
-        x0 = cx - total_w / 2
-        draw.text((x0, y), amt_txt, font=f_amt, fill=NAVY)
-        draw.text((x0 + tw_a + gap_u, y + int(f_amt.size * 0.35)), usd_txt, font=f_usd, fill=MUTED)
-        y += amt_h
-
-        # Dashed divider
-        dash_y = y
-        dash_w, dash_g = int(W * 0.02), int(W * 0.015)
-        x = MARGIN + PAD
-        x_end = MARGIN + CARD_W - PAD
-        while x < x_end:
-            draw.line([(x, dash_y), (min(x + dash_w, x_end), dash_y)], fill=LINE, width=2)
-            x += dash_w + dash_g
-        y += gap + int(W * 0.01)
-
-        # QR code
-        import qrcode as _qrcode
-        qr = _qrcode.QRCode(
-            border=1,
-            error_correction=_qrcode.constants.ERROR_CORRECT_H,
-            box_size=10,
-        )
-        qr.add_data(str(qr_string))
-        qr.make(fit=True)
-        qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
-        qr_img = qr_img.resize((QR_SIZE, QR_SIZE), Image.Resampling.NEAREST if hasattr(Image, "Resampling") else Image.NEAREST)
-
-        # $ badge in center
-        badge_r = int(QR_SIZE * 0.11)
-        bx = QR_SIZE // 2
-        by = QR_SIZE // 2
-        qd = ImageDraw.Draw(qr_img)
-        qd.ellipse(
-            [bx - badge_r, by - badge_r, bx + badge_r, by + badge_r],
-            fill=(255, 255, 255),
-            outline=(15, 23, 42),
-            width=max(2, QR_SIZE // 80),
-        )
-        f_dollar = _card_font(int(badge_r * 1.15), bold=True)
-        dol = "$"
-        try:
-            dw = qd.textlength(dol, font=f_dollar)
-        except Exception:
-            dw = f_dollar.getsize(dol)[0]
-        qd.text((bx - dw / 2, by - f_dollar.size / 2 - 1), dol, font=f_dollar, fill=NAVY)
-
-        qx = cx - QR_SIZE // 2
-        img.paste(qr_img, (qx, y))
-        y += QR_SIZE + int(W * 0.035)
-
-        # Footer
-        foot1 = "Scan with ABA Mobile, or other Mobile"
-        foot2 = "Banking App supporting KHQR"
-        for line, font in ((foot1, f_foot), (foot2, f_foot)):
-            try:
-                tw = draw.textlength(line, font=font)
-            except Exception:
-                tw = font.getsize(line)[0]
-            draw.text((cx - tw / 2, y), line, font=font, fill=MUTED)
-            y += int(font.size * 1.35)
-
+            amt = 0.0
+        note = "Scan with ABA Mobile, or other Mobile Banking App supporting KHQR"
         if ref:
-            ref_s = f"Ref: {str(ref)[-16:]}"
-            try:
-                tw = draw.textlength(ref_s, font=f_small)
-            except Exception:
-                tw = f_small.getsize(ref_s)[0]
-            draw.text((cx - tw / 2, y + 4), ref_s, font=f_small, fill=MUTED)
-
+            note = note + f" · Ref {str(ref)[-12:]}"
+        img = render_card(str(qr_string), str(merchant), amt, "USD", note=note)
         buf = io.BytesIO()
         img.save(buf, format="PNG", optimize=True)
         buf.seek(0)
         buf.name = "khqr_card.png"
         return buf
-
     except Exception as e:
         logger.warning(f"[build_qr_image] {e}")
         try:
@@ -4555,8 +4397,7 @@ def _build_qr_image(qr_string, amount=None, ref=None, label=None, subtitle=None,
         except Exception:
             return None
 
-
-build_qr_image = _build_qr_image  # public alias
+build_qr_image = _build_qr_image
 
 # ═══════════════════════════════════════════════════════════
 #  CAMRAPIDPAY — Create KHQR + Check payment
