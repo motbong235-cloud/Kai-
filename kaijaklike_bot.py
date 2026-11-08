@@ -405,6 +405,13 @@ KHPAY_CHECK_URL    = os.getenv("KHPAY_CHECK_URL", f"{KHPAY_BASE_URL}/qr/check")
 KHPAY_EXPIRE_SEC   = int(os.getenv("KHPAY_EXPIRE_SEC", "180"))
 KHPAY_MERCHANT_ID  = os.getenv("KHPAY_MERCHANT_ID", "")  # optional mch_...
 
+# ── RielPay (rielpays.com) — KHQR gateway, money → your ABA account ──
+# Dashboard → Stores → API keys → sk_...
+RIELPAY_API_KEY    = os.getenv("RIELPAY_API_KEY", "")
+RIELPAY_BASE_URL   = os.getenv("RIELPAY_BASE_URL", "https://rielpays.com").rstrip("/")
+RIELPAY_CREATE_URL = os.getenv("RIELPAY_CREATE_URL", f"{RIELPAY_BASE_URL}/v1/payments")
+RIELPAY_TIMEOUT    = int(os.getenv("RIELPAY_TIMEOUT", "35") or 35)
+
 DEPOSIT_EXPIRE_SEC = int(os.getenv("DEPOSIT_EXPIRE_SEC", "600"))  # default 10 min poll window
 POLL_INTERVAL      = 8
 SMM_ORDER_POLL_INTERVAL = 180   # 3 minutes — Poll ស្ថានភាព Order ពី SMM API
@@ -1345,6 +1352,13 @@ def _effective_khpay_merchant():
     """Optional KHPAY merchant_id (mch_...) — omit = default merchant in account"""
     return (khpay_cfg.get("merchant_id") or KHPAY_MERCHANT_ID or "").strip()
 
+def has_rielpay():
+    """True if RielPay API key is configured (rielpays.com)."""
+    return bool((RIELPAY_API_KEY or "").strip())
+
+def _effective_rielpay_key():
+    return (RIELPAY_API_KEY or "").strip()
+
 def has_khpay():
     return bool(_effective_khpay_key())
 
@@ -1367,6 +1381,7 @@ def _log_payment_startup():
                 (bool(_effective_camrapid_key()) and is_pay_method_enabled("camrapid"))
                 or (has_aba_payway() and is_pay_method_enabled("aba"))
                 or (has_khpay() and is_pay_method_enabled("khpay"))
+                or (has_rielpay() and is_pay_method_enabled("rielpay"))
             )
             if not any_ok:
                 try:
@@ -1386,7 +1401,7 @@ def _log_payment_startup():
 
 
 
-PAY_METHOD_LABELS = {"aba": "💳 ABA PayWay", "khpay": "💠 KHPAY"}  # CamRapidPay removed from UI
+PAY_METHOD_LABELS = {"aba": "💳 ABA PayWay", "khpay": "💠 KHPAY", "rielpay": "🏦 RielPay KHQR"}  # CamRapidPay removed from UI
 
 def is_pay_method_enabled(method):
     """True បើ admin មិនទាន់បិទវិធីទូទាត់នេះទេ។
@@ -5062,6 +5077,8 @@ def _watch_deposit(uid, uid_str, dep_id, amount, reference, checker=None, detail
             detail_checker = _aba_check_detail
         elif checker is _khpay_check:
             detail_checker = _khpay_check_detail
+        elif checker is _rielpay_check:
+            detail_checker = None  # bool checker is enough
         elif checker is None or checker is _camrapid_check:
             detail_checker = _camrapid_check_detail
         else:
@@ -5166,6 +5183,10 @@ def _send_deposit_qr(uid, amount, promo_code=None, label="💸 ដាក់ល�
     if method == "aba":
         _send_deposit_qr_aba(uid, amount, promo_code_name=promo_code_name, bonus=bonus,
                               promo_bonus=promo_bonus, auto_bonus=auto_bonus)
+        return
+    if method == "rielpay":
+        _send_deposit_qr_rielpay(uid, amount, promo_code_name=promo_code_name, bonus=bonus,
+                                 promo_bonus=promo_bonus, auto_bonus=auto_bonus)
         return
     if method == "khpay":
         _send_deposit_qr_khpay(uid, amount, promo_code_name=promo_code_name, bonus=bonus,
@@ -5517,6 +5538,226 @@ def _send_deposit_qr_aba(uid, amount, promo_code_name=None, bonus=0.0, promo_bon
     ).start()
 
 
+
+_last_rielpay_error = ""
+
+def _rielpay_create(uid, amount, description="Deposit"):
+    """POST https://rielpays.com/v1/payments — Bearer sk_…"""
+    global _last_rielpay_error
+    key = _effective_rielpay_key()
+    if not key:
+        _last_rielpay_error = "RIELPAY_API_KEY មិនបានកំណត់"
+        return None
+    try:
+        import uuid as _uuid
+        idem = f"kai-{uid}-{int(time.time())}-{_uuid.uuid4().hex[:8]}"
+        r = http.post(
+            RIELPAY_CREATE_URL,
+            json={
+                "amount": round(float(amount), 2),
+                "currency": "USD",
+                "description": str(description)[:120],
+                "metadata": {"uid": str(uid), "source": "kai_bot"},
+            },
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Idempotency-Key": idem,
+                "User-Agent": "KaiBot-RielPay/1.0",
+            },
+            timeout=(10, RIELPAY_TIMEOUT),
+        )
+        try:
+            data = r.json()
+        except Exception:
+            _last_rielpay_error = f"HTTP {r.status_code} non-JSON: {(r.text or '')[:180]}"
+            return None
+        if r.status_code >= 400:
+            _last_rielpay_error = f"HTTP {r.status_code}: {data}"
+            return None
+        # Accept both nested and flat shapes
+        if isinstance(data, dict) and data.get("data") and isinstance(data["data"], dict):
+            data = data["data"]
+        if data.get("id") or data.get("qr_string") or data.get("checkout_url"):
+            return data
+        _last_rielpay_error = f"unexpected response: {data}"
+        return None
+    except Exception as e:
+        _last_rielpay_error = f"{type(e).__name__}: {e}"
+        logger.error(f"[rielpay_create] {e}")
+        return None
+
+
+def _rielpay_check(payment_id) -> bool:
+    """GET /v1/payments/{id} — paid when status == paid."""
+    key = _effective_rielpay_key()
+    if not key or not payment_id:
+        return False
+    try:
+        r = http.get(
+            f"{RIELPAY_BASE_URL}/v1/payments/{payment_id}",
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Accept": "application/json",
+                "User-Agent": "KaiBot-RielPay/1.0",
+            },
+            timeout=15,
+        )
+        data = r.json()
+        if isinstance(data, dict) and data.get("data") and isinstance(data["data"], dict):
+            data = data["data"]
+        st = str(data.get("status") or "").lower()
+        return st in ("paid", "succeeded", "success", "completed")
+    except Exception as e:
+        logger.debug(f"[rielpay_check] {e}")
+        return False
+
+
+def _send_deposit_qr_rielpay(uid, amount, promo_code_name=None, bonus=0.0, promo_bonus=0.0, auto_bonus=0.0):
+    """Create RielPay KHQR and send to user — auto-credit on paid."""
+    uid_str = str(uid)
+    _gen_msg = None
+    try:
+        _gen_msg = bot.send_message(uid, "⏳ <b>កំពុងបង្កើត QR (RielPay)...</b>", parse_mode="HTML")
+    except Exception:
+        pass
+
+    data = _rielpay_create(uid, amount, description=f"Kai deposit uid={uid}")
+    if not data:
+        if _gen_msg:
+            try: bot.delete_message(uid, _gen_msg.message_id)
+            except Exception: pass
+        err = globals().get("_last_rielpay_error") or "unknown"
+        bot.send_message(
+            uid,
+            "⚠️ <b>មិនអាចបង្កើត QR (RielPay) បានទេ</b>\n"
+            f"<code>{_tg_escape(str(err), 200)}</code>\n"
+            "សូមទំនាក់ Admin ឬព្យាយាមម្តងទៀត។",
+            parse_mode="HTML",
+        )
+        try:
+            pnotify(
+                f"⚠️ <b>RielPay QR បរាជ័យ</b>\n👤 <code>{uid_str}</code> — ${amount:.2f}\n"
+                f"🔎 <code>{_tg_escape(str(err), 350)}</code>"
+            )
+        except Exception:
+            pass
+        return
+
+    payment_id = str(data.get("id") or data.get("payment_id") or "")
+    qr_string = data.get("qr_string") or data.get("qr") or data.get("khqr") or ""
+    checkout_url = data.get("checkout_url") or data.get("url") or ""
+    deeplink = data.get("deeplink") or data.get("aba_deeplink") or data.get("abapay_deeplink") or ""
+    qr_image = data.get("qr_image") or data.get("card_image") or data.get("image") or ""
+
+    reference = payment_id or f"RP{uid}_{int(time.time())}"
+    dep_id = f"dep_{uid}_{int(time.time())}"
+    smm_deps[dep_id] = {
+        "uid": uid_str,
+        "amount": amount,
+        "status": "pending",
+        "bonus": bonus,
+        "promo_bonus": promo_bonus,
+        "auto_bonus": auto_bonus,
+        "promo": promo_code_name or "",
+        "reference": reference,
+        "payment_url": checkout_url or "",
+        "method": "rielpay",
+        "created_ts": time.time(),
+    }
+    _save(SMM_DEP_FILE, smm_deps)
+
+    bonus_bits = []
+    if promo_bonus > 0:
+        bonus_bits.append(f"🎟️ Promo Bonus: <b>+${promo_bonus:.2f}</b>")
+    if auto_bonus > 0:
+        bonus_bits.append(f"🎁 Auto Bonus: <b>+${auto_bonus:.2f}</b>")
+    bonus_txt = ("\n" + "\n".join(bonus_bits)) if bonus_bits else ""
+    ref_short = reference[-14:] if len(reference) > 14 else reference
+    caption = (
+        f"🏦 <b>ដាក់លុយ — RielPay KHQR</b>\n━━━━━━━━━━━━━━━━━━\n"
+        f"💰 ចំនួន: <b>${amount:.2f}</b>{bonus_txt}\n"
+        f"🔖 Ref: <code>{ref_short}</code>\n"
+        f"⏱ ផុតកំណត់: ~10 នាទី\n━━━━━━━━━━━━━━━━━━\n"
+        f"📱 ស្កេន QR (ABA · ACLEDA · Wing · Bakong)\n"
+        f"✅ បង់រួច Balance ចូលស្វ័យប្រវត្តិ"
+    )
+
+    kb_pay = InlineKeyboardMarkup()
+    has_btn = False
+    aba_https = None
+    try:
+        if deeplink:
+            aba_https = _aba_mobile_https_link(deeplink) if "_aba_mobile_https_link" in globals() else None
+            if not aba_https and str(deeplink).startswith("http"):
+                aba_https = deeplink
+    except Exception:
+        pass
+    if aba_https:
+        kb_pay.add(InlineKeyboardButton("🏦 OPEN ABA Mobile", url=aba_https, color="active"))
+        has_btn = True
+    if checkout_url and str(checkout_url).startswith("http"):
+        kb_pay.add(InlineKeyboardButton("🌐 Open Checkout", url=checkout_url, color="primary"))
+        has_btn = True
+    if not has_btn:
+        kb_pay = None
+
+    if _gen_msg:
+        try: bot.delete_message(uid, _gen_msg.message_id)
+        except Exception: pass
+
+    photo_sent = False
+    try:
+        if isinstance(qr_image, str) and qr_image.startswith("data:image"):
+            raw = base64.b64decode(qr_image.split(",", 1)[-1])
+            bot.send_photo(uid, raw, caption=caption, parse_mode="HTML", reply_markup=kb_pay)
+            photo_sent = True
+        elif isinstance(qr_image, str) and qr_image.startswith("http"):
+            bot.send_photo(uid, qr_image, caption=caption, parse_mode="HTML", reply_markup=kb_pay)
+            photo_sent = True
+    except Exception as e:
+        logger.warning(f"[rielpay] photo: {e}")
+    if not photo_sent and qr_string:
+        try:
+            if "build_qr_image" in globals() or "_build_qr_image" in globals():
+                fn = globals().get("build_qr_image") or globals().get("_build_qr_image")
+                buf = fn(qr_string, amount=amount, ref=ref_short, label="RielPay")
+                if hasattr(buf, "seek"):
+                    buf.seek(0)
+                bot.send_photo(uid, buf, caption=caption, parse_mode="HTML", reply_markup=kb_pay)
+                photo_sent = True
+            else:
+                import qrcode as _qr
+                img = _qr.make(qr_string)
+                buf = io.BytesIO(); img.save(buf, format="PNG"); buf.seek(0)
+                bot.send_photo(uid, buf, caption=caption, parse_mode="HTML", reply_markup=kb_pay)
+                photo_sent = True
+        except Exception as e:
+            logger.warning(f"[rielpay] local qr: {e}")
+    if not photo_sent:
+        bot.send_message(uid, caption, parse_mode="HTML", reply_markup=kb_pay)
+
+    try:
+        pnotify(
+            f"🆕 <b>RielPay QR</b>\n👤 <code>{uid_str}</code> — ${amount:.2f}\n🔖 <code>{reference}</code>"
+        )
+    except Exception:
+        pass
+
+    # Poll until paid / expired
+    try:
+        import threading as _th
+        _th.Thread(
+            target=_watch_deposit,
+            args=(uid, uid_str, dep_id, amount, reference),
+            kwargs={"checker": _rielpay_check},
+            daemon=True,
+        ).start()
+    except Exception as e:
+        logger.error(f"[rielpay] watch start: {e}")
+
+
 def _send_deposit_qr_khpay(uid, amount, promo_code_name=None, bonus=0.0, promo_bonus=0.0, auto_bonus=0.0):
     """Create payment via KHPAY → QR + ប៊ូតុងបើក ABA Mobile.
     Telegram មិនទទួល abamobilebank:// ជា button URL — ប្រើ HTTPS /open-aba
@@ -5672,24 +5913,31 @@ def _process_deposit(uid, uid_str, amount, promo_code=None, method=None):
     camrapid_ok = False  # CamRapidPay removed
     aba_ok      = has_aba_payway() and is_pay_method_enabled("aba")
     khpay_ok    = has_khpay() and is_pay_method_enabled("khpay")
+    rielpay_ok  = has_rielpay() and is_pay_method_enabled("rielpay")
     # Clone កំណត់ pay_method តែមួយ → ចូលចិត្ត method នោះ ប៉ុន្តែបើមិន ready រក fallback
     _pref = (os.getenv("PAY_METHOD") or "auto").strip().lower()
     if _pref == "khpay":
         if khpay_ok:
-            camrapid_ok = False; aba_ok = False
+            camrapid_ok = False; aba_ok = False; rielpay_ok = False
         else:
             logger.warning("[deposit] PAY_METHOD=khpay but khpay not ready — fallback other methods")
     elif _pref == "aba":
         if aba_ok:
-            camrapid_ok = False; khpay_ok = False
+            camrapid_ok = False; khpay_ok = False; rielpay_ok = False
+    elif _pref == "rielpay":
+        if rielpay_ok:
+            camrapid_ok = False; aba_ok = False; khpay_ok = False
+        else:
+            logger.warning("[deposit] PAY_METHOD=rielpay but not ready — fallback")
     elif _pref in ("auto", "camrapid"):
         if camrapid_ok:
-            aba_ok = False; khpay_ok = False
+            aba_ok = False; khpay_ok = False; rielpay_ok = False
     if method is None:
         available = []
         if camrapid_ok: available.append(("camrapid", "🔄 CamRapidPay KHQR", "active"))
         if aba_ok:      available.append(("aba", "💳 ABA PayWay · Auto QR", "primary"))
         if khpay_ok:    available.append(("khpay", "💠 KHPAY · Auto QR", "progress"))
+        if rielpay_ok:  available.append(("rielpay", "🏦 RielPay · KHQR Auto", "primary"))
         try:
             if manual_qr_cfg.get("enabled") and (manual_qr_cfg.get("photo_id") or manual_qr_cfg.get("photo_path")):
                 available.append(("manual", "🖼 Manual QR · ផ្ញើភស្តុតាង", "progress"))
@@ -5723,6 +5971,8 @@ def _process_deposit(uid, uid_str, amount, promo_code=None, method=None):
                 )
             bot.send_message(uid, tip, parse_mode="HTML", reply_markup=kb)
             return
+        if len(available) == 1:
+            method = available[0][0]
         if not available:
             lang = get_lang(uid)
             _dbg = (
@@ -12312,6 +12562,7 @@ def cmd_pay_debug(message):
         f"CamRapid: {'✅' if cam else '❌'} key | toggle={'ON' if is_pay_method_enabled('camrapid') else 'OFF'}\n"
         f"ABA: {'✅' if aba else '❌'} key | toggle={'ON' if is_pay_method_enabled('aba') else 'OFF'}\n"
         f"KHPAY: {'✅' if khp else '❌'} key | toggle={'ON' if is_pay_method_enabled('khpay') else 'OFF'}\n"
+        f"RielPay: {'✅' if has_rielpay() else '❌'} key | toggle={'ON' if is_pay_method_enabled('rielpay') else 'OFF'}\n"
         f"KHPAY merchant: <code>{_effective_khpay_merchant() or '(default)'}</code>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"DATA_DIR: <code>{os.getenv('DATA_DIR') or '.'}</code>"
