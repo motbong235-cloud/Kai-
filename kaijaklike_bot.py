@@ -4362,11 +4362,44 @@ def png_bytes(img):
     return buf.getvalue()
 
 
+
+_bot_tg_name_cache = None
+
+def _qr_merchant_name(fallback=None):
+    """Shop name on KHQR card — unique per bot instance (clone / master)."""
+    global _bot_tg_name_cache
+    for cand in (
+        (BOT_DISPLAY_NAME or "").strip(),
+        (INSTANCE_NAME or "").strip(),
+        (fallback or "").strip() if fallback else "",
+        (globals().get("STORE_NAME") or "").strip() if globals().get("STORE_NAME") else "",
+    ):
+        if cand:
+            return cand[:40]
+    # Telegram bot first_name / username (once)
+    if not _bot_tg_name_cache:
+        try:
+            me = bot.get_me()
+            _bot_tg_name_cache = (getattr(me, "first_name", None) or getattr(me, "username", None) or "").strip()
+        except Exception:
+            _bot_tg_name_cache = ""
+    if _bot_tg_name_cache:
+        return _bot_tg_name_cache[:40]
+    return "Kai Shop"
+
 def _build_qr_image(qr_string, amount=None, ref=None, label=None, subtitle=None,
                     expires_min=None, width=720):
     """Render ABA-style KHQR card via shopbot khqr_card.render_card."""
     try:
-        merchant = (label or subtitle or globals().get("STORE_NAME") or "Kai Shop")
+        # label/subtitle only if not generic payment method names
+        _skip = {"aba payway", "khpay", "rielpay", "khqr", "aba", "payway"}
+        _lab = (label or "").strip()
+        _sub = (subtitle or "").strip()
+        if _lab.lower() in _skip:
+            _lab = ""
+        if _sub.lower() in _skip:
+            _sub = ""
+        merchant = _qr_merchant_name(fallback=_lab or _sub)
         try:
             amt = float(amount) if amount is not None else 0.0
         except Exception:
@@ -5189,7 +5222,7 @@ def _aba_ensure_qr_image(data, amount):
                 qs, kind = _qr_first(data, ("pay_url", "payment_url", "checkout_url", "url")), "pay-url"
             if qs:
                 ref = str(data.get("payment_id") or data.get("ref") or "")[-12:] or None
-                buf = _build_qr_image(qs, amount=amount, ref=ref, label="ABA PayWay")
+                buf = _build_qr_image(qs, amount=amount, ref=ref, label=None)
                 b = buf.getvalue() if hasattr(buf, "getvalue") else bytes(buf or b"")
                 if _qr_is_image(b):
                     blob, note = b, "generated-from-" + kind
@@ -5632,7 +5665,7 @@ def _send_deposit_qr_rielpay(uid, amount, promo_code_name=None, bonus=0.0, promo
         try:
             fn = globals().get("build_qr_image") or globals().get("_build_qr_image")
             if fn:
-                buf = fn(qr_string, amount=amount, ref=ref_short, label="ABA PayWay")
+                buf = fn(qr_string, amount=amount, ref=ref_short, label=None)
                 if hasattr(buf, "seek"):
                     buf.seek(0)
                 bot.send_photo(uid, buf, caption=caption, parse_mode="HTML", reply_markup=kb_pay)
