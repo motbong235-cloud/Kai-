@@ -4347,154 +4347,195 @@ def _pill_box(draw, cx, y, text, font, pad_x, pad_y, fill, outline=None, outline
 
 def _build_qr_image(qr_string, amount=None, ref=None, label=None, subtitle=None,
                     expires_min=None, width=720):
-    """Generate branded KHQR 'ticket' card → BytesIO (PNG). Falls back to plain QR on error."""
+    """ABA-style KHQR card (red KHQR ribbon + amount + QR with $ center) → BytesIO PNG."""
     if expires_min is None:
         expires_min = max(1, round(DEPOSIT_EXPIRE_SEC / 60))
     try:
-        W = width
-        HEADER_H = int(W * 0.30)
-        SIDE_PAD = int(W * 0.13)
-        QR_BOX   = W - 2 * SIDE_PAD
-        QR_PAD   = int(QR_BOX * 0.09)
-        OVERLAP  = int(W * 0.10)
+        from PIL import Image, ImageDraw, ImageFont, ImageFilter
+        W = max(480, int(width))
+        # Colors matching official ABA KHQR card look
+        RED = (220, 38, 38)          # ribbon
+        RED_DARK = (185, 28, 28)
+        NAVY = (15, 23, 42)
+        MUTED = (100, 116, 139)
+        BG = (248, 250, 252)         # soft page bg
+        CARD = (255, 255, 255)
+        LINE = (203, 213, 225)
 
-        f_title = _card_font(int(W * 0.052), bold=True)
-        f_sub   = _card_font(int(W * 0.026))
-        f_name  = _card_font(int(W * 0.042), bold=True)
-        f_label = _card_font(int(W * 0.024))
-        f_amt   = _card_font(int(W * 0.062), bold=True)
-        f_small = _card_font(int(W * 0.0205))
-        f_badge = _card_font(int(W * 0.0195), bold=True)
+        # Layout
+        MARGIN = int(W * 0.06)
+        CARD_W = W - 2 * MARGIN
+        RADIUS = int(W * 0.04)
+        RIBBON_H = int(W * 0.11)
+        PAD = int(W * 0.07)
+        QR_SIZE = int(CARD_W * 0.62)
+        FOOT_H = int(W * 0.12)
 
-        qr_card_top    = HEADER_H - OVERLAP
-        qr_card_bottom = qr_card_top + QR_BOX
-        content_top    = qr_card_bottom + int(W * 0.05)
+        f_khqr = _card_font(int(W * 0.055), bold=True)
+        f_name = _card_font(int(W * 0.038), bold=True)
+        f_amt  = _card_font(int(W * 0.085), bold=True)
+        f_usd  = _card_font(int(W * 0.032), bold=True)
+        f_foot = _card_font(int(W * 0.024))
+        f_small = _card_font(int(W * 0.022))
 
-        # Row heights (shared between H calc and the draw walk, kept in sync)
-        NAME_ROW  = int(W * 0.065)
-        SUB_ROW   = int(W * 0.045)
-        GAP1      = int(W * 0.020)
-        AMT_H     = int(f_amt.size * 1.55)
-        GAP2      = int(W * 0.030)
-        PERF_ROW  = int(W * 0.045)
-        CHIP_H    = int(f_small.size * 1.9)
-        CHIP_GAP  = int(W * 0.022)
-        EXP_ROW   = int(W * 0.032)
-        FOOT_ROW1 = int(W * 0.030)
-        FOOT_ROW2 = int(W * 0.030)
-        BOTTOM_PAD = int(W * 0.05)
+        # Heights
+        name_h = int(W * 0.055)
+        amt_h = int(W * 0.11)
+        gap = int(W * 0.025)
+        qr_block = QR_SIZE + int(W * 0.04)
+        CARD_H = RIBBON_H + PAD + name_h + amt_h + gap + qr_block + FOOT_H + PAD
+        H = CARD_H + 2 * MARGIN
 
-        H = (content_top + NAME_ROW + SUB_ROW + GAP1 + AMT_H + GAP2 + PERF_ROW
-             + CHIP_H + CHIP_GAP + EXP_ROW + FOOT_ROW1 + FOOT_ROW2 + BOTTOM_PAD)
-
-        img  = Image.new("RGB", (W, H), _CARD_WHITE)
+        img = Image.new("RGB", (W, H), BG)
         draw = ImageDraw.Draw(img)
-        cx   = W // 2
-        pad  = int(W * 0.06)
+        cx = W // 2
 
-        # 1. Gradient header (deep emerald → teal)
-        _vgrad(draw, [0, 0, W, HEADER_H], _CARD_NAVY, _CARD_NAVY2)
+        # Card shadow
+        shadow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        sd = ImageDraw.Draw(shadow)
+        sd.rounded_rectangle(
+            [MARGIN + 4, MARGIN + 6, MARGIN + CARD_W + 4, MARGIN + CARD_H + 6],
+            radius=RADIUS, fill=(0, 0, 0, 35),
+        )
+        try:
+            shadow = shadow.filter(ImageFilter.GaussianBlur(8))
+        except Exception:
+            pass
+        img = Image.alpha_composite(img.convert("RGBA"), shadow).convert("RGB")
+        draw = ImageDraw.Draw(img)
 
-        # Decorative rings — kept fully inside the header so no stray arcs bleed
-        # into the body below (the previous ring's radius overshot HEADER_H)
-        for rr, rw in ((int(W*0.16), 1), (int(W*0.10), 1)):
-            ring_cx, ring_cy = W - int(W * 0.04), int(W * 0.045)
-            draw.ellipse([ring_cx - rr, ring_cy - rr, ring_cx + rr, ring_cy + rr],
-                         outline=(24, 84, 68), width=rw)
+        # White card
+        card_box = [MARGIN, MARGIN, MARGIN + CARD_W, MARGIN + CARD_H]
+        draw.rounded_rectangle(card_box, radius=RADIUS, fill=CARD)
 
-        draw.text((pad, int(W * 0.045)), "KHQR", font=f_title, fill=_CARD_WHITE)
-        draw.text((pad, int(W * 0.045) + f_title.size + int(W * 0.010)),
-                  "Cambodian QR Payment · KHQR", font=f_sub, fill=_CARD_SUBTITLE)
-        rule_y = int(W * 0.045) + f_title.size + int(W * 0.010) + f_sub.size + int(W * 0.018)
-        draw.line([(pad, rule_y), (pad + int(W * 0.14), rule_y)], fill=_CARD_GOLD, width=2)
-
-        # Gold "verified" badge
-        badge_txt = "✓ VERIFIED"
-        bw = _tw(draw, badge_txt, f_badge)
-        bpad_x, bpad_y = int(W * 0.020), int(W * 0.011)
-        bx1 = W - pad
-        bx0 = bx1 - bw - bpad_x * 2
-        by0 = int(W * 0.045)
-        by1 = by0 + f_badge.size + bpad_y * 2
-        shadow_d = max(2, int(W * 0.006))
-        draw.rounded_rectangle([bx0+shadow_d, by0+shadow_d, bx1+shadow_d, by1+shadow_d],
-                                radius=(by1 - by0) // 2, fill=(2, 20, 16))
-        draw.rounded_rectangle([bx0, by0, bx1, by1], radius=(by1 - by0) // 2, fill=_CARD_GOLD)
-        draw.text((bx0 + bpad_x, by0 + bpad_y - int(W * 0.003)), badge_txt, font=f_badge, fill=_CARD_NAVY)
-
-        # 2. Floating QR panel — thin gold border + emerald corner dots (instead of brackets)
-        r = int(W * 0.045)
-        panel_box = [SIDE_PAD, qr_card_top, SIDE_PAD + QR_BOX, qr_card_bottom]
-        shadow_off = int(W * 0.012)
+        # Red ribbon (top) — rounded only on top corners via mask-ish overdraw
+        ribbon = [MARGIN, MARGIN, MARGIN + CARD_W, MARGIN + RIBBON_H]
         draw.rounded_rectangle(
-            [panel_box[0] + shadow_off, panel_box[1] + shadow_off,
-             panel_box[2] + shadow_off, panel_box[3] + shadow_off],
-            radius=r, fill=(222, 230, 226))
-        draw.rounded_rectangle(panel_box, radius=r, fill=_CARD_WHITE,
-                                outline=_CARD_GOLD, width=3)
+            [MARGIN, MARGIN, MARGIN + CARD_W, MARGIN + RIBBON_H + RADIUS],
+            radius=RADIUS, fill=RED,
+        )
+        # Cover bottom of ribbon radius so body stays white
+        draw.rectangle(
+            [MARGIN, MARGIN + RIBBON_H - 2, MARGIN + CARD_W, MARGIN + RIBBON_H + RADIUS + 2],
+            fill=CARD,
+        )
+        draw.rectangle(
+            [MARGIN, MARGIN, MARGIN + CARD_W, MARGIN + RIBBON_H],
+            fill=RED,
+        )
+        # Folded corner accent (right)
+        fold = int(W * 0.06)
+        draw.polygon(
+            [
+                (MARGIN + CARD_W - fold, MARGIN),
+                (MARGIN + CARD_W, MARGIN),
+                (MARGIN + CARD_W, MARGIN + fold),
+            ],
+            fill=RED_DARK,
+        )
 
-        qr_px  = QR_BOX - 2 * QR_PAD
-        qr_pil = _qr_img(qr_string, qr_px)
-        img.paste(qr_pil, (SIDE_PAD + QR_PAD, qr_card_top + QR_PAD))
+        # KHQR title centered in ribbon
+        khqr_txt = "KHQR"
+        tw = draw.textlength(khqr_txt, font=f_khqr) if hasattr(draw, "textlength") else f_khqr.getsize(khqr_txt)[0]
+        draw.text(
+            (cx - tw / 2, MARGIN + (RIBBON_H - f_khqr.size) // 2 - 2),
+            khqr_txt, font=f_khqr, fill=(255, 255, 255),
+        )
 
-        # Small emerald corner dots — pushed fully past the rounded-corner arc
-        # (r) so they render as clean circles instead of being clipped by it
-        dot_r = max(3, int(W * 0.007))
-        do = r + int(W * 0.012)
-        x0, y0, x1, y1 = panel_box
-        for dx, dy in [(x0+do, y0+do), (x1-do, y0+do), (x0+do, y1-do), (x1-do, y1-do)]:
-            draw.ellipse([dx-dot_r, dy-dot_r, dx+dot_r, dy+dot_r], fill=_CARD_VIOLET)
+        y = MARGIN + RIBBON_H + PAD
 
-        # 3. Store name + subtitle
-        y = content_top
-        _cx_text(draw, cx, y, label or _bot_brand(), f_name, _CARD_NAVY)
-        y += NAME_ROW
-        _cx_text(draw, cx, y, subtitle or "SMM Panel Deposit", f_label, _CARD_GRAY)
-        y += SUB_ROW + GAP1
+        # Merchant / store name
+        store = (label or subtitle or STORE_NAME or "Merchant").strip()
+        if len(store) > 28:
+            store = store[:26] + "…"
+        tw = draw.textlength(store, font=f_name) if hasattr(draw, "textlength") else f_name.getsize(store)[0]
+        draw.text((cx - tw / 2, y), store, font=f_name, fill=NAVY)
+        y += name_h
 
-        # 4. Amount — gold-bordered floating pill (not a full-width banner)
-        if amount is not None:
-            amt_str = f"${float(amount):.2f}"
-            pad_x = int(W * 0.045)
-            pad_y = (AMT_H - f_amt.size) // 2
-            _pill_box(draw, cx, y, amt_str, f_amt, pad_x, pad_y,
-                      fill=_CARD_CHIP_BG, outline=_CARD_GOLD, outline_w=3,
-                      text_fill=_CARD_NAVY)
-        y += AMT_H + GAP2
+        # Amount
+        try:
+            amt_val = float(amount) if amount is not None else 0.0
+        except Exception:
+            amt_val = 0.0
+        amt_txt = f"{amt_val:.2f}"
+        usd_txt = "USD"
+        tw_a = draw.textlength(amt_txt, font=f_amt) if hasattr(draw, "textlength") else f_amt.getsize(amt_txt)[0]
+        tw_u = draw.textlength(usd_txt, font=f_usd) if hasattr(draw, "textlength") else f_usd.getsize(usd_txt)[0]
+        gap_u = int(W * 0.015)
+        total_w = tw_a + gap_u + tw_u
+        x0 = cx - total_w / 2
+        draw.text((x0, y), amt_txt, font=f_amt, fill=NAVY)
+        draw.text((x0 + tw_a + gap_u, y + int(f_amt.size * 0.35)), usd_txt, font=f_usd, fill=MUTED)
+        y += amt_h
 
-        # 5. Ticket perforation — dashed tear line with two gold end-dots
-        perf_y = y + PERF_ROW // 2
-        dash_w, dash_gap = int(W * 0.018), int(W * 0.012)
-        dx = pad + int(W * 0.03)
-        while dx < W - pad - int(W * 0.03):
-            draw.line([(dx, perf_y), (min(dx + dash_w, W - pad - int(W*0.03)), perf_y)],
-                      fill=_CARD_BORDER, width=2)
-            dx += dash_w + dash_gap
-        end_r = max(3, int(W * 0.008))
-        draw.ellipse([pad-end_r, perf_y-end_r, pad+end_r, perf_y+end_r], fill=_CARD_GOLD)
-        draw.ellipse([W-pad-end_r, perf_y-end_r, W-pad+end_r, perf_y+end_r], fill=_CARD_GOLD)
-        y += PERF_ROW
+        # Dashed divider
+        dash_y = y
+        dash_w, dash_g = int(W * 0.02), int(W * 0.015)
+        x = MARGIN + PAD
+        x_end = MARGIN + CARD_W - PAD
+        while x < x_end:
+            draw.line([(x, dash_y), (min(x + dash_w, x_end), dash_y)], fill=LINE, width=2)
+            x += dash_w + dash_g
+        y += gap + int(W * 0.01)
 
-        # 6. Ref chip
+        # QR code
+        import qrcode as _qrcode
+        qr = _qrcode.QRCode(
+            border=1,
+            error_correction=_qrcode.constants.ERROR_CORRECT_H,
+            box_size=10,
+        )
+        qr.add_data(str(qr_string))
+        qr.make(fit=True)
+        qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+        qr_img = qr_img.resize((QR_SIZE, QR_SIZE), Image.Resampling.NEAREST if hasattr(Image, "Resampling") else Image.NEAREST)
+
+        # $ badge in center
+        badge_r = int(QR_SIZE * 0.11)
+        bx = QR_SIZE // 2
+        by = QR_SIZE // 2
+        qd = ImageDraw.Draw(qr_img)
+        qd.ellipse(
+            [bx - badge_r, by - badge_r, bx + badge_r, by + badge_r],
+            fill=(255, 255, 255),
+            outline=(15, 23, 42),
+            width=max(2, QR_SIZE // 80),
+        )
+        f_dollar = _card_font(int(badge_r * 1.15), bold=True)
+        dol = "$"
+        try:
+            dw = qd.textlength(dol, font=f_dollar)
+        except Exception:
+            dw = f_dollar.getsize(dol)[0]
+        qd.text((bx - dw / 2, by - f_dollar.size / 2 - 1), dol, font=f_dollar, fill=NAVY)
+
+        qx = cx - QR_SIZE // 2
+        img.paste(qr_img, (qx, y))
+        y += QR_SIZE + int(W * 0.035)
+
+        # Footer
+        foot1 = "Scan with ABA Mobile, or other Mobile"
+        foot2 = "Banking App supporting KHQR"
+        for line, font in ((foot1, f_foot), (foot2, f_foot)):
+            try:
+                tw = draw.textlength(line, font=font)
+            except Exception:
+                tw = font.getsize(line)[0]
+            draw.text((cx - tw / 2, y), line, font=font, fill=MUTED)
+            y += int(font.size * 1.35)
+
         if ref:
-            _pill_box(draw, cx, y, f"Ref: {ref}", f_small,
-                      int(W * 0.03), int(f_small.size * 0.45),
-                      fill=_CARD_CHIP_BG, text_fill=_CARD_GRAY)
-        y += CHIP_H + CHIP_GAP
-
-        # 7. Expiry (red, plain — draws the eye without another box)
-        if expires_min:
-            _cx_text(draw, cx, y, f"Expires in {expires_min} minutes", f_small, _CARD_RED)
-        y += EXP_ROW
-
-        # 8. Footer
-        _cx_text(draw, cx, y, "Scan with any banking app (KHQR)", f_small, _CARD_MUTED)
-        y += FOOT_ROW1
-        _cx_text(draw, cx, y, "ABA · ACLEDA · Wing", f_small, _CARD_MUTED)
+            ref_s = f"Ref: {str(ref)[-16:]}"
+            try:
+                tw = draw.textlength(ref_s, font=f_small)
+            except Exception:
+                tw = f_small.getsize(ref_s)[0]
+            draw.text((cx - tw / 2, y + 4), ref_s, font=f_small, fill=MUTED)
 
         buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        buf.seek(0); buf.name = "khqr_card.png"
+        img.save(buf, format="PNG", optimize=True)
+        buf.seek(0)
+        buf.name = "khqr_card.png"
         return buf
 
     except Exception as e:
@@ -4503,13 +4544,19 @@ def _build_qr_image(qr_string, amount=None, ref=None, label=None, subtitle=None,
             import qrcode as _qrc
             qr = _qrc.QRCode(box_size=8, border=2,
                              error_correction=_qrc.constants.ERROR_CORRECT_M)
-            qr.add_data(qr_string); qr.make(fit=True)
-            pil = qr.make_image(fill_color=(5, 59, 47), back_color="white").convert("RGB")
-            buf = io.BytesIO(); pil.save(buf, format="PNG")
-            buf.seek(0); buf.name = "khqr.png"
+            qr.add_data(qr_string)
+            qr.make(fit=True)
+            pil = qr.make_image(fill_color=(15, 23, 42), back_color="white").convert("RGB")
+            buf = io.BytesIO()
+            pil.save(buf, format="PNG")
+            buf.seek(0)
+            buf.name = "khqr.png"
             return buf
-        except:
+        except Exception:
             return None
+
+
+build_qr_image = _build_qr_image  # public alias
 
 # ═══════════════════════════════════════════════════════════
 #  CAMRAPIDPAY — Create KHQR + Check payment
@@ -5742,8 +5789,8 @@ def _send_deposit_qr_rielpay(uid, amount, promo_code_name=None, bonus=0.0, promo
         logger.warning(f"[rielpay] photo: {e}")
     if not photo_sent and qr_string:
         try:
-            if "build_qr_image" in globals() or "_build_qr_image" in globals():
-                fn = globals().get("build_qr_image") or globals().get("_build_qr_image")
+            fn = globals().get("build_qr_image") or globals().get("_build_qr_image")
+            if fn:
                 buf = fn(qr_string, amount=amount, ref=ref_short, label="ABA PayWay")
                 if hasattr(buf, "seek"):
                     buf.seek(0)
