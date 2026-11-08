@@ -1401,7 +1401,7 @@ def _log_payment_startup():
 
 
 
-PAY_METHOD_LABELS = {"aba": "💳 ABA PayWay", "khpay": "💠 KHPAY", "rielpay": "🏦 RielPay KHQR"}  # CamRapidPay removed from UI
+PAY_METHOD_LABELS = {"aba": "💳 ABA PayWay", "khpay": "💠 KHPAY", "rielpay": "💳 ABA PayWay"}  # rielpay backend, ABA name for users
 
 def is_pay_method_enabled(method):
     """True បើ admin មិនទាន់បិទវិធីទូទាត់នេះទេ។
@@ -5619,7 +5619,7 @@ def _send_deposit_qr_rielpay(uid, amount, promo_code_name=None, bonus=0.0, promo
     uid_str = str(uid)
     _gen_msg = None
     try:
-        _gen_msg = bot.send_message(uid, "⏳ <b>កំពុងបង្កើត QR (RielPay)...</b>", parse_mode="HTML")
+        _gen_msg = bot.send_message(uid, "⏳ <b>កំពុងបង្កើត QR (ABA PayWay)...</b>", parse_mode="HTML")
     except Exception:
         pass
 
@@ -5631,14 +5631,14 @@ def _send_deposit_qr_rielpay(uid, amount, promo_code_name=None, bonus=0.0, promo
         err = globals().get("_last_rielpay_error") or "unknown"
         bot.send_message(
             uid,
-            "⚠️ <b>មិនអាចបង្កើត QR (RielPay) បានទេ</b>\n"
+            "⚠️ <b>មិនអាចបង្កើត QR (ABA PayWay) បានទេ</b>\n"
             f"<code>{_tg_escape(str(err), 200)}</code>\n"
             "សូមទំនាក់ Admin ឬព្យាយាមម្តងទៀត។",
             parse_mode="HTML",
         )
         try:
             pnotify(
-                f"⚠️ <b>RielPay QR បរាជ័យ</b>\n👤 <code>{uid_str}</code> — ${amount:.2f}\n"
+                f"⚠️ <b>ABA PayWay QR បរាជ័យ</b>\n👤 <code>{uid_str}</code> — ${amount:.2f}\n"
                 f"🔎 <code>{_tg_escape(str(err), 350)}</code>"
             )
         except Exception:
@@ -5676,11 +5676,11 @@ def _send_deposit_qr_rielpay(uid, amount, promo_code_name=None, bonus=0.0, promo
     bonus_txt = ("\n" + "\n".join(bonus_bits)) if bonus_bits else ""
     ref_short = reference[-14:] if len(reference) > 14 else reference
     caption = (
-        f"🏦 <b>ដាក់លុយ — RielPay KHQR</b>\n━━━━━━━━━━━━━━━━━━\n"
+        f"💳 <b>ដាក់លុយ — ABA PayWay</b>\n━━━━━━━━━━━━━━━━━━\n"
         f"💰 ចំនួន: <b>${amount:.2f}</b>{bonus_txt}\n"
         f"🔖 Ref: <code>{ref_short}</code>\n"
         f"⏱ ផុតកំណត់: ~10 នាទី\n━━━━━━━━━━━━━━━━━━\n"
-        f"📱 ស្កេន QR (ABA · ACLEDA · Wing · Bakong)\n"
+        f"📱 ស្កេន QR ឬចុច «OPEN ABA Mobile»\n"
         f"✅ បង់រួច Balance ចូលស្វ័យប្រវត្តិ"
     )
 
@@ -5688,18 +5688,30 @@ def _send_deposit_qr_rielpay(uid, amount, promo_code_name=None, bonus=0.0, promo
     has_btn = False
     aba_https = None
     try:
-        if deeplink:
-            aba_https = _aba_mobile_https_link(deeplink) if "_aba_mobile_https_link" in globals() else None
-            if not aba_https and str(deeplink).startswith("http"):
-                aba_https = deeplink
-    except Exception:
-        pass
-    if aba_https:
-        kb_pay.add(InlineKeyboardButton("🏦 OPEN ABA Mobile", url=aba_https, color="active"))
+        link_src = deeplink or qr_string or ""
+        if link_src:
+            if "_aba_mobile_https_link" in globals():
+                aba_https = _aba_mobile_https_link(link_src)
+            if not aba_https and str(link_src).startswith("http"):
+                aba_https = str(link_src)
+            if not aba_https and qr_string:
+                from urllib.parse import quote as _q
+                # HTTPS open-aba helper if bot has it, else skip custom scheme (Telegram blocks)
+                try:
+                    aba_https = _aba_mobile_https_link(
+                        f"abamobilebank://ababank.com?type=payway&qrcode={_q(str(qr_string), safe='')}"
+                    )
+                except Exception:
+                    aba_https = None
+    except Exception as e:
+        logger.debug(f"[rielpay] deeplink: {e}")
+    if aba_https and str(aba_https).startswith("http"):
+        try:
+            kb_pay.add(InlineKeyboardButton("🏦 OPEN ABA Mobile", url=aba_https, color="active"))
+        except TypeError:
+            kb_pay.add(InlineKeyboardButton("🏦 OPEN ABA Mobile", url=aba_https))
         has_btn = True
-    if checkout_url and str(checkout_url).startswith("http"):
-        kb_pay.add(InlineKeyboardButton("🌐 Open Checkout", url=checkout_url, color="primary"))
-        has_btn = True
+    # មិនបង្ហាញ checkout សាធារណៈ — ផ្តោត OPEN ABA + ស្កេន QR
     if not has_btn:
         kb_pay = None
 
@@ -5722,7 +5734,7 @@ def _send_deposit_qr_rielpay(uid, amount, promo_code_name=None, bonus=0.0, promo
         try:
             if "build_qr_image" in globals() or "_build_qr_image" in globals():
                 fn = globals().get("build_qr_image") or globals().get("_build_qr_image")
-                buf = fn(qr_string, amount=amount, ref=ref_short, label="RielPay")
+                buf = fn(qr_string, amount=amount, ref=ref_short, label="ABA PayWay")
                 if hasattr(buf, "seek"):
                     buf.seek(0)
                 bot.send_photo(uid, buf, caption=caption, parse_mode="HTML", reply_markup=kb_pay)
@@ -5740,7 +5752,7 @@ def _send_deposit_qr_rielpay(uid, amount, promo_code_name=None, bonus=0.0, promo
 
     try:
         pnotify(
-            f"🆕 <b>RielPay QR</b>\n👤 <code>{uid_str}</code> — ${amount:.2f}\n🔖 <code>{reference}</code>"
+            f"🆕 <b>ABA PayWay QR</b>\n👤 <code>{uid_str}</code> — ${amount:.2f}\n🔖 <code>{reference}</code>"
         )
     except Exception:
         pass
@@ -5937,7 +5949,7 @@ def _process_deposit(uid, uid_str, amount, promo_code=None, method=None):
         if camrapid_ok: available.append(("camrapid", "🔄 CamRapidPay KHQR", "active"))
         if aba_ok:      available.append(("aba", "💳 ABA PayWay · Auto QR", "primary"))
         if khpay_ok:    available.append(("khpay", "💠 KHPAY · Auto QR", "progress"))
-        if rielpay_ok:  available.append(("rielpay", "🏦 RielPay · KHQR Auto", "primary"))
+        if rielpay_ok:  available.append(("rielpay", "💳 ABA PayWay · Auto QR", "primary"))
         try:
             if manual_qr_cfg.get("enabled") and (manual_qr_cfg.get("photo_id") or manual_qr_cfg.get("photo_path")):
                 available.append(("manual", "🖼 Manual QR · ផ្ញើភស្តុតាង", "progress"))
