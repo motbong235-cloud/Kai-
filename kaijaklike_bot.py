@@ -28,8 +28,13 @@ from telebot import apihelper as _apihelper
 # ចោលភ្លាមៗពេលកំពុង bot.send_message/send_photo ។ បើក RETRY_ON_ERROR ដើម្បីឲ្យ
 # telebot ខ្លួនឯង retry ស្វ័យប្រវត្តិមុននឹង raise exception ចេញទៅ handler ។
 _apihelper.RETRY_ON_ERROR = True
-_apihelper.CONNECT_TIMEOUT = 15
-_apihelper.READ_TIMEOUT   = 20
+_apihelper.CONNECT_TIMEOUT = 20
+_apihelper.READ_TIMEOUT   = 30
+# Extra retries for Telegram API connection drops (Render ↔ api.telegram.org)
+try:
+    _apihelper.RETRY_ON = True  # some pyTelegramBotAPI versions
+except Exception:
+    pass
 from telebot.types import (
     ReplyKeyboardMarkup, KeyboardButton as _KB_orig,
     InlineKeyboardMarkup, InlineKeyboardButton as _IKB_orig,
@@ -1683,12 +1688,38 @@ def _clone_watchdog():
 
 
 def _make_session():
+    """HTTP session with retries. Connection: close avoids stale keep-alive
+    RemoteDisconnected when khmer-system / Telegram drops the socket."""
     s = http_req.Session()
-    r = Retry(total=3, backoff_factor=2, status_forcelist=[500,502,503,504])
-    a = HTTPAdapter(max_retries=r)
-    s.mount("http://", a); s.mount("https://", a)
+    s.headers.update({
+        "Connection": "close",
+        "User-Agent": "KaijaklikeBot/12 (+render)",
+    })
+    r = Retry(
+        total=4,
+        connect=4,
+        read=3,
+        backoff_factor=1.5,
+        status_forcelist=[408, 425, 429, 500, 502, 503, 504],
+        allowed_methods=frozenset(["GET", "POST", "PUT", "DELETE", "HEAD"]),
+        raise_on_status=False,
+    )
+    a = HTTPAdapter(max_retries=r, pool_connections=10, pool_maxsize=10)
+    s.mount("http://", a)
+    s.mount("https://", a)
     return s
+
 http = _make_session()
+
+def _http_reset():
+    """Recreate session after RemoteDisconnected / Connection aborted."""
+    global http
+    try:
+        http.close()
+    except Exception:
+        pass
+    http = _make_session()
+    return http
 
 # ═══════════════════════════════════════════════════════════
 #  LANGUAGE
@@ -4657,16 +4688,35 @@ def _aba_create(uid, amount, username, _attempt=1):
     except Exception as e:
         _last_aba_error = f"{type(e).__name__}: {e}"
         logger.error(f"[aba_create] exception attempt={_attempt}: {e}")
-        # Retry on timeout / connection errors
+        # Retry on timeout / connection drop (RemoteDisconnected, Connection aborted, …)
+        _ename = type(e).__name__
+        _emsg = str(e).lower()
         _retryable = (
-            "Timeout" in type(e).__name__
-            or "timeout" in str(e).lower()
-            or "Connection" in type(e).__name__
+            "Timeout" in _ename
+            or "timeout" in _emsg
+            or "Connection" in _ename
+            or "RemoteDisconnected" in _ename
+            or "remotedisconnected" in _emsg
+            or "connection aborted" in _emsg
+            or "connection reset" in _emsg
+            or "broken pipe" in _emsg
+            or "protocolerror" in _emsg
+            or "ssl" in _emsg
         )
         if _retryable and _attempt < _max_try:
-            time.sleep(2.0 * _attempt)
+            try:
+                _http_reset()
+            except Exception:
+                pass
+            wait = 2.0 * _attempt
+            logger.warning(f"[aba_create] conn/timeout retry wait={wait:.1f}s attempt={_attempt}")
+            time.sleep(wait)
             return _aba_create(uid, amount, username, _attempt=_attempt + 1)
         if _attempt < _max_try:
+            try:
+                _http_reset()
+            except Exception:
+                pass
             time.sleep(1.5 * _attempt)
             return _aba_create(uid, amount, username, _attempt=_attempt + 1)
         return None
