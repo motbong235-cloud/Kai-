@@ -6047,7 +6047,7 @@ def cb_set_rielpay(call):
             bot.send_message(uid, "✅ RielPay Key លុបហើយ", reply_markup=admin_settings_kb())
         return
     if action == "edit":
-        waiting[uid] = {"step": "set_rielpay_key"}
+        waiting[uid] = "set_rielpay_key"
         bot.answer_callback_query(call.id)
         bot.send_message(
             uid,
@@ -11604,7 +11604,7 @@ def handle_msg(message):
             return
 
         
-        if step == "set_rielpay_key":
+        if step == "set_rielpay_key" or (isinstance(step, dict) and step.get("step") == "set_rielpay_key"):
             waiting.pop(uid, None)
             if text.strip() == "-":
                 rielpay_cfg["key"] = ""
