@@ -3481,6 +3481,98 @@ def _ord_status_label(st):
     return _ORD_STATUS_LABELS.get(str(st or "").lower(), str(st or "?"))
 
 
+def _admin_format_order(oid, o):
+    """Admin view — any order by ID (no uid restriction)."""
+    import html as _html
+    if not o:
+        return None
+    uid_o = str(o.get("uid") or "")
+    u = users_db.get(uid_o, {})
+    name = _html.escape((u.get("name") or "").strip() or "—")
+    uname = (u.get("username") or "").strip().lstrip("@")
+    uname_disp = f"@{_html.escape(uname)}" if uname else "—"
+    lab = _html.escape(str(o.get("label") or "?"))
+    link = _html.escape(str(o.get("link") or "—"))
+    st = o.get("status") or "?"
+    try:
+        st_label = _ord_status_label(st)
+    except Exception:
+        st_label = st
+    qty = o.get("qty", "?")
+    try:
+        qty_s = f"{int(qty):,}"
+    except Exception:
+        qty_s = str(qty)
+    price = float(o.get("price") or 0)
+    api_oid = o.get("api_order_id") or "—"
+    reason = o.get("reject_reason") or o.get("note") or ""
+    lines = [
+        f"🔍 <b>Order Detail</b>",
+        f"━━━━━━━━━━━━━━━━━━",
+        f"🆔 Order: <code>{_html.escape(str(oid))}</code>",
+        f"📌 Status: <b>{_html.escape(str(st_label))}</b> (<code>{_html.escape(str(st))}</code>)",
+        f"━━━━━━━━━━━━━━━━━━",
+        f"👤 User ID: <code>{_html.escape(uid_o)}</code>",
+        f"🙍 Name: <b>{name}</b>",
+        f"🔗 Username: {uname_disp}",
+        f"━━━━━━━━━━━━━━━━━━",
+        f"📦 {lab}",
+        f"🔢 Qty: <b>{qty_s}</b>",
+        f"💰 Price: <b>${price:.4f}</b>",
+        f"🔗 Link: <code>{link}</code>",
+        f"🆔 API Order: <code>{_html.escape(str(api_oid))}</code>",
+    ]
+    if o.get("refunded"):
+        lines.append(f"💳 Refunded: <b>${float(o.get('refunded') or 0):.4f}</b>")
+    if reason:
+        lines.append(f"📝 Note: {_html.escape(str(reason))}")
+    if o.get("created") or o.get("ts") or o.get("time"):
+        ts = o.get("created") or o.get("ts") or o.get("time")
+        lines.append(f"🕐 <code>{_html.escape(str(ts))}</code>")
+    return "\n".join(lines)
+
+
+def _admin_format_user(uid_str):
+    """Admin view — user profile + balance + recent orders by Telegram ID."""
+    import html as _html
+    uid_str = str(uid_str).strip()
+    u = users_db.get(uid_str, {})
+    name = _html.escape((u.get("name") or "").strip() or "—")
+    uname = (u.get("username") or "").strip().lstrip("@")
+    uname_disp = f"@{_html.escape(uname)}" if uname else "—"
+    b = bal(uid_str)
+    banned = bool(u.get("banned"))
+    blocked = bool(u.get("blocked"))
+    last = u.get("last") or u.get("last_seen") or "—"
+    u_orders = [(oid, o) for oid, o in smm_orders.items() if str(o.get("uid")) == uid_str]
+    recent = u_orders[-10:] if u_orders else []
+    lines = [
+        f"👤 <b>User Detail</b>",
+        f"━━━━━━━━━━━━━━━━━━",
+        f"🆔 ID: <code>{_html.escape(uid_str)}</code>",
+        f"🙍 Name: <b>{name}</b>",
+        f"🔗 Username: {uname_disp}",
+        f"💳 Balance: <b>${b:.4f}</b>",
+        f"🚫 Banned: {'✅' if banned else '❌'} | Blocked: {'✅' if blocked else '❌'}",
+        f"🕐 Last: <code>{_html.escape(str(last))}</code>",
+        f"📦 Orders total: <b>{len(u_orders)}</b>",
+        f"━━━━━━━━━━━━━━━━━━",
+    ]
+    if recent:
+        lines.append("<b>Order ចុងក្រោយ:</b>")
+        for oid, o in reversed(recent):
+            st = o.get("status") or "?"
+            lab = _html.escape(str(o.get("label") or "?")[:28])
+            price = float(o.get("price") or 0)
+            lines.append(
+                f"• <code>{_html.escape(str(oid))}</code> | {lab} | ${price:.2f} | <b>{_html.escape(str(st))}</b>"
+            )
+    else:
+        lines.append("<i>គ្មាន order</i>")
+    return "\n".join(lines)
+
+
+
 def _format_user_order_detail(oid, o):
     """User-facing order detail — status, reject reason, refund."""
     import html as _html
