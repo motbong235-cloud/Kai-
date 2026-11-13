@@ -8176,7 +8176,12 @@ def _process_manord_action(call, tb):
         tb.send_message(uid, f"❌ Order <code>{oid}</code> រកមិនឃើញ",
                          parse_mode="HTML"); return
     # ការពារចុច Done/Reject ដដែលៗ (ឧ. Admin ចុចលឿនពីរដង) ដែលអាចធ្វើឲ្យសងលុយ/Complete ២ដង
-    if o.get("status") in ("completed", "rejected", "canceled", "partial"):
+    st_now = (o.get("status") or "").lower()
+    is_manual_ord = not bool(o.get("api_order_id"))
+    # Manual only: Reject បន្ទាប់ Done បាន; API order នៅ block
+    if action == "reject" and st_now == "completed" and is_manual_ord:
+        pass
+    elif st_now in ("completed", "rejected", "canceled", "cancelled", "partial"):
         tb.send_message(uid,
             f"⚠️ Order <code>{oid}</code> ត្រូវបានដំណើរការរួចហើយ (ស្ថានភាព: <b>{o.get('status')}</b>)",
             parse_mode="HTML"); return
@@ -8310,7 +8315,23 @@ def _finish_manual_order(uid, tb, step, text):
             "📦 ការបញ្ជា: <b>ជោគជ័យ ✅</b>",
             "សារលើ Channel ត្រូវបាន update",
         ]
-        tb.send_message(uid, "\n".join(adm), parse_mode="HTML", reply_markup=_tb_admin_kb(tb))
+        o_now = smm_orders.get(oid) or o
+        kb_done = _tb_admin_kb(tb)
+        if not (o_now or {}).get("api_order_id"):
+            adm.append("")
+            adm.append("↩️ Manual — អាច Reject + សងលុយវិញបាន")
+            kb_done = InlineKeyboardMarkup()
+            kb_done.add(InlineKeyboardButton(
+                "❌ Reject after Done",
+                callback_data=f"manord:reject:{oid}",
+                color="inactive",
+            ))
+        tb.send_message(uid, "\n".join(adm), parse_mode="HTML", reply_markup=kb_done)
+        if not (o_now or {}).get("api_order_id"):
+            try:
+                tb.send_message(uid, "Admin menu:", reply_markup=_tb_admin_kb(tb))
+            except Exception:
+                pass
     except Exception as e:
         logger.debug("[silent] %s", e)
 
@@ -8324,10 +8345,28 @@ def _finish_manual_reject(uid, tb, step, text):
     if not o:
         tb.send_message(uid, "❌ Order រកមិនឃើញ", reply_markup=_tb_admin_kb(tb))
         return
-    if o.get("status") in ("completed", "rejected", "canceled", "partial"):
+    st0 = (o.get("status") or "").lower()
+    is_manual_ord = not bool(o.get("api_order_id"))
+    if st0 in ("rejected", "canceled", "cancelled", "partial"):
         tb.send_message(
             uid,
             f"⚠️ Order <code>{oid}</code> បានដំណើរការរួច (ស្ថានភាព: <b>{o.get('status')}</b>)",
+            parse_mode="HTML",
+            reply_markup=_tb_admin_kb(tb),
+        )
+        return
+    if st0 == "completed" and not is_manual_ord:
+        tb.send_message(
+            uid,
+            f"⚠️ Order API completed — មិនអាច Reject manual\n🆔 <code>{oid}</code>",
+            parse_mode="HTML",
+            reply_markup=_tb_admin_kb(tb),
+        )
+        return
+    if st0 not in ("pending", "processing", "in progress", "completed", ""):
+        tb.send_message(
+            uid,
+            f"⚠️ ស្ថានភាព <b>{o.get('status')}</b> មិនអនុញ្ញាត Reject",
             parse_mode="HTML",
             reply_markup=_tb_admin_kb(tb),
         )
@@ -8336,17 +8375,24 @@ def _finish_manual_reject(uid, tb, step, text):
     if reason in ("-", "—", ""):
         reason = "Admin មិនបានបញ្ជាក់មូលហេតុ"
     price = float(o.get("price") or 0)
+    already_ref = float(o.get("refunded") or 0)
     smm_orders[oid]["status"] = "rejected"
-    smm_orders[oid]["refunded"] = price
     smm_orders[oid]["reject_reason"] = reason
+    if already_ref <= 0 and price > 0:
+        smm_orders[oid]["refunded"] = price
+    if st0 == "completed":
+        smm_orders[oid]["rejected_after_done"] = True
     _save(SMM_ORD_FILE, smm_orders)
     try:
         _edit_channel_order_status(oid, "បដិសេធ ❌")
     except Exception as _e:
         logger.debug(f"[silent] {_e}")
-    # Refund first
+    # Refund (skip if already refunded)
     try:
-        add_bal(int(o["uid"]), price)
+        if already_ref <= 0 and price > 0:
+            add_bal(int(o["uid"]), price)
+        else:
+            logger.info("[reject] skip refund oid=%s already_ref=%s", oid, already_ref)
     except Exception as e:
         logger.warning(f"[reject refund] {e}")
     # Notify user with reason
@@ -11089,11 +11135,14 @@ def handle_msg(message):
             msg = _admin_format_order(oid, o)
             kb = InlineKeyboardMarkup()
             st = (o.get("status") or "").lower()
+            manual = not bool(o.get("api_order_id"))
             if st in ("rejected", "canceled", "cancelled"):
                 kb.add(InlineKeyboardButton("🔄 Reopen → pending", callback_data=f"admreopen:{oid}", color="progress"))
-            if st in ("pending",) and not o.get("api_order_id"):
+            if st in ("pending", "processing", "in progress") and manual:
                 kb.add(InlineKeyboardButton("✅ Mark Done", callback_data=f"manord:done:{oid}", color="active"))
                 kb.add(InlineKeyboardButton("❌ Reject", callback_data=f"manord:reject:{oid}", color="inactive"))
+            if st == "completed" and manual:
+                kb.add(InlineKeyboardButton("❌ Reject after Done (សងលុយ)", callback_data=f"manord:reject:{oid}", color="inactive"))
             bot.send_message(uid, msg, parse_mode="HTML", reply_markup=kb)
             bot.send_message(uid, "Admin menu:", reply_markup=admin_kb())
             return
