@@ -9,7 +9,7 @@
 ## Admin ↔ User
 
 Admin ចុច **👤 ប្តូរទៅ User** ក្នុងម៉ឺនុយ Admin → ឃើញ/ប្រើ Bot ដូច User ធម្មតា (សាកល្បង Top Up, Order, ណែនាំមិត្ត…)។
-វាយ `/start` ដើម្បីត្រឡប់ទៅ Admin (ម៉ឺនុយ User មិនបង្ហាញប៊ូតុង Admin ទេ)។
+ចុច **🛠 ត្រឡប់ទៅ Admin** ឬ `/start` ដើម្បីត្រឡប់មកវិញ។
 
 ## ណែនាំមិត្ត (Referral) — Bot master ប៉ុណ្ណោះ
 
