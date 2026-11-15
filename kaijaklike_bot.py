@@ -1645,6 +1645,15 @@ def _stop_clone(name):
         except _subprocess.TimeoutExpired: proc.kill()
     clone_procs.pop(name, None)
 
+def _stop_all_clones():
+    """Stop every clone child BEFORE os.execv: execv keeps children alive but forgets them
+    (clone_procs resets) → the new process spawned a 2nd copy → 409 Conflict → '(re)start ស្វ័យប្រវត្តិ'."""
+    for _n in list(clone_procs.keys()):
+        try:
+            _stop_clone(_n)
+        except Exception:
+            pass
+
 _clone_restart_ts = {}  # name -> last restart unix
 _clone_fail_count = {}  # name -> consecutive auto-restart failures
 _CLONE_MAX_AUTO_RESTART = 3  # បន្ទាប់ពីនេះ បញ្ឈប់ auto — ត្រូវ admin start ដោយដៃ
@@ -3045,6 +3054,7 @@ def handle_document(message):
             try: bot.stop_polling()
             except Exception: pass
             time.sleep(1)
+            _stop_all_clones()
             os.execv(sys.executable, [sys.executable] + sys.argv)
         threading.Thread(target=_auto_restart, daemon=True).start()
         return
@@ -12798,6 +12808,7 @@ def restart():
         time.sleep(0.5)
         bot.stop_polling()
         time.sleep(1)
+        _stop_all_clones()
         os.execv(sys.executable, [sys.executable] + sys.argv)
     threading.Thread(target=_restart, daemon=True).start()
     return jsonify({"status": "restarting"})
