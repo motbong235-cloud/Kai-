@@ -9,7 +9,9 @@ services:
     runtime: python
     plan: free
     region: singapore
-    buildCommand: pip install -r requirements.txt
+    buildCommand: |
+      pip install -r requirements.txt
+      patch -p1 < patches/telegram_502_transient.patch || true
     startCommand: python kaijaklike_bot.py
     healthCheckPath: /health
     envVars:
@@ -27,12 +29,10 @@ services:
         value: KaiJakLike
       - key: DEP_QR_COOLDOWN_SEC
         value: "15"
-      # Optional ABA PayWay (KHMER SYSTEM)
       - key: ABA_API_KEY
         sync: false
       - key: ABA_MERCHANT_ID
         sync: false
-      # Optional Bakong deep link
       - key: BAKONG_API_TOKEN
         sync: false
       - key: PYTHON_VERSION
@@ -69,8 +69,3 @@ services:
         value: "0"
       - key: PYTHON_VERSION
         value: "3.11.0"
-# Optional notify bots (persist across restarts):
-# ORDER_BOT_TOKEN=
-# PAY_BOT_TOKEN=
-# ORDER_BOT_CHAT_ID=   # optional group/user id
-# PAY_BOT_CHAT_ID=
