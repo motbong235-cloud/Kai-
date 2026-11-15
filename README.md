@@ -1,5 +1,12 @@
 # Kai- (KaiJakLike SMM Bot) — v12
 
+## ណែនាំមិត្ត (Referral) — Bot master ប៉ុណ្ណោះ
+
+- ម៉ឺនុយ **🎁 ណែនាំមិត្ត** → ទទួលតំណ `t.me/<bot>?start=ref<uid>` + ប៊ូតុងចែករំលែក
+- មិត្តចូលតាមតំណ ហើយ **ដាក់លុយចាប់ពី $1 ឡើង** → អ្នកណែនាំទទួល **5%** ភ្លាមៗ ចូល Balance
+- ដាក់ក្រោម $1 = គ្មានកម្រៃ · ភ្ជាប់បានតែម្តង · ណែនាំខ្លួនឯងមិនបាន
+- Env (ជម្រើស): `REFERRAL_RATE` (default 0.05), `REFERRAL_MIN_DEPOSIT` (default 1)
+
 ## v12: Multi SMM API (ភ្ជាប់ Website API បានច្រើន)
 
 Admin → **⚙️ កំណត់ SMM API**

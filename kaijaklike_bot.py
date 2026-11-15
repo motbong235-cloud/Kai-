@@ -1864,6 +1864,7 @@ def set_bal(uid, amt):
 # ═══════════════════════════════════════════════════════════
 REFERRAL_FILE = _dpath("smm_referrals.json")
 REFERRAL_RATE = float(os.getenv("REFERRAL_RATE", "0.05") or 0.05)  # 5%
+MIN_REF_DEPOSIT = float(os.getenv("REFERRAL_MIN_DEPOSIT", "1") or 1)  # commission only when deposit >= $1
 referral_db = _load(REFERRAL_FILE, {"by_user": {}, "rate": REFERRAL_RATE})
 
 def _ref_save():
@@ -1891,9 +1892,9 @@ def _ref_link(uid):
     return f"https://t.me/{uname}?start=ref{uid}"
 
 def _ref_bind(new_uid, referrer_uid):
-    """DISABLED — referral feature removed."""
-    return False, "disabled"
-    """Bind referrer once for new user. No self-ref, no overwrite."""
+    """Bind referrer once for new user. Master bot only. No self-ref, no overwrite."""
+    if not IS_MASTER:
+        return False, "disabled"
     try:
         new_s = str(new_uid)
         ref_s = str(referrer_uid).strip()
@@ -1901,9 +1902,6 @@ def _ref_bind(new_uid, referrer_uid):
             return False, "invalid"
         if new_s == ref_s:
             return False, "self"
-        if int(ref_s) == int(ADMIN_ID):
-            # allow admin as referrer? yes, or skip — allow
-            pass
         u = _ref_user(new_s)
         if u.get("referrer"):
             return False, "already"
@@ -1920,12 +1918,13 @@ def _ref_bind(new_uid, referrer_uid):
         return False, "error"
 
 def _ref_pay_commission(depositor_uid, deposit_amount, dep_id=""):
-    """DISABLED — referral feature removed."""
-    return 0
-    """Give referrer REFERRAL_RATE of deposit. Returns commission or 0."""
+    """Give referrer 5% of deposit when amount >= $1. Master bot only. Returns commission or 0."""
+    if not IS_MASTER:
+        return 0.0
     try:
         amt = round(float(deposit_amount or 0), 2)
-        if amt <= 0:
+        # Commission starts from $1 deposit and up
+        if amt < MIN_REF_DEPOSIT:
             return 0.0
         u = _ref_user(depositor_uid)
         ref_s = u.get("referrer")
@@ -1984,7 +1983,7 @@ def _ref_share_plain(uid):
         f"🔥 រកលុយជាមួយ {brand}\n"
         f"━━━━━━━━━━━━━━\n"
         f"ចុចតំណ → ចូល Bot → ដាក់លុយ\n"
-        f"មិត្តដែលណែនាំទទួលកម្រៃ {rate:.0f}% រាល់ដង!\n\n"
+        f"ដាក់លុយចាប់ពី $1 ឡើង អ្នកណែនាំទទួលកម្រៃ {rate:.0f}%!\n\n"
         f"⚡ TikTok Khmer · Likes · Views · Followers\n"
         f"💙 លឿន · Auto · តម្លៃសមរម្យ\n\n"
         f"👉 ចូលឥឡូវ:\n{link}"
@@ -2006,13 +2005,13 @@ def _ref_panel_text(uid):
             f"🎁 <b>ណែនាំមិត្ត · រកលុយ</b>\n"
             f"<b>{brand}</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n\n"
-            f"✨ ទទួល <b>{rate:.0f}%</b> រាល់ដងដែលមិត្តដាក់លុយ\n"
+            f"✨ ទទួល <b>{rate:.0f}%</b> រាល់ដងដែលមិត្តដាក់លុយ ចាប់ពី <b>$1</b> ឡើង\n"
             f"⚡ TikTok Khmer · Likes · Views · Followers\n"
             f"💙 លឿន · សុវត្ថិភាព · Auto\n\n"
             f"📌 <b>របៀបចែក</b>\n"
             f"1️⃣ ចុច «ចែករំលែក» ឬ Forward សារនេះ\n"
             f"2️⃣ មិត្តចុចតំណ → បើក Bot\n"
-            f"3️⃣ គេដាក់លុយ → អ្នកបាន {rate:.0f}% ស្វ័យប្រវត្តិ\n\n"
+            f"3️⃣ គេដាក់លុយ ≥ $1 → អ្នកបាន {rate:.0f}% ភ្លាមៗ\n\n"
             f"🔗 <b>តំណណែនាំរបស់អ្នក</b>\n"
             f"<code>{link}</code>\n\n"
             f"━━━━━━━━━━━━━━━━━━\n"
@@ -2028,12 +2027,12 @@ def _ref_panel_text(uid):
         f"🎁 <b>Invite Friends · Earn</b>\n"
         f"<b>{brand}</b>\n"
         f"━━━━━━━━━━━━━━━━━━\n\n"
-        f"✨ Earn <b>{rate:.0f}%</b> on every friend deposit\n"
+        f"✨ Earn <b>{rate:.0f}%</b> when a friend deposits <b>$1+</b>\n"
         f"⚡ TikTok Khmer · Likes · Views · Followers\n\n"
         f"📌 <b>How</b>\n"
         f"1) Tap Share or Forward\n"
         f"2) Friend opens the bot via your link\n"
-        f"3) They deposit → you get {rate:.0f}% auto\n\n"
+        f"3) They deposit $1+ → you get {rate:.0f}% instantly\n\n"
         f"🔗 <b>Your invite link</b>\n"
         f"<code>{link}</code>\n\n"
         f"━━━━━━━━━━━━━━━━━━\n"
@@ -6188,6 +6187,8 @@ def main_kb(uid=None):
                KeyboardButton("🔍 Track Order", emoji_id=e.get("🔍"), color="active"))
         kb.row(KeyboardButton("💬 Support", emoji_id=e.get("💬"), color="active"),
                KeyboardButton("💡 How to Use", emoji_id=e.get("💡"), color="progress"))
+        if IS_MASTER:
+            kb.row(KeyboardButton("🎁 Invite Friends", emoji_id=e.get("🎁") or None, color="progress"))
     else:
         kb.row(KeyboardButton("👤 គណនី", emoji_id=e.get("👤") or None, color="active"),
                KeyboardButton("💸 បញ្ចូលលុយ", emoji_id=e.get("💸") or e.get("💰"), color="progress"))
@@ -6196,6 +6197,8 @@ def main_kb(uid=None):
                KeyboardButton("🔍 តាមដានការបញ្ជាទិញ", emoji_id=e.get("🔍"), color="active"))
         kb.row(KeyboardButton("💬 ជំនួយ", emoji_id=e.get("💬"), color="active"),
                KeyboardButton("💡 របៀបប្រើប្រាស់", emoji_id=e.get("💡"), color="progress"))
+        if IS_MASTER:
+            kb.row(KeyboardButton("🎁 ណែនាំមិត្ត", emoji_id=e.get("🎁") or None, color="progress"))
     try:
         for row in kb.keyboard:
             for btn in row:
@@ -7062,12 +7065,12 @@ def _build_emoji_preview():
 
 @bot.callback_query_handler(func=lambda c: (c.data or "") == "ref:howto")
 def cb_ref_howto(call):
-    try:
-        bot.answer_callback_query(call.id, "មុខងារណែនាំមិត្តត្រូវបានបិទ", show_alert=True)
-    except Exception:
-        pass
-    return
-    # disabled below
+    if not IS_MASTER:
+        try:
+            bot.answer_callback_query(call.id, "មុខងារណែនាំមិត្តមានតែលើ bot master", show_alert=True)
+        except Exception:
+            pass
+        return
     try:
         bot.answer_callback_query(call.id)
     except Exception:
@@ -7083,7 +7086,7 @@ def cb_ref_howto(call):
             f"1️⃣ ចុច «📤 ចែករំលែក» → រើស Chat / Group\n"
             f"   ឬ ចុចសារ​ណែនាំ → Forward\n\n"
             f"2️⃣ មិត្តចុចតំណក្នុងសារ → បើក <b>Bot</b>\n\n"
-            f"3️⃣ មិត្តដាក់លុយ → អ្នកទទួល <b>{rate:.0f}%</b>\n\n"
+            f"3️⃣ មិត្តដាក់លុយ ≥ <b>$1</b> → អ្នកទទួល <b>{rate:.0f}%</b> ភ្លាមៗ\n\n"
             f"🔗 តំណរបស់អ្នក:\n<code>{link}</code>\n\n"
             f"💡 គន្លឹះ: Forward ទៅ Group / Channel មានអ្នកច្រើន = កម្រៃច្រើន"
         )
@@ -7093,7 +7096,7 @@ def cb_ref_howto(call):
             f"━━━━━━━━━━━━━━━━━━\n"
             f"1) Tap Share → pick a chat\n"
             f"2) Friend opens your link → Bot\n"
-            f"3) They deposit → you earn {rate:.0f}%\n\n"
+            f"3) They deposit $1+ → you earn {rate:.0f}% instantly\n\n"
             f"🔗 <code>{link}</code>"
         )
     try:
@@ -7130,7 +7133,7 @@ def cmd_start(message):
                             int(ref_raw),
                             f"🎉 <b>មានមិត្តថ្មី!</b>\n"
                             f"👤 <code>{uid}</code> ចូលតាមតំណរបស់អ្នក\n"
-                            f"ពេលគេដាក់លុយ អ្នកនឹងទទួល {float(referral_db.get('rate') or REFERRAL_RATE)*100:.0f}%",
+                            f"ពេលគេដាក់លុយ ចាប់ពី $1 ឡើង អ្នកនឹងទទួល {float(referral_db.get('rate') or REFERRAL_RATE)*100:.0f}%",
                             parse_mode="HTML",
                         )
                     except Exception:
@@ -12379,6 +12382,20 @@ def handle_msg(message):
         bot.send_message(uid,
             "📊 <b>SMM Services</b>\n━━━━━━━━━━━━━━━━━━\nជ្រើស Platform:",
             parse_mode="HTML", reply_markup=smm_cat_kb()); return
+
+    # ── ណែនាំមិត្ត (master bot only) ──
+    if text in ("🎁 ណែនាំមិត្ត", "ណែនាំមិត្ត", "🎁 Invite Friends", "Invite Friends"):
+        waiting.pop(uid, None)
+        if not IS_MASTER:
+            bot.send_message(uid, "❌ មុខងារណែនាំមិត្តមានតែលើ bot master ប៉ុណ្ណោះ។", reply_markup=main_kb(uid))
+            return
+        try:
+            bot.send_message(uid, _ref_panel_text(uid), parse_mode="HTML",
+                             reply_markup=_ref_inline_kb(uid), disable_web_page_preview=True)
+        except Exception as e:
+            logger.warning(f"[referral] panel: {e}")
+            bot.send_message(uid, "❌ មិនអាចបើកផ្ទាំងណែនាំមិត្តបានទេ។", reply_markup=main_kb(uid))
+        return
 
     if text in ("💰 ដាក់ប្រាក់", "ដាក់ប្រាក់", "💰 Top Up", "Top Up", "💸 បញ្ចូលលុយ", "បញ្ចូលលុយ", "💸 Top Up"):
         b = bal(uid)
