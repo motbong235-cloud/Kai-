@@ -1,5 +1,10 @@
 # Kai- (KaiJakLike SMM Bot) — v12
 
+## Admin ↔ User
+
+Admin ចុច **👤 ប្តូរទៅ User** ក្នុងម៉ឺនុយ Admin → ឃើញ/ប្រើ Bot ដូច User ធម្មតា (សាកល្បង Top Up, Order, ណែនាំមិត្ត…)។
+ចុច **🛠 ត្រឡប់ទៅ Admin** ឬ `/start` ដើម្បីត្រឡប់មកវិញ។
+
 ## ណែនាំមិត្ត (Referral) — Bot master ប៉ុណ្ណោះ
 
 - ម៉ឺនុយ **🎁 ណែនាំមិត្ត** → ទទួលតំណ `t.me/<bot>?start=ref<uid>` + ប៊ូតុងចែករំលែក

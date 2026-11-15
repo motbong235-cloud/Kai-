@@ -6174,6 +6174,9 @@ def cb_paytoggle(call):
 # ═══════════════════════════════════════════════════════════
 #  KEYBOARDS
 # ═══════════════════════════════════════════════════════════
+# Admin ↔ User view switch (in-memory; /start always returns to Admin)
+admin_user_mode = set()
+
 def main_kb(uid=None):
     """User menu — ទម្រង់ចាស់ដើម (Account/TopUp → Order full-width → History/Track → Support)."""
     lang = get_lang(uid) if uid else "kh"
@@ -6199,6 +6202,8 @@ def main_kb(uid=None):
                KeyboardButton("💡 របៀបប្រើប្រាស់", emoji_id=e.get("💡"), color="progress"))
         if IS_MASTER:
             kb.row(KeyboardButton("🎁 ណែនាំមិត្ត", emoji_id=e.get("🎁") or None, color="progress"))
+    if uid is not None and uid == ADMIN_ID and uid in admin_user_mode:
+        kb.row(KeyboardButton("🛠 ត្រឡប់ទៅ Admin", color="active"))
     try:
         for row in kb.keyboard:
             for btn in row:
@@ -6222,6 +6227,7 @@ def admin_kb():
            KeyboardButton("💾 Backup Data", color="active"))
     kb.row(KeyboardButton("🔍 រក Order ID", color="active"),
            KeyboardButton("👤 រក User ID", color="progress"))
+    kb.row(KeyboardButton("👤 ប្តូរទៅ User", color="progress"))
     # populate stripped-text map so premium icons still match handlers
     try:
         for row in kb.keyboard:
@@ -7150,6 +7156,7 @@ def cmd_start(message):
     if is_banned(uid):
         bot.send_message(uid, t(uid, "banned")); return
     if uid == ADMIN_ID:
+        admin_user_mode.discard(uid)
         _multibot_hint = "\n🤖 /newbot បង្កើត Bot ថ្មី · /mybots គ្រប់គ្រង Bot រង\n" if IS_MASTER else ""
         bot.send_message(uid,
             f"🤖 <b>Admin — {_bot_brand()}</b>\n"
@@ -10100,14 +10107,28 @@ def handle_msg(message):
     if text == "✕ Cancel":
         waiting.pop(uid, None)
         bot.send_message(uid, t(uid, "cancel_ok"),
-                         reply_markup=main_kb(uid) if uid not in sub_admins and uid != ADMIN_ID
+                         reply_markup=main_kb(uid) if (uid not in sub_admins and uid != ADMIN_ID) or uid in admin_user_mode
                          else (admin_kb() if uid == ADMIN_ID else sub_admin_kb()))
+        return
+
+    # ── Admin ↔ User view switch ──
+    if uid == ADMIN_ID and text in ("👤 ប្តូរទៅ User", "ប្តូរទៅ User") and uid not in admin_user_mode:
+        waiting.pop(uid, None)
+        admin_user_mode.add(uid)
+        bot.send_message(uid, "👤 <b>ឥឡូវអ្នកកំពុងមើលជា User</b>\nចុច «🛠 ត្រឡប់ទៅ Admin» ឬ /start ដើម្បីត្រឡប់មកវិញ។",
+                         parse_mode="HTML", reply_markup=main_kb(uid))
+        _show_welcome(uid)
+        return
+    if uid == ADMIN_ID and text in ("🛠 ត្រឡប់ទៅ Admin", "ត្រឡប់ទៅ Admin"):
+        waiting.pop(uid, None)
+        admin_user_mode.discard(uid)
+        bot.send_message(uid, "🛠 <b>ត្រឡប់ទៅ Admin វិញហើយ</b>", parse_mode="HTML", reply_markup=admin_kb())
         return
 
     # ════════════════════════════════════════
     #  ADMIN SECTION
     # ════════════════════════════════════════
-    if uid == ADMIN_ID or uid in sub_admins:
+    if (uid == ADMIN_ID and uid not in admin_user_mode) or uid in sub_admins:
         _is_master_admin = (uid == ADMIN_ID)  # gate for master-only features
 
         # ── Premium Emoji button flow (replaces manual /setemojis, /emojiid) ──
