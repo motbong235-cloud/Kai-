@@ -12,7 +12,7 @@
          msg = str(exception)
 +        low = msg.lower()
          is_409 = ("409" in msg) or ("Conflict" in msg and "getUpdates" in msg)
-+        # Telegram network blips — not code bugs (502 Bad Gateway, timeout)
++        # Telegram / network blips — មិនមែន bug កូដ (502 Bad Gateway, timeout…)
 +        is_transient = (
 +            ("502" in msg) or ("503" in msg) or ("504" in msg)
 +            or ("Bad Gateway" in msg) or ("Service Unavailable" in msg)
@@ -25,7 +25,7 @@
 +            or ("Server Error" in msg and ("telegram" in low or "502" in msg))
 +        )
          if is_409:
-             # 409 is not a handler bug — two processes share one token
+             # 409 មិនមែន bug handler — ជា process ពីរប្រើ token តែមួយ
              logger.error(
 @@ -1026,6 +1041,32 @@
                      pass
@@ -33,22 +33,24 @@
  
 +        if is_transient:
 +            now = time.time()
++            # log មិនលើស 1 ដង / 60s
 +            if now - _GlobalExceptionHandler._last_transient_log > 60:
 +                _GlobalExceptionHandler._last_transient_log = now
 +                logger.warning(
-+                    "Telegram transient error (retry ok) instance=%s: %s",
++                    "⚠️ Telegram transient error (retry ok) instance=%s: %s",
 +                    INSTANCE_NAME or "master",
 +                    msg[:240],
 +                )
++            # ជូន admin តែ 1 ដង / 15 នាទី (កុំ spam "Bot Error")
 +            if now - _GlobalExceptionHandler._last_transient_notify > 900:
 +                _GlobalExceptionHandler._last_transient_notify = now
 +                try:
 +                    bot.send_message(
 +                        ADMIN_ID,
-+                        "Telegram API temporary issue (502/timeout)\n"
++                        "ℹ️ <b>Telegram API បណ្ដោះអាសន្ន</b> (502/timeout)\n"
 +                        f"<code>{msg[:200]}</code>\n\n"
-+                        "Bot still running — auto retry.\n"
-+                        "If frequent: check Render network / api.telegram.org",
++                        "Bot នៅរត់ — នឹង retry ស្វ័យប្រវត្តិ។ "
++                        "បើញឹកញាប់: ពិនិត្យ Render network / api.telegram.org",
 +                        parse_mode="HTML",
 +                    )
 +                except Exception:
@@ -56,7 +58,7 @@
 +            return True
 +
          trace = _tb.format_exc()
-         logger.error(f"Unhandled exception in bot handler:\n{trace}")
+         logger.error(f"❌ Unhandled exception ក្នុង bot handler:\n{trace}")
          try:
 @@ -12862,6 +12903,12 @@
          except Exception as e:
@@ -79,10 +81,10 @@
 +                fail_409 = 0
 +                wait = 15
 +                logger.warning(
-+                    "Telegram 502/timeout instance=%s — retry %ss (%s)",
++                    "⚠️ Telegram 502/timeout instance=%s — retry %ss (%s)",
 +                    label, wait, msg[:120],
 +                )
 +                time.sleep(wait)
              else:
-                 logger.warning(f"Polling error: {e} — Retry in 10s...")
+                 logger.warning(f"⚠️ Polling error: {e} — Retry in 10s...")
                  time.sleep(10)
