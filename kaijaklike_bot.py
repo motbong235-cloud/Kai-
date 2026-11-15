@@ -6228,8 +6228,6 @@ def main_kb(uid=None):
                KeyboardButton("💡 របៀបប្រើប្រាស់", emoji_id=e.get("💡"), color="progress"))
         if IS_MASTER:
             kb.row(KeyboardButton("🎁 ណែនាំមិត្ត", emoji_id=e.get("🎁") or None, color="progress"))
-    if uid is not None and uid == ADMIN_ID and uid in admin_user_mode:
-        kb.row(KeyboardButton("🛠 ត្រឡប់ទៅ Admin", color="active"))
     try:
         for row in kb.keyboard:
             for btn in row:
@@ -10166,7 +10164,7 @@ def handle_msg(message):
     if uid == ADMIN_ID and text in ("👤 ប្តូរទៅ User", "ប្តូរទៅ User") and uid not in admin_user_mode:
         waiting.pop(uid, None)
         admin_user_mode.add(uid)
-        bot.send_message(uid, "👤 <b>ឥឡូវអ្នកកំពុងមើលជា User</b>\nចុច «🛠 ត្រឡប់ទៅ Admin» ឬ /start ដើម្បីត្រឡប់មកវិញ។",
+        bot.send_message(uid, "👤 <b>ឥឡូវអ្នកកំពុងមើលជា User</b>\nវាយ /start ដើម្បីត្រឡប់ទៅ Admin វិញ។",
                          parse_mode="HTML", reply_markup=main_kb(uid))
         _show_welcome(uid)
         return
