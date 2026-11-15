@@ -1,5 +1,11 @@
 # Kai- (KaiJakLike SMM Bot) — v12
 
+## Premium Emoji
+
+- បានជួសជុល `_emojify`: ❤️ ⚙️ 🛠️ ✏️ ⚠️… ត្រូវបានរុំ `<tg-emoji>` ២ជាន់ → Telegram បដិសេធ → សារទាំងមូលធ្លាក់ទៅ emoji ធម្មតា។
+- Render **free plan គ្មាន Disk** → `smm_emoji.json` បាត់រាល់ Redeploy។ ដំណោះស្រាយ៖ Admin វាយ `/emojiexport` → ចម្លង JSON ទៅ Render env **`PREMIUM_EMOJI_JSON`** (ឬបន្ថែម Disk + `DATA_DIR`)។
+- Button ដែលលុប/Reject/Ban/បិទ ឥឡូវមានពណ៌ក្រហម (`danger`)។
+
 ## Admin ↔ User
 
 Admin ចុច **👤 ប្តូរទៅ User** ក្នុងម៉ឺនុយ Admin → ឃើញ/ប្រើ Bot ដូច User ធម្មតា (សាកល្បង Top Up, Order, ណែនាំមិត្ត…)។

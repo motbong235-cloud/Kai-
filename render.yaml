@@ -9,7 +9,7 @@ services:
     runtime: python
     plan: free
     region: singapore
-    buildCommand: pip install -r requirements.txt && (test -f patches/referral_master_5pct.patch && patch -p1 --forward < patches/referral_master_5pct.patch || true)
+    buildCommand: pip install -r requirements.txt
     startCommand: python kaijaklike_bot.py
     healthCheckPath: /health
     envVars:
@@ -35,6 +35,8 @@ services:
       # Optional Bakong deep link
       - key: BAKONG_API_TOKEN
         sync: false
+      - key: PREMIUM_EMOJI_JSON
+        sync: false   # /emojiexport → paste here (free plan has no disk, file is wiped on redeploy)
       - key: PYTHON_VERSION
         value: "3.11.0"
 

@@ -675,6 +675,15 @@ def _save(path, data):
 # ដែលធ្លាប់រក្សាទុកនៅក្នុងឯកសារ (បើមាន) ដើម្បីឲ្យ /setemojis រក្សាទុកជាអចិន្ត្រៃយ៍
 _EMOJI_DEFAULTS = dict(EMOJI_MAP)
 _loaded_emoji = _load(EMOJI_FILE, {}) or {}
+# Render free plan has NO persistent disk → smm_emoji.json is wiped on every redeploy/restart,
+# which made every premium emoji disappear. PREMIUM_EMOJI_JSON (env, {"👤":"5368…", …}) is a
+# permanent backup: it seeds the map and the file (saved from admin) overrides it. Use /emojiexport to get it.
+try:
+    _env_emoji = json.loads(os.getenv("PREMIUM_EMOJI_JSON", "") or "{}")
+    if isinstance(_env_emoji, dict):
+        _loaded_emoji = {**{k: v for k, v in _env_emoji.items() if v}, **{k: v for k, v in _loaded_emoji.items() if v}}
+except Exception as _ee:
+    print(f"[emoji] PREMIUM_EMOJI_JSON invalid: {_ee}")
 # Merge file → map; also mirror value onto FE0F / non-FE0F twin keys so UI text always hits
 for _k, _v in list(_loaded_emoji.items()):
     if not _k:
@@ -1093,31 +1102,44 @@ def _admin_contact():
 # ដោយហេតុផលទាក់ទង emoji/icon/premium ប៉ុណ្ណោះ នោះ retry ដោយ **ដកចេញ** icon
 # ទាំងអស់ (fallback ទៅ unicode emoji ធម្មតាវិញ) ដើម្បីធានាថា message/button
 # តែងតែផ្ញើចេញបានជោគជ័យ — មិនដែលឲ្យ premium emoji ធ្វើឲ្យ button ខូចឡើយ។
+_EMOJIFY_CACHE = {"n": -1, "re": None}
+
+def _emojify_regex():
+    """One alternation regex (longest key first, optional trailing VS16). Rebuilt when EMOJI_MAP changes size."""
+    keys = [c for c in EMOJI_MAP.keys() if c and _valid_emoji_id(EMOJI_MAP.get(c))]
+    sig = (len(EMOJI_MAP), len(keys))
+    if _EMOJIFY_CACHE["n"] != sig:
+        base = sorted({c.replace("\ufe0f", "") for c in keys if c.replace("\ufe0f", "")}, key=len, reverse=True)
+        # keep keys that themselves contain VS16 inside (keycaps 1️⃣) matchable too
+        full = sorted(set(keys), key=len, reverse=True)
+        alts = sorted(set(full) | set(base), key=len, reverse=True)
+        _EMOJIFY_CACHE["re"] = _re.compile("(?:" + "|".join(_re.escape(c) for c in alts) + ")\ufe0f?") if alts else None
+        _EMOJIFY_CACHE["n"] = sig
+    return _EMOJIFY_CACHE["re"]
+
 def _emojify(text):
     """Replace unicode emoji with <tg-emoji> when custom_emoji_id is set in EMOJI_MAP.
-    VS16-tolerant. If text already has some <tg-emoji>, still wrap remaining plain emoji."""
+    Single pass (no nested tags: ❤️/⚙️ used to be wrapped twice -> Telegram rejected the
+    entities and every premium emoji in the message fell back to plain unicode).
+    VS16-tolerant; leaves HTML tags and existing <tg-emoji> untouched."""
     if not text or not isinstance(text, str):
         return text
-    slots = []
-    def _park(m):
-        slots.append(m.group(0))
-        return f"@@TGEMOJI{len(slots)-1}@@"
-    protected = _re.sub(r"<tg-emoji[^>]*>.*?</tg-emoji>", _park, text, flags=_re.DOTALL | _re.I)
-    for ch in _EMOJI_CHARS_SORTED:
-        eid = _valid_emoji_id(EMOJI_MAP.get(ch))
-        if not eid:
-            continue
-        variants = {ch, ch.replace("️", "")}
-        if not ch.endswith("️"):
-            variants.add(ch + "️")
-        variants.discard("")
-        for v in sorted(variants, key=len, reverse=True):
-            if not v or v not in protected:
-                continue
-            protected = protected.replace(v, f'<tg-emoji emoji-id="{eid}">{v}</tg-emoji>')
-    for i, raw in enumerate(slots):
-        protected = protected.replace(f"@@TGEMOJI{i}@@", raw)
-    return protected
+    rx = _emojify_regex()
+    if rx is None:
+        return text
+
+    def _wrap(m):
+        raw = m.group(0)
+        eid = _lookup_emoji_id(raw) or _lookup_emoji_id(raw.replace("\ufe0f", ""))
+        eid = _valid_emoji_id(eid)
+        return f'<tg-emoji emoji-id="{eid}">{raw}</tg-emoji>' if eid else raw
+
+    # keep existing <tg-emoji>…</tg-emoji> blocks and any other tag intact; only touch text nodes
+    parts = _re.split(r"(<tg-emoji[^>]*>.*?</tg-emoji>|<[^>]*>)", text, flags=_re.DOTALL | _re.I)
+    for i in range(0, len(parts), 2):
+        if parts[i]:
+            parts[i] = rx.sub(_wrap, parts[i])
+    return "".join(parts)
 
 def _strip_tg_emoji_tags(text):
     """ដកចេញ <tg-emoji ...>x</tg-emoji> ទុកតែ x (unicode emoji ធម្មតា)."""
@@ -3638,6 +3660,7 @@ def _user_orders_inline_kb(uid_str, limit=8):
         kb.row(InlineKeyboardButton(
             f"{st} · {lab} · #{oid}",
             callback_data=f"uord:{oid}",
+            color="progress",
         ))
     return kb
 
@@ -7001,6 +7024,26 @@ def _apply_setemojis(src_msg):
     lines.append("✅ អនុវត្តភ្លាម (message + button ថ្មី) — បើ keyboard ចាស់នៅ unicode សូម /start ម្ដងទៀត។")
     return "\n".join(lines)
 
+@bot.message_handler(commands=["emojiexport"])
+def cmd_emojiexport(message):
+    """Admin: dump configured premium ids as JSON → paste into Render env PREMIUM_EMOJI_JSON (survives redeploy)."""
+    if message.from_user.id != ADMIN_ID:
+        return
+    clean = {k: _valid_emoji_id(v) for k, v in EMOJI_MAP.items() if k and _valid_emoji_id(v) and "\ufe0f" not in k}
+    raw = json.dumps(clean, ensure_ascii=False, separators=(",", ":"))
+    if not clean:
+        bot.send_message(message.chat.id, "⚠️ មិនទាន់មាន Premium Emoji កំណត់ទេ។")
+        return
+    bot.send_message(
+        message.chat.id,
+        f"💾 <b>Premium Emoji Backup</b> ({len(clean)})\n"
+        "ចម្លងទៅ Render → Environment → <code>PREMIUM_EMOJI_JSON</code> ដើម្បីកុំឲ្យបាត់ពេល Redeploy។",
+        parse_mode="HTML")
+    import io as _io
+    f = _io.BytesIO(raw.encode("utf-8")); f.name = "PREMIUM_EMOJI_JSON.txt"
+    bot.send_document(message.chat.id, f)
+
+
 @bot.message_handler(commands=["setemojis"])
 def cmd_setemojis(message):
     if message.from_user.id != ADMIN_ID:
@@ -7918,8 +7961,8 @@ def _prov_view(uid, pid):
            InlineKeyboardButton("🏷️ ប្តូរឈ្មោះ", callback_data=f"smmapi:rename:{pid}", color="progress"))
     if not is_def:
         kb.add(InlineKeyboardButton("⭐ ដាក់ជា Default", callback_data=f"smmapi:def:{pid}", color="active"))
-    kb.add(InlineKeyboardButton("🔴 បិទ" if on else "🟢 បើក", callback_data=f"smmapi:toggle:{pid}", color="inactive" if on else "active"),
-           InlineKeyboardButton("🗑️ លុប", callback_data=f"smmapi:del:{pid}", color="inactive"))
+    kb.add(InlineKeyboardButton("🔴 បិទ" if on else "🟢 បើក", callback_data=f"smmapi:toggle:{pid}", color="danger" if on else "active"),
+           InlineKeyboardButton("🗑️ លុប", callback_data=f"smmapi:del:{pid}", color="danger"))
     kb.add(InlineKeyboardButton("⬅️ ត្រឡប់", callback_data="smmapi:list", color="progress"))
     bot.send_message(uid, txt, parse_mode="HTML", reply_markup=kb)
 
@@ -8334,7 +8377,7 @@ def _finish_manual_order(uid, tb, step, text):
             kb_done.add(InlineKeyboardButton(
                 "❌ Reject after Done",
                 callback_data=f"manord:reject:{oid}",
-                color="inactive",
+                color="danger",
             ))
         tb.send_message(uid, "\n".join(adm), parse_mode="HTML", reply_markup=kb_done)
         if not (o_now or {}).get("api_order_id"):
@@ -8975,7 +9018,7 @@ def cb_cln_view(call):
             f"Port: <code>{cfg['port']}</code>")
     kb = InlineKeyboardMarkup(row_width=2)
     if _clone_is_running(name):
-        kb.add(InlineKeyboardButton("🛑 បិទ", callback_data=f"cln_stop|{name}", color="inactive"),
+        kb.add(InlineKeyboardButton("🛑 បិទ", callback_data=f"cln_stop|{name}", color="danger"),
                InlineKeyboardButton("🔄 Restart", callback_data=f"cln_restart|{name}", color="progress"))
     else:
         kb.add(InlineKeyboardButton("▶️ ដំណើរការ", callback_data=f"cln_start|{name}", color="active"))
@@ -8983,7 +9026,7 @@ def cb_cln_view(call):
     kb.add(InlineKeyboardButton("👤 ប្តូរ Admin", callback_data=f"cln_admin|{name}", color="progress"))
     kb.add(InlineKeyboardButton("✏️ ប្តូរ ឈ្មោះ Bot", callback_data=f"cln_rename|{name}", color="progress"))
     kb.add(InlineKeyboardButton("⚙️ ការកំណត់ផ្សេងទៀត", callback_data=f"cln_more|{name}", color="progress"))
-    kb.add(InlineKeyboardButton("🗑️ លុប", callback_data=f"cln_delete|{name}", color="inactive"))
+    kb.add(InlineKeyboardButton("🗑️ លុប", callback_data=f"cln_delete|{name}", color="danger"))
     kb.add(InlineKeyboardButton("⬅️ ត្រឡប់", callback_data="cln_list", color="inactive"))
     bot.send_message(uid, text, parse_mode="HTML", reply_markup=kb)
 
@@ -9158,7 +9201,7 @@ def cb_cln_subadmin(call):
     cur = _clone_load(name, "smm_sub_admins.json", [])
     kb = InlineKeyboardMarkup(row_width=1)
     for sa in cur:
-        kb.add(InlineKeyboardButton(f"🗑️ លុប {sa}", callback_data=f"cln_subadmin_del|{sa}|{name}", color="inactive"))
+        kb.add(InlineKeyboardButton(f"🗑️ លុប {sa}", callback_data=f"cln_subadmin_del|{sa}|{name}", color="danger"))
     kb.add(InlineKeyboardButton("➕ បន្ថែម Sub Admin", callback_data=f"cln_subadmin_add|{name}", color="active"))
     kb.add(InlineKeyboardButton("⬅️ ត្រឡប់", callback_data=f"cln_more|{name}", color="inactive"))
     bot.send_message(uid,
@@ -9298,7 +9341,7 @@ def cb_cln_list(call):
     kb = InlineKeyboardMarkup(row_width=1)
     for nm in clone_registry:
         st = "🟢" if _clone_is_running(nm) else "🔴"
-        kb.add(InlineKeyboardButton(f"{st} {nm}", callback_data=f"cln_view|{nm}", color="default"))
+        kb.add(InlineKeyboardButton(f"{st} {nm}", callback_data=f"cln_view|{nm}", color="progress"))
     kb.add(InlineKeyboardButton("🔄 Restart All (ទាញកូដ/Feature ថ្មីចូល Bot រងទាំងអស់)",
                                  callback_data="cln_restart_all", color="progress"))
     bot.send_message(uid, "📋 <b>Bot រងទាំងអស់</b>", parse_mode="HTML", reply_markup=kb)
@@ -9360,11 +9403,11 @@ def cb_cln_actions(call):
     bot.send_message(uid, f"ស្ថានភាព '{name}':")
     cb_cln_view_inline = InlineKeyboardMarkup(row_width=2)
     if _clone_is_running(name):
-        cb_cln_view_inline.add(InlineKeyboardButton("🛑 បិទ", callback_data=f"cln_stop|{name}", color="inactive"),
+        cb_cln_view_inline.add(InlineKeyboardButton("🛑 បិទ", callback_data=f"cln_stop|{name}", color="danger"),
                                 InlineKeyboardButton("🔄 Restart", callback_data=f"cln_restart|{name}", color="progress"))
     else:
         cb_cln_view_inline.add(InlineKeyboardButton("▶️ ដំណើរការ", callback_data=f"cln_start|{name}", color="active"))
-    cb_cln_view_inline.add(InlineKeyboardButton("🗑️ លុប", callback_data=f"cln_delete|{name}", color="inactive"))
+    cb_cln_view_inline.add(InlineKeyboardButton("🗑️ លុប", callback_data=f"cln_delete|{name}", color="danger"))
     bot.send_message(uid, f"🤖 {name}", reply_markup=cb_cln_view_inline)
 
 # ═══════════════════════════════════════════════════════════
@@ -9401,7 +9444,7 @@ def cb_subadmin(call):
             bot.send_message(uid, "📭 គ្មាន Sub Admin ទេ", reply_markup=admin_kb()); return
         kb2 = InlineKeyboardMarkup(row_width=1)
         for sa in sub_admins:
-            kb2.add(InlineKeyboardButton(f"🗑️ លុប {sa}", callback_data=f"subadmin:del:{sa}", color="inactive"))
+            kb2.add(InlineKeyboardButton(f"🗑️ លុប {sa}", callback_data=f"subadmin:del:{sa}", color="danger"))
         bot.send_message(uid, "👥 <b>ជ្រើស Sub Admin ដើម្បីលុប:</b>",
                          parse_mode="HTML", reply_markup=kb2)
     else:
@@ -11164,9 +11207,9 @@ def handle_msg(message):
                 kb.add(InlineKeyboardButton("🔄 Reopen → pending", callback_data=f"admreopen:{oid}", color="progress"))
             if st in ("pending", "processing", "in progress") and manual:
                 kb.add(InlineKeyboardButton("✅ Mark Done", callback_data=f"manord:done:{oid}", color="active"))
-                kb.add(InlineKeyboardButton("❌ Reject", callback_data=f"manord:reject:{oid}", color="inactive"))
+                kb.add(InlineKeyboardButton("❌ Reject", callback_data=f"manord:reject:{oid}", color="danger"))
             if st == "completed" and manual:
-                kb.add(InlineKeyboardButton("❌ Reject after Done (សងលុយ)", callback_data=f"manord:reject:{oid}", color="inactive"))
+                kb.add(InlineKeyboardButton("❌ Reject after Done (សងលុយ)", callback_data=f"manord:reject:{oid}", color="danger"))
             bot.send_message(uid, msg, parse_mode="HTML", reply_markup=kb)
             bot.send_message(uid, "Admin menu:", reply_markup=admin_kb())
             return
@@ -11222,9 +11265,9 @@ def handle_msg(message):
                     label = s.get("label", slug)[:30]
                     api_id = s.get("api_id", "?")
                     btns.append([InlineKeyboardButton(
-                        f"🗑️ [{_svc_tag(s)}] {label}", callback_data=f"delsvc:{slug}", color="inactive")])
+                        f"🗑️ [{_svc_tag(s)}] {label}", callback_data=f"delsvc:{slug}", color="danger")])
                 btns.append([InlineKeyboardButton(
-                    f"🗑️ លុបទាំងអស់ {cat}", callback_data=f"delsvc:cat:{cat}", color="inactive")])
+                    f"🗑️ លុបទាំងអស់ {cat}", callback_data=f"delsvc:cat:{cat}", color="danger")])
                 bot.send_message(uid,
                     f"📂 <b>{cat}</b> — {len(svcs)} services\n━━━━━━━━━━━━━━━━━━",
                     parse_mode="HTML", reply_markup=InlineKeyboardMarkup(btns))
@@ -11392,7 +11435,7 @@ def handle_msg(message):
                     ikb_rows.append([
                         InlineKeyboardButton(f"💸 {u_id}", callback_data=f"useraction:addbal:{u_id}", color="active"),
                         InlineKeyboardButton("💔 កាត់", callback_data=f"useraction:dedbal:{u_id}", color="progress"),
-                        InlineKeyboardButton("🚫 Ban", callback_data=f"useraction:ban:{u_id}", color="inactive"),
+                        InlineKeyboardButton("🚫 Ban", callback_data=f"useraction:ban:{u_id}", color="danger"),
                     ])
                 ikb = InlineKeyboardMarkup(ikb_rows)
                 bot.send_message(uid, header + "\n".join(lines),
@@ -11573,7 +11616,7 @@ def handle_msg(message):
                 bot.send_message(uid, "🚫 Master Admin only!", reply_markup=sub_admin_kb()); return
             kb2 = InlineKeyboardMarkup()
             kb2.add(InlineKeyboardButton("➕ បន្ថែម Sub Admin", callback_data="subadmin:add", color="active"))
-            kb2.add(InlineKeyboardButton("🗑️ លុប Sub Admin", callback_data="subadmin:list_del", color="inactive"))
+            kb2.add(InlineKeyboardButton("🗑️ លុប Sub Admin", callback_data="subadmin:list_del", color="danger"))
             lines = [f"👥 <b>Sub Admins ({len(sub_admins)})</b>\n━━━━━━━━━━━━━━━━━━"]
             if sub_admins:
                 for sa in sub_admins:
@@ -11697,7 +11740,7 @@ def handle_msg(message):
             cur = BOT_WELCOME_MSG or welcome_cfg.get("custom_msg","")
             kb2 = InlineKeyboardMarkup()
             kb2.add(InlineKeyboardButton("✏️ កែ Welcome Text", callback_data="set_welcome:text", color="progress"))
-            kb2.add(InlineKeyboardButton("🗑️ Reset (default)", callback_data="set_welcome:reset", color="inactive"))
+            kb2.add(InlineKeyboardButton("🗑️ Reset (default)", callback_data="set_welcome:reset", color="danger"))
             bot.send_message(uid,
                 f"📝 <b>Welcome Message</b>\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
@@ -12258,7 +12301,7 @@ def handle_msg(message):
         if needs_admin_hand:
             kb_adm = InlineKeyboardMarkup([[
                 InlineKeyboardButton("✅ Done",   callback_data=f"manord:done:{oid}", color="active"),
-                InlineKeyboardButton("❌ Reject", callback_data=f"manord:reject:{oid}", color="inactive"),
+                InlineKeyboardButton("❌ Reject", callback_data=f"manord:reject:{oid}", color="danger"),
             ]])
             # Link ពេញ 100% ទៅ Order Bot (មិន mask / មិនកាត់) — ចុចបាន + copy បាន
             _link_full = (link or "").strip()
@@ -13106,8 +13149,8 @@ def _reengage_kb(uid=None):
             InlineKeyboardButton("🛒 Order ឥឡូវ", callback_data="back:smmcats", color="active"),
         )
     except Exception:
-        kb.row(InlineKeyboardButton("💸 ដាក់លុយ", callback_data="dep:menu"))
-        kb.row(InlineKeyboardButton("🛒 Order ឥឡូវ", callback_data="back:smmcats"))
+        kb.row(InlineKeyboardButton("💸 ដាក់លុយ", callback_data="dep:menu", color="progress"))
+        kb.row(InlineKeyboardButton("🛒 Order ឥឡូវ", callback_data="back:smmcats", color="active"))
     return kb
 
 def _reengage_text(kind, uid):
