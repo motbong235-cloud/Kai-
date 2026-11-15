@@ -1913,10 +1913,13 @@ def _ref_link(uid):
     uname = _bot_username()
     return f"https://t.me/{uname}?start=ref{uid}"
 
-def _ref_bind(new_uid, referrer_uid):
-    """Bind referrer once for new user. Master bot only. No self-ref, no overwrite."""
+def _ref_bind(new_uid, referrer_uid, is_new=False):
+    """Bind referrer once. Master bot only. Only a brand-new user (first ever /start) can be
+    referred — existing users are rejected ("old"). No self-ref, no overwrite."""
     if not IS_MASTER:
         return False, "disabled"
+    if not is_new:
+        return False, "old"
     try:
         new_s = str(new_uid)
         ref_s = str(referrer_uid).strip()
@@ -2027,7 +2030,7 @@ def _ref_panel_text(uid):
             f"🎁 <b>ណែនាំមិត្ត · រកលុយ</b>\n"
             f"<b>{brand}</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n\n"
-            f"✨ ទទួល <b>{rate:.0f}%</b> រាល់ដងដែលមិត្តដាក់លុយ ចាប់ពី <b>$1</b> ឡើង\n"
+            f"✨ ទទួល <b>{rate:.0f}%</b> រាល់ដងដែលមិត្តដាក់លុយ ចាប់ពី <b>$1</b> ឡើង (មិត្តត្រូវជា <b>អ្នកប្រើថ្មី</b>)\n"
             f"⚡ TikTok Khmer · Likes · Views · Followers\n"
             f"💙 លឿន · សុវត្ថិភាព · Auto\n\n"
             f"📌 <b>របៀបចែក</b>\n"
@@ -2049,7 +2052,7 @@ def _ref_panel_text(uid):
         f"🎁 <b>Invite Friends · Earn</b>\n"
         f"<b>{brand}</b>\n"
         f"━━━━━━━━━━━━━━━━━━\n\n"
-        f"✨ Earn <b>{rate:.0f}%</b> when a friend deposits <b>$1+</b>\n"
+        f"✨ Earn <b>{rate:.0f}%</b> when a <b>new</b> friend deposits <b>$1+</b>\n"
         f"⚡ TikTok Khmer · Likes · Views · Followers\n\n"
         f"📌 <b>How</b>\n"
         f"1) Tap Share or Forward\n"
@@ -7158,6 +7161,7 @@ def cb_ref_howto(call):
 def cmd_start(message):
     uid = message.chat.id
     waiting.pop(uid, None)
+    _is_new_user = str(uid) not in users_db   # must be read BEFORE _track_user registers them
     _track_user(message)
     # Deep link: /start ref123456789
     try:
@@ -7166,7 +7170,7 @@ def cmd_start(message):
         if payload.lower().startswith("ref"):
             ref_raw = payload[3:].lstrip("_").strip()
             if ref_raw.isdigit():
-                ok, reason = _ref_bind(uid, ref_raw)
+                ok, reason = _ref_bind(uid, ref_raw, is_new=_is_new_user)
                 if ok:
                     try:
                         bot.send_message(
@@ -7187,8 +7191,12 @@ def cmd_start(message):
                         )
                     except Exception:
                         pass
-                elif reason == "already":
-                    pass  # silent
+                elif reason in ("already", "old"):
+                    if reason == "old":
+                        try:
+                            bot.send_message(uid, "ℹ️ តំណណែនាំប្រើបានតែ <b>អ្នកប្រើថ្មី</b> ប៉ុណ្ណោះ — អ្នកជាសមាជិកចាស់ហើយ។", parse_mode="HTML")
+                        except Exception:
+                            pass
                 elif reason == "self":
                     try:
                         bot.send_message(uid, "❌ មិនអាចណែនាំខ្លួនឯងបានទេ។")
