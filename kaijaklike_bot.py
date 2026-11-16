@@ -3702,21 +3702,6 @@ def _smm_service_list_text():
 # ── Hardcoded notify channel — always works ──
 NOTIFY_CHANNEL_ID_DEFAULT = -1003930705105
 
-def _notify_chat_id():
-    """Notify channel id: env NOTIFY_CHANNEL_ID → saved config → default."""
-    cid = NOTIFY_CHANNEL_ID_DEFAULT
-    try:
-        env_cid = (os.environ.get("NOTIFY_CHANNEL_ID") or "").strip()
-        if env_cid:
-            cid = int(env_cid)
-        else:
-            saved_cid = _load(NOTIFY_FILE, {}).get("channel_id", "")
-            if saved_cid:
-                cid = int(saved_cid)
-    except Exception as _e:
-        logger.debug(f"[silent] {_e}")
-    return cid
-
 def _notify(msg):
     """Send to notify channel. ID: env NOTIFY_CHANNEL_ID → file → default."""
     cid = NOTIFY_CHANNEL_ID_DEFAULT
@@ -7072,20 +7057,6 @@ def cmd_emojiexport(message):
     bot.send_document(message.chat.id, f)
 
 
-@bot.message_handler(commands=["postchannel"])
-def cmd_postchannel(message):
-    """Admin: /postchannel <caption> → then send a photo; the bot posts it to the notify channel."""
-    if message.from_user.id != ADMIN_ID:
-        return
-    parts = (message.text or "").split(maxsplit=1)
-    caption = parts[1].strip() if len(parts) > 1 else ""
-    waiting[message.chat.id] = {"step": "await_channel_photo", "caption": caption}
-    bot.send_message(
-        message.chat.id,
-        "📷 ផ្ញើរូបមកឥឡូវ ដើម្បីផុសទៅ channel។\nចុច ✕ Cancel ឬ /start ដើម្បីបោះបង់។",
-        parse_mode="HTML")
-
-
 @bot.message_handler(commands=["setemojis"])
 def cmd_setemojis(message):
     if message.from_user.id != ADMIN_ID:
@@ -9863,19 +9834,6 @@ def _do_broadcast(admin_uid, message):
 def handle_photo(message):
     uid = message.chat.id
     step = waiting.get(uid)
-
-    # ── Admin: /postchannel → ផ្ញើរូបទៅ notify channel ──────────────────
-    if uid == ADMIN_ID and isinstance(step, dict) and step.get("step") == "await_channel_photo":
-        waiting.pop(uid, None)
-        cap = str(step.get("caption") or "")[:1024]
-        try:
-            cid = _notify_chat_id()
-            bot.send_photo(cid, message.photo[-1].file_id, caption=cap or None, parse_mode="HTML")
-            bot.send_message(uid, "✅ បានផុសរូបទៅ channel ហើយ។")
-        except Exception as e:
-            logger.warning(f"[postchannel] failed: {e}")
-            bot.send_message(uid, f"❌ ផុសមិនបាន: {e}")
-        return
 
     # ── User (រួមទាំង Admin បើសាកល្បង) ផ្ញើភស្តុតាង ដាក់លុយដោយដៃ ──────
     if isinstance(step, dict) and step.get("step") == "await_manual_dep_proof":
