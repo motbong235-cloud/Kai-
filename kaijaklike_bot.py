@@ -11339,7 +11339,12 @@ def handle_msg(message):
                 bot.send_message(uid, "❌ User ID ត្រូវជាលេខ", reply_markup=admin_kb())
                 return
             msg = _admin_format_user(raw)
-            bot.send_message(uid, msg, parse_mode="HTML", reply_markup=admin_kb())
+            # ── ប៊ូតុងដាក់/កាត់លុយ ផ្ទាល់ពីលទ្ធផលស្វែងរក User ID ──
+            _ukb = InlineKeyboardMarkup()
+            _ukb.row(InlineKeyboardButton("💸 ដាក់លុយ", callback_data=f"useraction:addbal:{raw}", color="active"),
+                     InlineKeyboardButton("💔 កាត់លុយ", callback_data=f"useraction:dedbal:{raw}", color="danger"))
+            bot.send_message(uid, msg, parse_mode="HTML", reply_markup=_ukb)
+            bot.send_message(uid, "Admin menu:", reply_markup=admin_kb())
             return
 
         if text == "📊 ការបញ្ជា SMM":
