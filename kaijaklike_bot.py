@@ -6263,6 +6263,7 @@ def admin_kb():
            KeyboardButton("💾 Backup Data", color="active"))
     kb.row(KeyboardButton("🔍 រក Order ID", color="active"),
            KeyboardButton("👤 រក User ID", color="progress"))
+    kb.row(KeyboardButton("💳 ដាក់លុយតាម ABA Code", color="active"))
     kb.row(KeyboardButton("👤 ប្តូរទៅ User", color="progress"))
     # populate stripped-text map so premium icons still match handlers
     try:
@@ -10170,6 +10171,50 @@ def _redeem_pay_code(admin_uid, code):
     else:
         bot.send_message(admin_uid, "❌ មិនអាចចូលលុយបានទេ។ សូមមើល log / pay-security alert។")
 
+def _pay_code_preview(uid, code):
+    """Admin pasted a code: show the deposit and ask for a confirm button (no credit yet)."""
+    did, dep = None, None
+    for _did, _d in smm_deps.items():
+        if str(_d.get("reference") or "") == code:
+            did, dep = _did, _d
+            break
+    if not dep:
+        bot.send_message(uid, "❌ រកមិនឃើញ QR/កូដនេះក្នុងប្រព័ន្ធទេ។ សូមពិនិត្យកូដម្តងទៀត ឬ ✕ Cancel។",
+                         reply_markup=cancel_kb())
+        return
+    if dep.get("status") == "confirmed":
+        bot.send_message(uid, "✅ កូដនេះបានចូលលុយរួចហើយ។", reply_markup=admin_kb())
+        return
+    if dep.get("status") != "pending":
+        bot.send_message(uid, f"⚠️ កូដនេះមានស្ថានភាព: {dep.get('status')} — មិនអាចចូលលុយបានទេ។",
+                         reply_markup=admin_kb())
+        return
+    owner = str(dep.get("uid") or "")
+    amount = float(dep.get("amount") or 0)
+    kb = InlineKeyboardMarkup()
+    kb.row(InlineKeyboardButton("✅ បញ្ជាក់ចូលលុយ", callback_data=f"paycode:ok:{code}"),
+           InlineKeyboardButton("✕ បោះបង់", callback_data="paycode:no"))
+    bot.send_message(uid,
+        f"💳 <b>បញ្ជាក់ការចូលលុយ</b>\n"
+        f"👤 User: <code>{owner}</code>\n"
+        f"💰 ចំនួន: <b>${amount:.2f}</b>\n"
+        f"📌 Ref: <code>{code}</code>\n\n"
+        f"តើចង់ចូលលុយទៅ wallet របស់ user នេះមែនទេ?",
+        parse_mode="HTML", reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("paycode:"))
+def cb_paycode(call):
+    uid = call.message.chat.id
+    if uid != ADMIN_ID:
+        bot.answer_callback_query(call.id); return
+    if call.data == "paycode:no":
+        bot.answer_callback_query(call.id, "បោះបង់")
+        bot.send_message(uid, "✕ បានបោះបង់។", reply_markup=admin_kb())
+        return
+    code = call.data[len("paycode:ok:"):]
+    bot.answer_callback_query(call.id)
+    _redeem_pay_code(uid, code)  # re-checks status, ABA paid, credits once, notifies owner
+
 @bot.message_handler(func=lambda m: True)
 def handle_msg(message):
     uid     = message.chat.id
@@ -10197,18 +10242,27 @@ def handle_msg(message):
                          reply_markup=_force_sub_kb())
         return
 
-    # ── Admin: paste ABA payment code → credit the user who made that QR (once) ──
-    # Only ADMIN_ID can do this. The wallet credited is the deposit owner's.
-    if uid == ADMIN_ID and step is None and _PAY_CODE_RE.match(text.strip()):
-        _redeem_pay_code(uid, text.strip())
-        return
-
     # ── Cancel ──
     if text == "✕ Cancel":
         waiting.pop(uid, None)
         bot.send_message(uid, t(uid, "cancel_ok"),
                          reply_markup=main_kb(uid) if (uid not in sub_admins and uid != ADMIN_ID) or uid in admin_user_mode
                          else (admin_kb() if uid == ADMIN_ID else sub_admin_kb()))
+        return
+
+    # ── (admin) ដាក់លុយតាម ABA Code: ប៊ូតុង → paste កូដ → ប៊ូតុងបញ្ជាក់ ──
+    if uid == ADMIN_ID and text == "💳 ដាក់លុយតាម ABA Code":
+        waiting[uid] = {"step": "await_pay_code"}
+        bot.send_message(uid, "💳 Paste <b>កូដ ABA</b> (🔖 reference ពី QR) ឥឡូវ:",
+                         parse_mode="HTML", reply_markup=cancel_kb())
+        return
+    if uid == ADMIN_ID and isinstance(step, dict) and step.get("step") == "await_pay_code":
+        code = text.strip()
+        if not _PAY_CODE_RE.match(code):
+            bot.send_message(uid, "❌ កូដមិនត្រឹមត្រូវ។ Paste ម្តងទៀត ឬ ✕ Cancel។", reply_markup=cancel_kb())
+            return
+        waiting.pop(uid, None)
+        _pay_code_preview(uid, code)
         return
 
     # ── Admin ↔ User view switch ──
