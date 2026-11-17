@@ -10139,32 +10139,36 @@ def cb_stats(call):
 
 _PAY_CODE_RE = re.compile(r"^[A-Za-z0-9_\-]{12,50}$")
 
-def _redeem_pay_code(uid, code):
-    """Credit a pending ABA deposit that the user proves they paid by sending its code."""
-    uid_str = str(uid)
+def _redeem_pay_code(admin_uid, code):
+    """Admin: credit the pending ABA deposit identified by `code` to its owner's wallet, once."""
     did, dep = None, None
     for _did, _d in smm_deps.items():
-        if str(_d.get("uid")) == uid_str and str(_d.get("reference") or "") == code:
+        if str(_d.get("reference") or "") == code:
             did, dep = _did, _d
             break
     if not dep:
-        bot.send_message(uid, "❌ រកមិនឃើញ QR/កូដនេះសម្រាប់គណនីរបស់អ្នកទេ។ សូមពិនិត្យកូដឲ្យត្រឹមត្រូវ។")
+        bot.send_message(admin_uid, "❌ រកមិនឃើញ QR/កូដនេះក្នុងប្រព័ន្ធទេ។ សូមពិនិត្យកូដឲ្យត្រឹមត្រូវ។")
         return
+    owner = str(dep.get("uid") or "")
     amount = float(dep.get("amount") or 0)
     if dep.get("status") == "confirmed":
-        bot.send_message(uid, f"✅ កូដនេះបានចូលលុយរួចហើយ (${amount:.2f})។")
+        bot.send_message(admin_uid, f"✅ កូដនេះបានចូលលុយរួចហើយ (user {owner}, ${amount:.2f})។")
         return
     if dep.get("status") != "pending":
-        bot.send_message(uid, "⚠️ កូដនេះមិនអាចប្រើបានទេ។ ទាក់ទង Admin ប្រសិនបើមានបញ្ហា។")
+        bot.send_message(admin_uid, f"⚠️ កូដនេះមានស្ថានភាព: {dep.get('status')} — មិនអាចចូលលុយបានទេ។")
         return
     info = _aba_check_detail(code)
     if not info.get("paid"):
-        bot.send_message(uid, "⏳ មិនទាន់ឃើញការបង់ប្រាក់សម្រាប់កូដនេះទេ។ បង់រួចហើយសូមសាកម្តងទៀតក្នុងតិចនាទី។")
+        bot.send_message(admin_uid, "⏳ ABA មិនទាន់បញ្ជាក់ការបង់ប្រាក់សម្រាប់កូដនេះទេ។ សូមសាកម្តងទៀតក្រោយ។")
         return
-    if _safe_confirm_deposit(did, code, paid_amount=info.get("amount"), source="user_code"):
-        bot.send_message(uid, f"✅ បានចូលលុយ <b>${amount:.2f}</b> ទៅ Wallet របស់អ្នករួចហើយ!", parse_mode="HTML")
+    if _safe_confirm_deposit(did, code, paid_amount=info.get("amount"), source="admin_code"):
+        bot.send_message(admin_uid, f"✅ បានចូលលុយ <b>${amount:.2f}</b> ទៅ user <code>{owner}</code> រួចហើយ។", parse_mode="HTML")
+        try:
+            bot.send_message(int(owner), f"✅ លុយ <b>${amount:.2f}</b> បានចូល Wallet របស់អ្នករួចហើយ!", parse_mode="HTML")
+        except Exception as _e:
+            logger.debug(f"[silent] notify user failed: {_e}")
     else:
-        bot.send_message(uid, "❌ មិនអាចចូលលុយបានទេ។ ទាក់ទង Admin ជាមួយកូដនេះ។")
+        bot.send_message(admin_uid, "❌ មិនអាចចូលលុយបានទេ។ សូមមើល log / pay-security alert។")
 
 @bot.message_handler(func=lambda m: True)
 def handle_msg(message):
@@ -10193,10 +10197,9 @@ def handle_msg(message):
                          reply_markup=_force_sub_kb())
         return
 
-    # ── ដាក់លុយដោយបញ្ចូលកូដ ABA (payment ID) ──
-    # User ចម្លងកូដពី "🆕 QR ត្រូវបានបង្កើត" ហើយ paste ចូល bot។ Bot ផ្ទៀងផ្ទាត់ជាមួយ ABA
-    # ហើយចូលលុយតែ 1 ដង (តាម _safe_confirm_deposit)។ កូដត្រូវជារបស់ user នេះប៉ុណ្ណោះ។
-    if step is None and _PAY_CODE_RE.match(text.strip()):
+    # ── Admin: paste ABA payment code → credit the user who made that QR (once) ──
+    # Only ADMIN_ID can do this. The wallet credited is the deposit owner's.
+    if uid == ADMIN_ID and step is None and _PAY_CODE_RE.match(text.strip()):
         _redeem_pay_code(uid, text.strip())
         return
 
