@@ -10137,6 +10137,35 @@ def cb_stats(call):
     else:
         bot.send_message(uid, txt, parse_mode="HTML")
 
+_PAY_CODE_RE = re.compile(r"^[A-Za-z0-9_\-]{12,50}$")
+
+def _redeem_pay_code(uid, code):
+    """Credit a pending ABA deposit that the user proves they paid by sending its code."""
+    uid_str = str(uid)
+    did, dep = None, None
+    for _did, _d in smm_deps.items():
+        if str(_d.get("uid")) == uid_str and str(_d.get("reference") or "") == code:
+            did, dep = _did, _d
+            break
+    if not dep:
+        bot.send_message(uid, "❌ រកមិនឃើញ QR/កូដនេះសម្រាប់គណនីរបស់អ្នកទេ។ សូមពិនិត្យកូដឲ្យត្រឹមត្រូវ។")
+        return
+    amount = float(dep.get("amount") or 0)
+    if dep.get("status") == "confirmed":
+        bot.send_message(uid, f"✅ កូដនេះបានចូលលុយរួចហើយ (${amount:.2f})។")
+        return
+    if dep.get("status") != "pending":
+        bot.send_message(uid, "⚠️ កូដនេះមិនអាចប្រើបានទេ។ ទាក់ទង Admin ប្រសិនបើមានបញ្ហា។")
+        return
+    info = _aba_check_detail(code)
+    if not info.get("paid"):
+        bot.send_message(uid, "⏳ មិនទាន់ឃើញការបង់ប្រាក់សម្រាប់កូដនេះទេ។ បង់រួចហើយសូមសាកម្តងទៀតក្នុងតិចនាទី។")
+        return
+    if _safe_confirm_deposit(did, code, paid_amount=info.get("amount"), source="user_code"):
+        bot.send_message(uid, f"✅ បានចូលលុយ <b>${amount:.2f}</b> ទៅ Wallet របស់អ្នករួចហើយ!", parse_mode="HTML")
+    else:
+        bot.send_message(uid, "❌ មិនអាចចូលលុយបានទេ។ ទាក់ទង Admin ជាមួយកូដនេះ។")
+
 @bot.message_handler(func=lambda m: True)
 def handle_msg(message):
     uid     = message.chat.id
@@ -10162,6 +10191,13 @@ def handle_msg(message):
     if uid != ADMIN_ID and uid not in sub_admins and not _is_channel_member(uid):
         bot.send_message(uid, _force_sub_gate_text(), parse_mode="HTML",
                          reply_markup=_force_sub_kb())
+        return
+
+    # ── ដាក់លុយដោយបញ្ចូលកូដ ABA (payment ID) ──
+    # User ចម្លងកូដពី "🆕 QR ត្រូវបានបង្កើត" ហើយ paste ចូល bot។ Bot ផ្ទៀងផ្ទាត់ជាមួយ ABA
+    # ហើយចូលលុយតែ 1 ដង (តាម _safe_confirm_deposit)។ កូដត្រូវជារបស់ user នេះប៉ុណ្ណោះ។
+    if step is None and _PAY_CODE_RE.match(text.strip()):
+        _redeem_pay_code(uid, text.strip())
         return
 
     # ── Cancel ──
