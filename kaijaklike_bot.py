@@ -5062,7 +5062,7 @@ def _verify_paid_amount(expected, paid_amount, dep_id, reference, uid):
         logger.info(f"[pay_verify] overpay dep={dep_id} expected={expected} paid={paid} — credit expected only")
     return True, expected
 
-def _safe_confirm_deposit(dep_id, reference, paid_amount=None, source="poll"):
+def _safe_confirm_deposit(dep_id, reference, paid_amount=None, source="poll", allow_expired=False):
     """Atomic credit path — ការពារ double-credit / ref reuse / underpay.
     Returns True បើ credit ជោគជ័យ។"""
     global smm_deps, used_payment_refs
@@ -5071,8 +5071,9 @@ def _safe_confirm_deposit(dep_id, reference, paid_amount=None, source="poll"):
         if not dep:
             logger.warning(f"[safe_confirm] dep missing {dep_id}")
             return False
-        if dep.get("status") != "pending":
-            logger.info(f"[safe_confirm] skip dep={dep_id} status={dep.get('status')} source={source}")
+        _st = dep.get("status")
+        if _st != "pending" and not (allow_expired and _st == "expired"):
+            logger.info(f"[safe_confirm] skip dep={dep_id} status={_st} source={source}")
             return False
         uid_str = str(dep.get("uid") or "")
         try:
@@ -10155,14 +10156,14 @@ def _redeem_pay_code(admin_uid, code):
     if dep.get("status") == "confirmed":
         bot.send_message(admin_uid, f"✅ កូដនេះបានចូលលុយរួចហើយ (user {owner}, ${amount:.2f})។")
         return
-    if dep.get("status") != "pending":
+    if dep.get("status") not in ("pending", "expired"):
         bot.send_message(admin_uid, f"⚠️ កូដនេះមានស្ថានភាព: {dep.get('status')} — មិនអាចចូលលុយបានទេ។")
         return
     info = _aba_check_detail(code)
     if not info.get("paid"):
         bot.send_message(admin_uid, "⏳ ABA មិនទាន់បញ្ជាក់ការបង់ប្រាក់សម្រាប់កូដនេះទេ។ សូមសាកម្តងទៀតក្រោយ។")
         return
-    if _safe_confirm_deposit(did, code, paid_amount=info.get("amount"), source="admin_code"):
+    if _safe_confirm_deposit(did, code, paid_amount=info.get("amount"), source="admin_code", allow_expired=True):
         bot.send_message(admin_uid, f"✅ បានចូលលុយ <b>${amount:.2f}</b> ទៅ user <code>{owner}</code> រួចហើយ។", parse_mode="HTML")
         try:
             bot.send_message(int(owner), f"✅ លុយ <b>${amount:.2f}</b> បានចូល Wallet របស់អ្នករួចហើយ!", parse_mode="HTML")
@@ -10185,10 +10186,11 @@ def _pay_code_preview(uid, code):
     if dep.get("status") == "confirmed":
         bot.send_message(uid, "✅ កូដនេះបានចូលលុយរួចហើយ។", reply_markup=admin_kb())
         return
-    if dep.get("status") != "pending":
+    if dep.get("status") not in ("pending", "expired"):
         bot.send_message(uid, f"⚠️ កូដនេះមានស្ថានភាព: {dep.get('status')} — មិនអាចចូលលុយបានទេ។",
                          reply_markup=admin_kb())
         return
+    _expired_note = "\n⌛ <i>QR នេះផុតកំណត់ហើយ — admin អាចចូលលុយបាន</i>" if dep.get("status") == "expired" else ""
     owner = str(dep.get("uid") or "")
     amount = float(dep.get("amount") or 0)
     kb = InlineKeyboardMarkup()
@@ -10198,7 +10200,7 @@ def _pay_code_preview(uid, code):
         f"💳 <b>បញ្ជាក់ការចូលលុយ</b>\n"
         f"👤 User: <code>{owner}</code>\n"
         f"💰 ចំនួន: <b>${amount:.2f}</b>\n"
-        f"📌 Ref: <code>{code}</code>\n\n"
+        f"📌 Ref: <code>{code}</code>{_expired_note}\n\n"
         f"តើចង់ចូលលុយទៅ wallet របស់ user នេះមែនទេ?",
         parse_mode="HTML", reply_markup=kb)
 
