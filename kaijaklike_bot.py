@@ -9757,6 +9757,11 @@ def cb_emojipick(call):
         f"<i>bot នឹងចាប់យក ID ដោយស្វ័យប្រវត្តិ ហើយភ្ជាប់ទៅ {ch} ភ្លាមៗ</i>",
         parse_mode="HTML", reply_markup=cancel_kb())
 
+def _broadcast_copy(u_id, message):
+    """ចម្លងសារ admin ទៅ user ដោយផ្ទាល់ (copy_message) — រក្សា premium emoji, formatting,
+    photo/video/voice/caption ដូចដែល admin បានផ្ញើ (គ្មាន "Forwarded from")។"""
+    bot.copy_message(int(u_id), message.chat.id, message.message_id)
+
 def _do_broadcast(admin_uid, message):
     """ផ្សព្វផ្សាយទៅ User — skip banned + blocked, rate-limit, រាយការណ៍ progress"""
     waiting.pop(admin_uid, None)
@@ -9773,14 +9778,7 @@ def _do_broadcast(admin_uid, message):
     sent = failed = blocked_n = 0
     for i, u_id in enumerate(targets, 1):
         try:
-            if message.photo:
-                bot.send_photo(int(u_id), message.photo[-1].file_id, caption=message.caption or "")
-            elif message.video:
-                bot.send_video(int(u_id), message.video.file_id, caption=message.caption or "")
-            elif message.voice:
-                bot.send_voice(int(u_id), message.voice.file_id, caption=message.caption or "")
-            else:
-                bot.send_message(int(u_id), message.text or "", parse_mode="HTML")
+            _broadcast_copy(u_id, message)
             sent += 1
         except Exception as e:
             err = str(e)
@@ -9795,14 +9793,7 @@ def _do_broadcast(admin_uid, message):
                 wait = min(max(wait, 1), 30)
                 time.sleep(wait)
                 try:
-                    if message.photo:
-                        bot.send_photo(int(u_id), message.photo[-1].file_id, caption=message.caption or "")
-                    elif message.video:
-                        bot.send_video(int(u_id), message.video.file_id, caption=message.caption or "")
-                    elif message.voice:
-                        bot.send_voice(int(u_id), message.voice.file_id, caption=message.caption or "")
-                    else:
-                        bot.send_message(int(u_id), message.text or "", parse_mode="HTML")
+                    _broadcast_copy(u_id, message)
                     sent += 1
                 except Exception as e2:
                     if _is_block_error(e2):
