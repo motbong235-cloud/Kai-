@@ -8,9 +8,26 @@ MARKER = "# === FOX ORDER FLOW ==="
 
 INJECT_HANDLER = r'''
 # === FOX ORDER FLOW ===
-def _is_fox_service(s) -> bool:
+def _is_fox_service(s, slug=None) -> bool:
     try:
-        return bool(s and (s.get("fox") or s.get("provider_id") == "fox" or s.get("fox_game_code")))
+        if not s:
+            return False
+        if s.get("fox") or s.get("provider_id") == "fox":
+            return True
+        if s.get("fox_game_code") or s.get("fox_item_code"):
+            return True
+        slug = str(slug or "")
+        if slug.startswith("fox_"):
+            return True
+        desc = str(s.get("description") or "").lower()
+        if "topupfox" in desc or "fox ·" in desc:
+            return True
+        cat = str(s.get("category") or "").lower()
+        if s.get("flat_price") and not s.get("api_id") and any(
+            x in cat for x in ("free fire", "freefire", "mlbb", "pubg", "roblox", "genshin", "honor", "mobile legend")
+        ):
+            return True
+        return False
     except Exception:
         return False
 
@@ -44,7 +61,7 @@ def _fox_place_user_order(uid, slug, s, player_id, server_id="", price=None, qty
     gcode = s.get("fox_game_code") or ""
     icode = s.get("fox_item_code") or ""
     if not gcode or not icode:
-        return False, "❌ Service ខ្វះ fox_game_code / fox_item_code", None
+        return False, "❌ Service ខ្វះ fox_game_code / fox_item_code — Remove Fox រួច Add game ម្ដងទៀត", None
     ded_bal(uid, price)
     uid_str = str(uid)
     oid = _make_order_id()
@@ -149,7 +166,7 @@ def main():
     except Exception:
         pass
     # ── Fox TopUp: ask Player ID instead of link ──
-    if _is_fox_service(s):
+    if _is_fox_service(s, slug):
         base_price = _smm_price_for_order(slug, qty)
         price, disc_amt, pct = _apply_user_discount(uid, slug, base_price)
         waiting[uid] = {
@@ -184,11 +201,25 @@ def main():
         return
     base_price = _smm_price_for_order(slug, qty)
 '''
-    if 'step": "fox_player_id"' not in src and "step': 'fox_player_id'" not in src:
+    if 'step": "fox_player_id"' not in src:
         if old not in src:
-            raise SystemExit("cb_smmqty insert point not found")
-        src = src.replace(old, new, 1)
-        print("[fox_order] cb_smmqty fox branch")
+            # already has normalize from cost_rate without fox branch
+            old2 = '''    s     = smm_services.get(slug)
+    if not s: return
+    try:
+        s = _normalize_smm_service(s)
+    except Exception:
+        pass
+    base_price = _smm_price_for_order(slug, qty)
+'''
+            if old2 in src:
+                src = src.replace(old2, new, 1)
+                print("[fox_order] cb_smmqty fox branch (after normalize)")
+            else:
+                raise SystemExit("cb_smmqty insert point not found")
+        else:
+            src = src.replace(old, new, 1)
+            print("[fox_order] cb_smmqty fox branch")
     else:
         print("[fox_order] cb_smmqty branch already present")
 

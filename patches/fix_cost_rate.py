@@ -29,15 +29,27 @@ def _normalize_smm_service(s: dict) -> dict:
         except Exception:
             pass
         s["cost_rate"] = 0
+    if s.get("fox_game_code") or s.get("fox_item_code") or str(s.get("provider_id")) == "fox":
+        s["fox"] = True
+        s["provider_id"] = "fox"
+        if s.get("flat_price") is None and s.get("price") is not None:
+            try:
+                s["flat_price"] = float(s["price"])
+            except Exception:
+                pass
+            s["cost_rate"] = 0
     return s
 
 def _normalize_all_smm_services():
     try:
         changed = False
         for slug, s in list(smm_services.items()):
-            before = (s.get("cost_rate"), s.get("flat_price"))
+            before = (s.get("cost_rate"), s.get("flat_price"), s.get("fox"))
             _normalize_smm_service(s)
-            after = (s.get("cost_rate"), s.get("flat_price"))
+            if slug.startswith("fox_"):
+                s["fox"] = True
+                s["provider_id"] = "fox"
+            after = (s.get("cost_rate"), s.get("flat_price"), s.get("fox"))
             if before != after:
                 changed = True
         if changed:
@@ -103,19 +115,12 @@ def main():
             else:
                 print("[fix_cost_rate] WARN could not find smm_services load")
 
-    old_cb = '''    slug = call.data[7:]
+    old_cb3 = '''    slug = _cb_resolve(call.data, "smmsvc", _CB_SVC_MAP)
     bot.answer_callback_query(call.id)
     s = smm_services.get(slug)
     if not s: return
-    sr   = _smm_sell_rate(s.get("cost_rate", 0), slug)
 '''
-    old_cb2 = '''    slug = call.data[7:]
-    bot.answer_callback_query(call.id)
-    s = smm_services.get(slug)
-    if not s: return
-    sr   = _smm_sell_rate(s["cost_rate"], slug)
-'''
-    new_cb = '''    slug = call.data[7:]
+    new_cb3 = '''    slug = _cb_resolve(call.data, "smmsvc", _CB_SVC_MAP)
     bot.answer_callback_query(call.id)
     s = smm_services.get(slug)
     if not s: return
@@ -123,37 +128,23 @@ def main():
         s = _normalize_smm_service(s)
     except Exception:
         pass
-    sr   = _smm_sell_rate(s.get("cost_rate", 0), slug)
 '''
-    for o in [old_cb, old_cb2]:
-        if o in src:
-            src = src.replace(o, new_cb, 1)
-            print("[fix_cost_rate] cb_smmsvc normalize")
-            break
+    pos = src.find('def cb_smmsvc')
+    chunk = src[pos:pos+900] if pos >= 0 else ''
+    if old_cb3 in src and '_normalize_smm_service(s)' not in chunk:
+        src = src.replace(old_cb3, new_cb3, 1)
+        print("[fix_cost_rate] cb_smmsvc normalize (resolve)")
+    elif '_normalize_smm_service(s)' in chunk:
+        print("[fix_cost_rate] cb_smmsvc already normalized")
     else:
-        old_cb3 = '''    slug = _cb_resolve(call.data, "smmsvc", _CB_SVC_MAP)
+        old_cb = '''    slug = call.data[7:]
     bot.answer_callback_query(call.id)
     s = smm_services.get(slug)
     if not s: return
 '''
-        new_cb3 = '''    slug = _cb_resolve(call.data, "smmsvc", _CB_SVC_MAP)
-    bot.answer_callback_query(call.id)
-    s = smm_services.get(slug)
-    if not s: return
-    try:
-        s = _normalize_smm_service(s)
-    except Exception:
-        pass
-'''
-        if old_cb3 in src:
-            # only if not already normalized nearby
-            pos = src.find('def cb_smmsvc')
-            chunk = src[pos:pos+800] if pos >= 0 else ''
-            if '_normalize_smm_service(s)' not in chunk:
-                src = src.replace(old_cb3, new_cb3, 1)
-                print("[fix_cost_rate] cb_smmsvc normalize (resolve)")
-            else:
-                print("[fix_cost_rate] cb_smmsvc already normalized")
+        if old_cb in src and pos >= 0:
+            src = src.replace(old_cb, old_cb + '    try:\n        s = _normalize_smm_service(s)\n    except Exception:\n        pass\n', 1)
+            print("[fix_cost_rate] cb_smmsvc normalize")
         else:
             print("[fix_cost_rate] cb_smmsvc pattern miss")
 
