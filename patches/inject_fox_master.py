@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Inject TopUpFox (master-only) into kaijaklike_bot.py at build time."""
+"""Inject TopUpFox (master-only) into kaijaklike_bot.py at build time.
+
+CRITICAL: handlers must be registered BEFORE the catch-all
+  @bot.message_handler(func=lambda m: True)  # handle_msg
+Otherwise TopUpFox button falls through to menu fallback.
+"""
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -10,6 +15,7 @@ MARKER = "# === FOX RESELLER MASTER INJECT ==="
 INJECT = r'''
 # === FOX RESELLER MASTER INJECT ===
 # TopUpFox Reseller — https://reseller.topupfoxbot.com — MASTER only
+# Placed BEFORE catch-all handle_msg so button is not swallowed.
 try:
     import fox_integration as _fox
 except Exception as _fox_imp_err:
@@ -62,7 +68,7 @@ def fox_admin_menu(message):
         bot.send_message(uid, "🚫 TopUpFox មានតែក្នុង <b>Bot Master</b> ប៉ុណ្ណោះ។", parse_mode="HTML")
         return
     if _fox is None:
-        bot.send_message(uid, "❌ <b>fox_integration</b> មិន load បាន។\nពិនិត្យ file <code>fox_integration.py</code> + <code>reseller_client.py</code> + package <code>cryptography</code>។", parse_mode="HTML")
+        bot.send_message(uid, "❌ <b>fox_integration</b> មិន load បាន។\nពិនិត្យ <code>fox_integration.py</code> + <code>reseller_client.py</code> + package <code>cryptography</code>។", parse_mode="HTML")
         return
     if uid != ADMIN_ID:
         return
@@ -245,29 +251,39 @@ def fox_setup_steps(message):
         return
 '''
 
+
 def main():
     src = BOT.read_text(encoding="utf-8")
     if MARKER in src:
         start = src.find(MARKER)
+        cut = None
         for em in [
-            "# ═══════════════════════════════════════════════════════════\n#  MAIN\n# ═══════════════════════════════════════════════════════════",
+            "@bot.message_handler(func=lambda m: True)",
             'if __name__ == "__main__":',
         ]:
-            i = src.find(em, start)
+            i = src.find(em, start + len(MARKER))
             if i != -1:
-                src = src[:start] + src[i:]
-                print("[inject_fox] removed old inject block")
+                cut = i
                 break
-    needle = "# ═══════════════════════════════════════════════════════════\n#  MAIN\n# ═══════════════════════════════════════════════════════════"
-    if needle not in src:
-        needle = 'if __name__ == "__main__":'
-        if needle not in src:
-            raise SystemExit("cannot find inject point")
+        if cut is not None:
+            src = src[:start] + src[cut:]
+            print("[inject_fox] removed old inject block")
+
+    needle = "@bot.message_handler(func=lambda m: True)\ndef handle_msg(message):"
+    if needle in src:
         src = src.replace(needle, INJECT + "\n\n" + needle, 1)
+    elif "@bot.message_handler(func=lambda m: True)" in src:
+        src = src.replace(
+            "@bot.message_handler(func=lambda m: True)",
+            INJECT + "\n\n@bot.message_handler(func=lambda m: True)",
+            1,
+        )
     else:
-        src = src.replace(needle, INJECT + "\n\n" + needle, 1)
+        raise SystemExit("cannot find catch-all handle_msg inject point")
+
     BOT.write_text(src, encoding="utf-8")
-    print("[inject_fox] injected OK")
+    print("[inject_fox] injected OK (before catch-all)")
+
 
 if __name__ == "__main__":
     main()
