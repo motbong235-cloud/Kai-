@@ -98,7 +98,12 @@ def slug_for_item(game_code: str, item_code: str) -> str:
     return s[:80]
 
 
-def service_from_item(game: dict, item: dict, markup_pct: float) -> dict:
+def service_from_item(
+    game: dict,
+    item: dict,
+    markup_pct: float,
+) -> dict:
+    """Build an smm_services-style entry for a Fox package."""
     gcode = str(game.get("code") or game.get("game_code") or "")
     icode = str(item.get("code") or item.get("item_code") or "")
     name = item.get("name") or item.get("label") or icode
@@ -107,10 +112,14 @@ def service_from_item(game: dict, item: dict, markup_pct: float) -> dict:
     if rprice is None:
         rprice = item.get("price") or item.get("cost") or 0
     price = sell_price(float(rprice), markup_pct)
+    # Category = game type we add (not fixed "Game TopUp Fox")
+    cat = str(gname or gcode or "Game").strip()
+    if not cat.startswith("🎮"):
+        cat = f"🎮 {cat}"
     return {
         "label": f"{gname} · {name}",
-        "description": f"TopUpFox · {gcode}",
-        "category": "🎮 Game TopUp (Fox)",
+        "description": f"TopUpFox · {gcode} · {icode}",
+        "category": cat,
         "price": price,
         "min": 1,
         "max": 1,
