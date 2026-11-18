@@ -85,6 +85,7 @@ def fox_admin_menu(message):
     kb.add(InlineKeyboardButton("🎮 Sync Games → Services", callback_data="fox:sync", color="active"))
     kb.add(InlineKeyboardButton("📋 List Games", callback_data="fox:games", color="progress"))
     kb.add(InlineKeyboardButton("📈 Markup %", callback_data="fox:markup", color="progress"))
+    kb.add(InlineKeyboardButton("➕ Add by ID (1 item)", callback_data="fox:addid", color="active"))
     bot.send_message(
         uid,
         f"🦊 <b>TopUpFox Reseller</b> <i>(Master only)</i>\n"
@@ -128,6 +129,24 @@ def fox_admin_cb(call):
     if act == "markup":
         waiting[uid] = "fox_markup"
         bot.send_message(uid, f"📈 Markup បច្ចុប្បន្ន <b>{float(fox_cfg.get('markup_pct') or 15):.1f}%</b>\nផ្ញើលេខថ្មី (ឧ. 15):", parse_mode="HTML", reply_markup=cancel_kb())
+        return
+    if act == "addid":
+        if not _fox.fox_ready(fox_cfg):
+            bot.send_message(uid, "❌ មិនទាន់ Setup"); return
+        waiting[uid] = "fox_add_item_code"
+        bot.send_message(
+            uid,
+            "➕ <b>Add 1 service by item code</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "ផ្ញើ <b>item code</b> តែមួយ\n"
+            "ឧ: <code>freefire_like</code>\n"
+            "ឬ <code>mlbb_86</code>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "Bot នឹងស្វែងក្នុង Fox catalog រួចបន្ថែម service តែមួយ។\n"
+            "/cancel ដើម្បីបោះបង់",
+            parse_mode="HTML",
+            reply_markup=cancel_kb(),
+        )
         return
     if act == "games":
         if not _fox.fox_ready(fox_cfg):
@@ -192,7 +211,7 @@ def fox_admin_cb(call):
             bot.send_message(uid, f"❌ Sync failed:\n<code>{e}</code>", parse_mode="HTML")
         return
 
-@bot.message_handler(func=lambda m: waiting.get(m.from_user.id) in ("fox_uid", "fox_key", "fox_secret", "fox_markup") and m.from_user.id == ADMIN_ID)
+@bot.message_handler(func=lambda m: waiting.get(m.from_user.id) in ("fox_uid", "fox_key", "fox_secret", "fox_markup", "fox_add_item_code") and m.from_user.id == ADMIN_ID)
 def fox_setup_steps(message):
     uid = message.from_user.id
     if not _fox_admin_only(uid):
@@ -236,6 +255,90 @@ def fox_setup_steps(message):
             bot.send_message(uid, f"✅ <b>TopUpFox Setup រួច!</b>\n💰 Balance: <b>${b:.4f}</b>", parse_mode="HTML", reply_markup=admin_kb())
         else:
             bot.send_message(uid, f"⚠️ រក្សាទុកហើយ ប៉ុន្តែ test balance បរាជ័យ:\n<code>{err}</code>", parse_mode="HTML", reply_markup=admin_kb())
+        return
+    if st == "fox_add_item_code":
+        code = txt.strip().lower().replace(" ", "_")
+        if not code or len(code) < 2:
+            bot.send_message(uid, "⚠️ ផ្ញើ item code ឧ. <code>freefire_like</code>", parse_mode="HTML"); return
+        bot.send_message(uid, f"🔍 កំពុងស្វែង <code>{code}</code> ក្នុង Fox…", parse_mode="HTML")
+        try:
+            games = _fox.fox_list_games(fox_cfg)
+            markup = float(fox_cfg.get("markup_pct") or 15)
+            found = None
+            for g in games:
+                gcode = str(g.get("code") or g.get("game_code") or "")
+                if not gcode:
+                    continue
+                try:
+                    detail = _fox.fox_game_detail(fox_cfg, gcode)
+                except Exception:
+                    detail = g
+                items = detail.get("items") or detail.get("packages") or []
+                if not items and isinstance(detail.get("packages"), dict):
+                    items = list(detail["packages"].values())
+                for it in items:
+                    icode = str(it.get("code") or it.get("item_code") or "").strip()
+                    if not icode:
+                        continue
+                    il = icode.lower()
+                    if il == code or il.endswith("_" + code) or code in il:
+                        found = (detail if detail else g, it, gcode, icode)
+                        break
+                if found:
+                    break
+            if not found and "_" in code:
+                maybe_game = code.split("_", 1)[0]
+                try:
+                    detail = _fox.fox_game_detail(fox_cfg, maybe_game)
+                    items = detail.get("items") or detail.get("packages") or []
+                    for it in items:
+                        icode = str(it.get("code") or it.get("item_code") or "").strip()
+                        if icode.lower() == code:
+                            found = (detail, it, maybe_game, icode)
+                            break
+                except Exception:
+                    pass
+            if not found:
+                waiting.pop(uid, None)
+                bot.send_message(
+                    uid,
+                    f"❌ រកមិនឃើញ <code>{code}</code> ក្នុង Fox catalog។\n"
+                    f"ពិនិត្យ code នៅ panel ឬ List Games មុន។",
+                    parse_mode="HTML",
+                    reply_markup=admin_kb(),
+                )
+                return
+            game, it, gcode, icode = found
+            slug = _fox.slug_for_item(gcode, icode)
+            entry = _fox.service_from_item(game, it, markup)
+            if slug in smm_services:
+                old = smm_services[slug]
+                entry["open"] = old.get("open", True)
+                smm_services[slug] = entry
+                action = "កែ (update)"
+            else:
+                smm_services[slug] = entry
+                action = "បន្ថែម (new)"
+            _save(SMM_SVC_FILE, smm_services)
+            waiting.pop(uid, None)
+            bot.send_message(
+                uid,
+                f"✅ <b>{action}</b> service\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🏷 <b>{entry.get('label')}</b>\n"
+                f"🆔 slug: <code>{slug}</code>\n"
+                f"🎮 game: <code>{gcode}</code>\n"
+                f"📦 item: <code>{icode}</code>\n"
+                f"💰 តម្លៃលក់: <b>${float(entry.get('price') or 0):.4f}</b>\n"
+                f"📈 Markup: {markup:.1f}%\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"User នឹងឃើញក្នុង catalog បន្ទាប់ពី refresh។",
+                parse_mode="HTML",
+                reply_markup=admin_kb(),
+            )
+        except Exception as e:
+            waiting.pop(uid, None)
+            bot.send_message(uid, f"❌ Search/add failed:\n<code>{e}</code>", parse_mode="HTML", reply_markup=admin_kb())
         return
     if st == "fox_markup":
         try:
