@@ -42,11 +42,29 @@ def admin_smm_kb():
             pass
     return kb
 
-@bot.message_handler(func=lambda m: _restore_btn_text(m) == "🦊 TopUpFox" and m.from_user.id == ADMIN_ID)
+def _is_fox_menu_btn(m):
+    try:
+        if not m or getattr(m, "from_user", None) is None:
+            return False
+        if m.from_user.id != ADMIN_ID:
+            return False
+        t = (_restore_btn_text(m) or "") + " " + (m.text or "")
+        tl = t.lower()
+        return ("topupfox" in tl) or ("topup fox" in tl) or ("🦊" in t and "fox" in tl)
+    except Exception:
+        return False
+
+@bot.message_handler(commands=["fox", "topupfox"])
+@bot.message_handler(func=_is_fox_menu_btn)
 def fox_admin_menu(message):
     uid = message.from_user.id
-    if not _fox_admin_only(uid):
+    if not IS_MASTER:
         bot.send_message(uid, "🚫 TopUpFox មានតែក្នុង <b>Bot Master</b> ប៉ុណ្ណោះ។", parse_mode="HTML")
+        return
+    if _fox is None:
+        bot.send_message(uid, "❌ <b>fox_integration</b> មិន load បាន។\nពិនិត្យ file <code>fox_integration.py</code> + <code>reseller_client.py</code> + package <code>cryptography</code>។", parse_mode="HTML")
+        return
+    if uid != ADMIN_ID:
         return
     ready = _fox.fox_ready(fox_cfg)
     bal_s = "—"
@@ -230,8 +248,16 @@ def fox_setup_steps(message):
 def main():
     src = BOT.read_text(encoding="utf-8")
     if MARKER in src:
-        print("[inject_fox] already injected")
-        return
+        start = src.find(MARKER)
+        for em in [
+            "# ═══════════════════════════════════════════════════════════\n#  MAIN\n# ═══════════════════════════════════════════════════════════",
+            'if __name__ == "__main__":',
+        ]:
+            i = src.find(em, start)
+            if i != -1:
+                src = src[:start] + src[i:]
+                print("[inject_fox] removed old inject block")
+                break
     needle = "# ═══════════════════════════════════════════════════════════\n#  MAIN\n# ═══════════════════════════════════════════════════════════"
     if needle not in src:
         needle = 'if __name__ == "__main__":'
