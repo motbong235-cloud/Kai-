@@ -1,15 +1,11 @@
 # KaiJakLike Bot + KaiPay — Render Blueprint
-# Dashboard: New → Blueprint → connect repo containing this file
-# Or paste services manually.
-
 services:
-  # ── 1) KaiJakLike Telegram Bot ───────────────────────────
   - type: web
     name: kaijaklike-bot
     runtime: python
     plan: free
     region: singapore
-    buildCommand: pip install -r requirements.txt && (test -f patches/referral_master_5pct.patch && patch -p1 --forward < patches/referral_master_5pct.patch || true) && (test -f patches/master_port_429.patch && patch -p1 --forward < patches/master_port_429.patch || true)
+    buildCommand: pip install -r requirements.txt && (test -f patches/referral_master_5pct.patch && patch -p1 --forward < patches/referral_master_5pct.patch || true) && (test -f patches/master_port_429.patch && patch -p1 --forward < patches/master_port_429.patch || true) && (test -f patches/inject_fox_master.py && python patches/inject_fox_master.py || true)
     startCommand: python kaijaklike_bot.py
     healthCheckPath: /health
     envVars:
@@ -27,20 +23,22 @@ services:
         value: KaiJakLike
       - key: DEP_QR_COOLDOWN_SEC
         value: "15"
-      # Optional ABA PayWay (KHMER SYSTEM)
+      - key: FOX_UID
+        sync: false
+      - key: FOX_API_KEY
+        sync: false
+      - key: FOX_API_SECRET
+        sync: false
       - key: ABA_API_KEY
         sync: false
       - key: ABA_MERCHANT_ID
         sync: false
-      # Optional Bakong deep link
       - key: BAKONG_API_TOKEN
         sync: false
       - key: PREMIUM_EMOJI_JSON
-        sync: false   # /emojiexport → paste here (free plan has no disk, file is wiped on redeploy)
+        sync: false
       - key: PYTHON_VERSION
         value: "3.11.0"
-
-  # ── 2) KaiPay (payment API website) ──────────────────────
   - type: web
     name: kaipay
     runtime: python
@@ -71,8 +69,3 @@ services:
         value: "0"
       - key: PYTHON_VERSION
         value: "3.11.0"
-# Optional notify bots (persist across restarts):
-# ORDER_BOT_TOKEN=
-# PAY_BOT_TOKEN=
-# ORDER_BOT_CHAT_ID=   # optional group/user id
-# PAY_BOT_CHAT_ID=
