@@ -12741,6 +12741,12 @@ def _check_key():
     key = flask_request.args.get("key") or (flask_request.get_json(silent=True) or {}).get("key")
     return key == CONTROL_KEY
 
+@flask_app.route("/", methods=["GET", "HEAD"])
+def _root_ok():
+    # Render probes "/" with HEAD; answer 200 so the deploy passes its health check.
+    return "ok", 200
+
+
 @flask_app.route("/health")
 def health():
     return jsonify({"status": "running", "bot": _bot_brand()})
