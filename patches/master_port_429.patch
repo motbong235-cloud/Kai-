@@ -1,0 +1,64 @@
+--- a/kaijaklike_bot.py
++++ b/kaijaklike_bot.py
+@@ -1063,15 +1063,21 @@
+     return _BOT_USERNAME_CACHE["v"]
+ 
+-_BOT_BRAND_CACHE = {"v": None}
++_BOT_BRAND_CACHE = {"v": None, "fail_ts": 0}
+ def _bot_brand():
+-    """យកឈ្មោះ (display name) របស់ bot បច្ចុប្បន្នដើម្បីប្រើក្នុងសារទាំងឡាយ —
+-    ធានាថា Sub Bot នីមួយៗបង្ហាញឈ្មោះខ្លួនឯង មិនមែន 'Kaijaklike' ទេ។"""
++    """Display name — prefer BOT_DISPLAY_NAME; cache; back off on timeout/429."""
+     if _BOT_BRAND_CACHE["v"]:
+         return _BOT_BRAND_CACHE["v"]
++    env_name = (BOT_DISPLAY_NAME or "").strip()
++    if env_name:
++        _BOT_BRAND_CACHE["v"] = env_name
++        return env_name
++    if time.time() - float(_BOT_BRAND_CACHE.get("fail_ts") or 0) < 120:
++        return "Kaijaklike"
+     try:
+         _BOT_BRAND_CACHE["v"] = bot.get_me().first_name or "Kaijaklike"
+     except Exception as e:
++        _BOT_BRAND_CACHE["fail_ts"] = time.time()
+         logger.warning(f"[bot_brand] failed: {e}")
+-        _BOT_BRAND_CACHE["v"] = "Kaijaklike"
++        return "Kaijaklike"
+     return _BOT_BRAND_CACHE["v"]
+ 
+@@ -3900,11 +3906,15 @@
+             else:
+                 n_fail += 1
+-        except Exception:
++        except Exception as _re:
+             n_fail += 1
++            if "429" in str(_re) or "Too Many Requests" in str(_re):
++                logger.error("[channel repair] stopped early due to Telegram 429 flood control")
++                break
+         if n_ok + n_fail >= limit:
+             break
+         try:
+             import time as _time
+-            _time.sleep(0.05)
++            # was 0.05s — too fast, caused Telegram 429 Too Many Requests
++            _time.sleep(1.2)
+         except Exception:
+             pass
+@@ -12938,6 +12948,8 @@
+ 
+ def run_flask():
+-    logger.info(f"🌐 Control Server running on port {CONTROL_PORT}")
+-    flask_app.run(host="0.0.0.0", port=CONTROL_PORT, debug=False, use_reloader=False)
++    # Render Web Service binds $PORT; CONTROL_PORT is for local/multi-bot only.
++    port = int(os.environ.get("PORT") or CONTROL_PORT or 5056)
++    logger.info(f"🌐 Control Server running on port {port} (PORT env={os.environ.get('PORT')!r} CONTROL_PORT={CONTROL_PORT})")
++    flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+ 
+ def _self_ping():
+@@ -13054,5 +13066,5 @@
+                 if not globals().get("_CHANNEL_REPAIR_STARTED"):
+                     globals()["_CHANNEL_REPAIR_STARTED"] = True
+-                    threading.Thread(target=lambda: _repair_channel_order_messages(250), daemon=True).start()
++                    threading.Thread(target=lambda: _repair_channel_order_messages(40), daemon=True).start()
+             except Exception as _e:
+                 logger.debug("[channel repair start] %s", _e)
