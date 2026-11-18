@@ -86,6 +86,7 @@ def fox_admin_menu(message):
     kb.add(InlineKeyboardButton("📋 List Games", callback_data="fox:games", color="progress"))
     kb.add(InlineKeyboardButton("📈 Markup %", callback_data="fox:markup", color="progress"))
     kb.add(InlineKeyboardButton("➕ Add by ID (1 item)", callback_data="fox:addid", color="active"))
+    kb.add(InlineKeyboardButton("🗑 Remove Fox services", callback_data="fox:clear", color="danger"))
     bot.send_message(
         uid,
         f"🦊 <b>TopUpFox Reseller</b> <i>(Master only)</i>\n"
@@ -146,6 +147,25 @@ def fox_admin_cb(call):
             "/cancel ដើម្បីបោះបង់",
             parse_mode="HTML",
             reply_markup=cancel_kb(),
+        )
+        return
+    if act == "clear":
+        removed = 0
+        for slug in list(smm_services.keys()):
+            s = smm_services.get(slug) or {}
+            cat = str(s.get("category") or "")
+            if s.get("fox") or s.get("provider_id") == "fox" or "Fox" in cat or "fox" in cat.lower():
+                smm_services.pop(slug, None)
+                removed += 1
+        if removed:
+            _save(SMM_SVC_FILE, smm_services)
+        bot.send_message(
+            uid,
+            f"🗑 <b>Removed Fox services</b>\n"
+            f"លុប: <b>{removed}</b>\n"
+            f"Services នៅសល់: <b>{len(smm_services)}</b>",
+            parse_mode="HTML",
+            reply_markup=admin_kb(),
         )
         return
     if act == "games":
