@@ -95,7 +95,7 @@ def slug_for_item(game_code: str, item_code: str) -> str:
     s = "".join(out)
     while "__" in s:
         s = s.replace("__", "_")
-    return s[:80]
+    return s[:48]  # Telegram callback_data max 64 bytes
 
 
 def service_from_item(
@@ -112,14 +112,14 @@ def service_from_item(
     if rprice is None:
         rprice = item.get("price") or item.get("cost") or 0
     price = sell_price(float(rprice), markup_pct)
-    # Category = game type we add (not fixed "Game TopUp Fox")
+    # Plain game name — smm_cat_kb adds a single icon (avoid emoji x2)
     cat = str(gname or gcode or "Game").strip()
-    if not cat.startswith("🎮"):
-        cat = f"🎮 {cat}"
+    if cat.startswith("🎮"):
+        cat = cat[1:].lstrip()
     return {
-        "label": f"{gname} · {name}",
-        "description": f"TopUpFox · {gcode} · {icode}",
-        "category": cat,
+        "label": str(name),
+        "description": f"{gname} · {gcode} · {icode}",
+        "category": cat or gcode or "Game",
         "price": price,
         "min": 1,
         "max": 1,
