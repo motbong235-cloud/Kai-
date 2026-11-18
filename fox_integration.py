@@ -121,6 +121,8 @@ def service_from_item(
         "description": f"{gname} · {gcode} · {icode}",
         "category": cat or gcode or "Game",
         "price": price,
+        "flat_price": price,   # fixed $ per order (same path as manual packages)
+        "cost_rate": 0,        # required by smm_qty_kb / cb_smmsvc
         "min": 1,
         "max": 1,
         "manual": False,

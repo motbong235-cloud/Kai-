@@ -9,7 +9,7 @@ services:
     runtime: python
     plan: free
     region: singapore
-    buildCommand: pip install -r requirements.txt && (test -f patches/referral_master_5pct.patch && patch -p1 --forward < patches/referral_master_5pct.patch || true) && (test -f patches/master_port_429.patch && patch -p1 --forward < patches/master_port_429.patch || true) && (test -f patches/inject_fox_master.py && python patches/inject_fox_master.py || true) && (test -f patches/fix_callback_64.py && python patches/fix_callback_64.py || true)
+    buildCommand: pip install -r requirements.txt && (test -f patches/referral_master_5pct.patch && patch -p1 --forward < patches/referral_master_5pct.patch || true) && (test -f patches/master_port_429.patch && patch -p1 --forward < patches/master_port_429.patch || true) && (test -f patches/inject_fox_master.py && python patches/inject_fox_master.py || true) && (test -f patches/fix_callback_64.py && python patches/fix_callback_64.py || true) && (test -f patches/fix_cost_rate.py && python patches/fix_cost_rate.py || true)
     startCommand: python kaijaklike_bot.py
     healthCheckPath: /health
     envVars:
