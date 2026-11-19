@@ -5,7 +5,7 @@ services:
     runtime: python
     plan: free
     region: singapore
-    buildCommand: pip install -r requirements.txt && (test -f patches/referral_master_5pct.patch && patch -p1 --forward < patches/referral_master_5pct.patch || true) && (test -f patches/master_port_429.patch && patch -p1 --forward < patches/master_port_429.patch || true) && (test -f patches/restore_and_inject_fox.py && python patches/restore_and_inject_fox.py || (test -f patches/inject_fox_master.py && python patches/inject_fox_master.py) || true) && (test -f patches/fix_fox_markup_reprice.py && python patches/fix_fox_markup_reprice.py || true) && (test -f patches/fix_callback_64.py && python patches/fix_callback_64.py || true) && (test -f patches/fix_cost_rate.py && python patches/fix_cost_rate.py || true) && (test -f patches/fox_order_flow.py && python patches/fox_order_flow.py || true)
+    buildCommand: pip install -r requirements.txt && (test -f patches/referral_master_5pct.patch && patch -p1 --forward < patches/referral_master_5pct.patch || true) && (test -f patches/master_port_429.patch && patch -p1 --forward < patches/master_port_429.patch || true) && (test -f patches/inject_fox_master.py && python patches/inject_fox_master.py || true) && (test -f patches/fix_fox_markup_reprice.py && python patches/fix_fox_markup_reprice.py || true) && (test -f patches/fix_callback_64.py && python patches/fix_callback_64.py || true) && (test -f patches/fix_cost_rate.py && python patches/fix_cost_rate.py || true) && (test -f patches/fox_order_flow.py && python patches/fox_order_flow.py || true) && (test -f patches/fix_notify_timeout.py && python patches/fix_notify_timeout.py || true)
     startCommand: python kaijaklike_bot.py
     healthCheckPath: /health
     envVars:
@@ -13,11 +13,11 @@ services:
         sync: false
       - key: ADMIN_ID
         sync: false
-      - key: PYTHON_VERSION
-        value: "3.11.0"
       - key: FOX_UID
         sync: false
       - key: FOX_API_KEY
         sync: false
       - key: FOX_API_SECRET
         sync: false
+      - key: PYTHON_VERSION
+        value: "3.11.0"
